@@ -13,11 +13,13 @@ Tools are organized by category:
 - macros: Macro management tools
 - view: View and screenshot tools
 - validation: Object and document validation tools
+- assembly: Assembly semantics and coordinate-system alignment tools
 """
 
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from freecad_mcp.tools.assembly import register_assembly_tools
 from freecad_mcp.tools.documents import register_document_tools
 from freecad_mcp.tools.draft import register_draft_tools
 from freecad_mcp.tools.execution import register_execution_tools
@@ -31,6 +33,7 @@ from freecad_mcp.tools.view import register_view_tools
 
 __all__ = [
     "register_all_tools",
+    "register_assembly_tools",
     "register_document_tools",
     "register_draft_tools",
     "register_execution_tools",
@@ -61,3 +64,4 @@ def register_all_tools(mcp: Any, get_bridge_func: Callable[[], Awaitable[Any]]) 
     register_macro_tools(mcp, get_bridge_func)
     register_view_tools(mcp, get_bridge_func)
     register_validation_tools(mcp, get_bridge_func)
+    register_assembly_tools(mcp, get_bridge_func)

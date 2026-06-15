@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "freecad": {
+      "command": "/home/zhuxiaohai/.local/share/mise/shims/uv",
+      "args": [
+        "run",
+        "--project",
+        "/home/zhuxiaohai/projects/freecad-addon-robust-mcp-server",
+        "freecad-mcp"
+      ],
+      "env": {
+        "FREECAD_MODE": "xmlrpc",
+        "FREECAD_SOCKET_HOST": "localhost",
+        "FREECAD_XMLRPC_PORT": "9875",
+        "PATH": "/home/zhuxiaohai/.local/share/mise/shims:/home/zhuxiaohai/.local/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    },
+    "cad-render": {
+      "command": "/home/zhuxiaohai/miniforge3/bin/conda",
+      "args": [
+        "run",
+        "--no-capture-output",
+        "-n",
+        "cad-render-mcp",
+        "cad-render-mcp"
+      ],
+      "env": {}
+    }
+  }
+}

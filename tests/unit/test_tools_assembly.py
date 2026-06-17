@@ -59,6 +59,7 @@ class TestAssemblyTools:
             "create_local_coordinate_system",
             "find_faces_by_constraints",
             "get_mounting_features",
+            "list_assembly_state",
             "preview_or_highlight_references",
         }
 
@@ -85,6 +86,9 @@ class TestAssemblyTools:
         assert "normal_parallel_to" in code
         assert "external_only" in code
         assert "FreeCAD.getDocument('Doc')" in code
+        assert "center_local" in code
+        assert "normal_local" in code
+        assert "center_world" not in code
 
     @pytest.mark.asyncio
     async def test_find_faces_by_constraints_defaults_to_external_faces(
@@ -157,10 +161,11 @@ class TestAssemblyTools:
         assert result["hole_count"] == 4
         code = mock_bridge.execute_python.call_args.args[0]
         assert "face_name = 'Face19'" in code
-        assert "hole_array_center" in code
-        assert "primary_axis_candidates" in code
-        assert "tertiary_axis_candidates" in code
-        assert "bbox_center_to_face_center" in code
+        assert "connector_candidates" in code
+        assert "origin_local" in code
+        assert "primary_axis_local" in code
+        assert "tertiary_axis_local" in code
+        assert "origin_world" not in code
 
     @pytest.mark.asyncio
     async def test_create_local_coordinate_system_accepts_resolvers(
@@ -171,7 +176,7 @@ class TestAssemblyTools:
             return_value=self._success(
                 {
                     "name": "MountCS",
-                    "rotation_underconstrained": False,
+                    "contract": {"origin_local": [0, 0, 0]},
                 }
             )
         )
@@ -186,14 +191,19 @@ class TestAssemblyTools:
 
         assert result["name"] == "MountCS"
         code = mock_bridge.execute_python.call_args.args[0]
-        assert "RotationUnderconstrained" in code
+        assert "OriginLocal" in code
+        assert "PrimaryAxisLocal" in code
+        assert "TertiaryAxisLocal" in code
+        assert "ContractVersion" in code
+        assert "SemanticRole" in code
         assert "face_center" in code
         assert "bbox_center_to_face_center" in code
         assert "face_orientation_reference" in code
         assert "default_tertiary_face_ref" in code
         assert "tertiary_spec" in code
-        assert "TertiaryAxis" in code
-        assert "secondary_spec" not in code
+        assert "RotationUnderconstrained" not in code
+        assert "Origin =" not in code
+        assert "origin_world" not in code
         assert "tertiary.cross(primary)" in code
 
     @pytest.mark.asyncio
@@ -220,13 +230,36 @@ class TestAssemblyTools:
 
         assert result["moving_object"] == "Moving"
         code = mock_bridge.execute_python.call_args.args[0]
-        assert "target_x = fx if False else fx.negative()" in code
-        assert "target_z = fz" in code
+        assert "resolve_connector_world_frame" in code
+        assert "OriginLocal" in code
+        assert "target_x = fixed_frame" in code
         assert "target_y = target_z.cross(target_x)" in code
-        assert "target_tertiary" in code
-        assert "Coordinate system missing TertiaryAxis" in code
+        assert "RelationshipJson" in code
+        assert "observation" in code
+        assert "Connector {connector.Name} is missing local contract fields" in code
         assert "preserve_offset" not in code
         assert "[0, 0, 10]" in code
+
+    @pytest.mark.asyncio
+    async def test_list_assembly_state_returns_semantic_state(
+        self, register_tools, mock_bridge
+    ):
+        """list_assembly_state should expose connectors and relationships."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"objects": [], "relationships": []})
+        )
+
+        result = await register_tools["list_assembly_state"](
+            object_names=["Part"], doc_name="Doc"
+        )
+
+        assert result["objects"] == []
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert "object_names = ['Part']" in code
+        assert "RelationshipJson" in code
+        assert "OriginLocal" in code
+        assert "relationships" in code
+        assert "Faces" not in code
 
     @pytest.mark.asyncio
     async def test_preview_or_highlight_references_selects_subelements(

@@ -1,8 +1,7 @@
-"""Assembly semantics tools for deterministic FreeCAD operations.
+"""Assembly connector-contract tools for deterministic FreeCAD operations.
 
-These tools expose structured geometry queries and rigid alignment operations.
-They intentionally avoid natural language parsing; callers translate intent into
-explicit constraints and references before invoking these tools.
+The LLM supplies structured connector parameters. FreeCAD remains the
+deterministic adapter that resolves current geometry and placements.
 """
 
 from collections.abc import Awaitable, Callable
@@ -17,173 +16,7 @@ def _raise_if_failed(result: Any, message: str) -> dict[str, Any]:
 
 
 def register_assembly_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> None:
-    """Register assembly-oriented tools with the Robust MCP Server.
-
-    Args:
-        mcp: The FastMCP instance.
-        get_bridge: Async function to get the active bridge.
-    """
-
-    # Intentionally not exposed yet: the unfiltered topology payload can be very
-    # large on real parts. Prefer find_faces_by_constraints as the first pass.
-    # @mcp.tool()
-    async def analyze_shape_topology(
-        object_name: str,
-        doc_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Analyze a shape for deterministic assembly reasoning.
-
-        Args:
-            object_name: Name of the object to inspect.
-            doc_name: Document containing the object. Uses active document if None.
-
-        Returns:
-            Geometry summary including faces, cylinders, planar faces, edges,
-            bounding box, and face adjacency.
-        """
-        bridge = await get_bridge()
-        code = f"""
-import math
-
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
-if doc is None:
-    raise ValueError("No document found")
-
-obj = doc.getObject({object_name!r})
-if obj is None:
-    raise ValueError(f"Object not found: {object_name!r}")
-if not hasattr(obj, "Shape"):
-    raise ValueError("Object has no shape")
-
-shape = obj.Shape
-bb = shape.BoundBox
-tol = 1e-6
-
-def vec(v):
-    return [round(v.x, 6), round(v.y, 6), round(v.z, 6)]
-
-def bbox(b):
-    return [
-        round(b.XMin, 6), round(b.YMin, 6), round(b.ZMin, 6),
-        round(b.XMax, 6), round(b.YMax, 6), round(b.ZMax, 6),
-    ]
-
-def normal_at(face):
-    try:
-        pr = face.ParameterRange
-        return face.normalAt((pr[0] + pr[1]) / 2, (pr[2] + pr[3]) / 2)
-    except Exception:
-        return None
-
-def unit(vector):
-    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
-    result.normalize()
-    return result
-
-def scaled(vector, factor):
-    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
-    result.multiply(factor)
-    return result
-
-def is_external(face, normal):
-    if normal is None or not shape.Solids:
-        return None
-    try:
-        probe = face.CenterOfMass + scaled(unit(normal), 0.05)
-        return not shape.isInside(probe, 1e-5, True)
-    except Exception:
-        return None
-
-def face_adjacency():
-    adjacent = {{i: set() for i in range(1, len(shape.Faces) + 1)}}
-    for i, f1 in enumerate(shape.Faces, start=1):
-        for j in range(i + 1, len(shape.Faces) + 1):
-            f2 = shape.Faces[j - 1]
-            shared = False
-            for e1 in f1.Edges:
-                for e2 in f2.Edges:
-                    if e1.isSame(e2):
-                        shared = True
-                        break
-                if shared:
-                    break
-            if shared:
-                adjacent[i].add(j)
-                adjacent[j].add(i)
-    return {{f"Face{{k}}": [f"Face{{v}}" for v in sorted(vals)] for k, vals in adjacent.items()}}
-
-faces = []
-planes = []
-cylinders = []
-for idx, face in enumerate(shape.Faces, start=1):
-    surface = face.Surface
-    surface_type = surface.__class__.__name__
-    center = face.CenterOfMass
-    fb = face.BoundBox
-    normal = normal_at(face)
-    item = {{
-        "face": f"Face{{idx}}",
-        "index": idx,
-        "surface_type": surface_type,
-        "area": face.Area,
-        "center": vec(center),
-        "bbox": bbox(fb),
-        "bbox_size": [round(fb.XLength, 6), round(fb.YLength, 6), round(fb.ZLength, 6)],
-        "normal": vec(normal) if normal is not None else None,
-        "is_external": is_external(face, normal),
-        "edge_count": len(face.Edges),
-    }}
-    if surface_type == "Cylinder":
-        item.update({{
-            "radius": surface.Radius,
-            "axis": vec(surface.Axis),
-            "axis_point": vec(surface.Center),
-        }})
-        cylinders.append(item)
-    if surface_type == "Plane":
-        planes.append(item)
-    faces.append(item)
-
-edges = []
-for idx, edge in enumerate(shape.Edges, start=1):
-    eb = edge.BoundBox
-    curve_type = edge.Curve.__class__.__name__ if hasattr(edge, "Curve") else "Unknown"
-    edges.append({{
-        "edge": f"Edge{{idx}}",
-        "index": idx,
-        "curve_type": curve_type,
-        "length": edge.Length,
-        "center": vec(edge.CenterOfMass),
-        "bbox": bbox(eb),
-    }})
-
-_result_ = {{
-    "object_name": obj.Name,
-    "label": obj.Label,
-    "shape_type": shape.ShapeType,
-    "is_valid": shape.isValid(),
-    "is_closed": shape.isClosed(),
-    "volume": shape.Volume if hasattr(shape, "Volume") else None,
-    "area": shape.Area,
-    "bbox": bbox(bb),
-    "bbox_size": [bb.XLength, bb.YLength, bb.ZLength],
-    "center_of_mass": vec(shape.CenterOfMass),
-    "counts": {{
-        "faces": len(shape.Faces),
-        "edges": len(shape.Edges),
-        "vertices": len(shape.Vertexes),
-        "planes": len(planes),
-        "cylinders": len(cylinders),
-    }},
-    "faces": faces,
-    "planes": planes,
-    "cylinders": cylinders,
-    "edges": edges,
-    "adjacency": face_adjacency(),
-}}
-"""
-        result = await bridge.execute_python(code)
-        return _raise_if_failed(result, "Analyze shape topology failed")
+    """Register assembly-oriented tools with the Robust MCP Server."""
 
     @mcp.tool()
     async def find_faces_by_constraints(
@@ -191,20 +24,10 @@ _result_ = {{
         constraints: dict[str, Any],
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Find faces matching structured geometric constraints.
+        """Find faces matching structured local geometric constraints.
 
-        Args:
-            object_name: Name of the object to inspect.
-            constraints: Structured constraints. Supported keys include:
-                surface_type, normal_parallel_to, normal_same_direction_to,
-                bbox_side, min_area, external_only, region_hint, contains_hole_axes,
-                min_hole_count, max_hole_count, min_hole_radius, and max_hole_radius.
-                Hole-radius bounds use each hole's largest cylindrical radius and
-                combine with AND when both are set. Omit a bound to leave it open.
-            doc_name: Document containing the object. Uses active document if None.
-
-        Returns:
-            Ranked candidate faces with scores and deterministic reasons.
+        Constraint vectors and regions are interpreted in the object's local
+        geometry frame. Returned candidate geometry is local-only.
         """
         bridge = await get_bridge()
         code = f"""
@@ -240,6 +63,9 @@ def scaled(vector, factor):
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
 
+def bbox_values(b):
+    return [round(b.XMin, 6), round(b.YMin, 6), round(b.ZMin, 6), round(b.XMax, 6), round(b.YMax, 6), round(b.ZMax, 6)]
+
 def face_normal(face):
     try:
         pr = face.ParameterRange
@@ -254,9 +80,6 @@ def external(face, normal):
         return not shape.isInside(face.CenterOfMass + scaled(normal, 0.05), 1e-5, True)
     except Exception:
         return None
-
-def bbox_values(b):
-    return [b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax]
 
 def side_matches(face, side):
     fbb = face.BoundBox
@@ -305,17 +128,7 @@ def projected_axis_point(surface, face, normal):
     offset = center - face.CenterOfMass
     return center - scaled(normal, offset.dot(normal))
 
-def hole_key(surface, face, normal):
-    center = projected_axis_point(surface, face, normal)
-    axis = canonical_axis(surface.Axis)
-    return (
-        round(center.x, 3), round(center.y, 3), round(center.z, 3),
-        round(axis.x, 3), round(axis.y, 3), round(axis.z, 3),
-    )
-
 def overlaps_face_region(surface_bbox, face_bbox, normal):
-    # Ignore the axis normal to the mounting face. Hole cylinders/cones often
-    # start behind a chamfer and do not touch the mounting face bbox in that axis.
     ax = max(
         [("x", abs(normal.x)), ("y", abs(normal.y)), ("z", abs(normal.z))],
         key=lambda item: item[1],
@@ -345,15 +158,18 @@ def cylinder_holes_for_face(face, normal, axes):
             axis_ok = axis_ok and abs(axis.dot(unit(v(axis_hint)))) > 0.98
         if not axis_ok:
             continue
-        obb = other.BoundBox
-        if overlaps_face_region(obb, face_bb, normal):
+        if overlaps_face_region(other.BoundBox, face_bb, normal):
             face_name = f"Face{{cidx}}"
             matched_faces.append(face_name)
-            key = hole_key(other.Surface, face, normal)
             projected = projected_axis_point(other.Surface, face, normal)
+            canon_axis = canonical_axis(other.Surface.Axis)
+            key = (
+                round(projected.x, 3), round(projected.y, 3), round(projected.z, 3),
+                round(canon_axis.x, 3), round(canon_axis.y, 3), round(canon_axis.z, 3),
+            )
             hole = holes_by_key.setdefault(key, {{
-                "axis_point": arr(projected),
-                "axis": arr(canonical_axis(other.Surface.Axis)),
+                "axis_point_local": arr(projected),
+                "axis_local": arr(canon_axis),
                 "surface_types": [],
                 "radii": [],
                 "faces": [],
@@ -365,7 +181,7 @@ def cylinder_holes_for_face(face, normal, axes):
             if radius and radius not in hole["radii"]:
                 hole["radii"].append(radius)
     holes = list(holes_by_key.values())
-    holes.sort(key=lambda h: (h["axis_point"][0], h["axis_point"][1], h["axis_point"][2]))
+    holes.sort(key=lambda h: (h["axis_point_local"][0], h["axis_point_local"][1], h["axis_point_local"][2]))
     for hole in holes:
         hole["radii"].sort()
     return {{"faces": matched_faces, "holes": holes}}
@@ -485,9 +301,9 @@ for idx, face in enumerate(shape.Faces, start=1):
         "score": round(score, 6),
         "reasons": reasons,
         "area": face.Area,
-        "center": arr(face.CenterOfMass),
-        "normal": arr(normal) if normal is not None else None,
-        "bbox": bbox_values(face.BoundBox),
+        "center_local": arr(face.CenterOfMass),
+        "normal_local": arr(normal) if normal is not None else None,
+        "bbox_local": bbox_values(face.BoundBox),
         "is_external": is_ext,
         "matching_hole_faces": hole_faces,
         "matching_holes": holes,
@@ -507,16 +323,7 @@ _result_ = {{"object_name": obj.Name, "constraints": constraints, "candidates": 
         face: str,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Extract deterministic mounting features from a face.
-
-        Args:
-            object_name: Name of the object to inspect.
-            face: Face reference such as "Face19".
-            doc_name: Document containing the object. Uses active document if None.
-
-        Returns:
-            Face frame candidates, hole features, hole-array center, and useful axes.
-        """
+        """Extract local connector candidates from a mounting face."""
         bridge = await get_bridge()
         code = f"""
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
@@ -538,12 +345,6 @@ mount_face = shape.Faces[face_index]
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
 
-def normal_at(f):
-    pr = f.ParameterRange
-    result = f.normalAt((pr[0] + pr[1]) / 2, (pr[2] + pr[3]) / 2)
-    result.normalize()
-    return result
-
 def unit(vector):
     result = FreeCAD.Vector(vector.x, vector.y, vector.z)
     result.normalize()
@@ -552,6 +353,12 @@ def unit(vector):
 def scaled(vector, factor):
     result = FreeCAD.Vector(vector.x, vector.y, vector.z)
     result.multiply(factor)
+    return result
+
+def normal_at(f):
+    pr = f.ParameterRange
+    result = f.normalAt((pr[0] + pr[1]) / 2, (pr[2] + pr[3]) / 2)
+    result.normalize()
     return result
 
 def canonical_axis(axis):
@@ -569,14 +376,6 @@ def projected_axis_point(surface, face, normal):
     offset = center - face.CenterOfMass
     return center - scaled(normal, offset.dot(normal))
 
-def hole_key(surface, face, normal):
-    center = projected_axis_point(surface, face, normal)
-    axis = canonical_axis(surface.Axis)
-    return (
-        round(center.x, 3), round(center.y, 3), round(center.z, 3),
-        round(axis.x, 3), round(axis.y, 3), round(axis.z, 3),
-    )
-
 def overlaps_face_region(surface_bbox, face_bbox, normal):
     ax = max(
         [("x", abs(normal.x)), ("y", abs(normal.y)), ("z", abs(normal.z))],
@@ -591,9 +390,6 @@ def overlaps_face_region(surface_bbox, face_bbox, normal):
         checks.append(not (surface_bbox.ZMax < face_bbox.ZMin or surface_bbox.ZMin > face_bbox.ZMax))
     return all(checks)
 
-normal = normal_at(mount_face)
-face_bb = mount_face.BoundBox
-
 def projected_face_axis(vector, normal):
     axis = vector - scaled(normal, vector.dot(normal))
     if axis.Length <= 1e-9:
@@ -601,91 +397,102 @@ def projected_face_axis(vector, normal):
     axis.normalize()
     return axis
 
+normal = normal_at(mount_face)
+face_bb = mount_face.BoundBox
 bbox_center_axis = projected_face_axis(mount_face.CenterOfMass - shape.BoundBox.Center, normal)
-holes = []
+
+holes_by_key = {{}}
+hole_faces = []
 for idx, f in enumerate(shape.Faces, start=1):
     surface_type = f.Surface.__class__.__name__
     if surface_type not in ["Cylinder", "Cone"]:
         continue
-    axis = FreeCAD.Vector(f.Surface.Axis.x, f.Surface.Axis.y, f.Surface.Axis.z)
-    axis.normalize()
+    axis = unit(f.Surface.Axis)
     if abs(axis.dot(normal)) < 0.98:
         continue
-    b = f.BoundBox
-    if overlaps_face_region(b, face_bb, normal):
-        canon_axis = canonical_axis(f.Surface.Axis)
-        projected = projected_axis_point(f.Surface, mount_face, normal)
-        holes.append({{
-            "face": f"Face{{idx}}",
-            "surface_type": surface_type,
-            "radius": getattr(f.Surface, "Radius", 0.0),
-            "axis": arr(axis),
-            "canonical_axis": arr(canon_axis),
-            "axis_point": arr(projected),
-            "surface_axis_point": arr(f.Surface.Center),
-            "center": arr(f.CenterOfMass),
-            "bbox": [b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax],
-        }})
-
-unique_by_key = {{}}
-for hole_face in holes:
-    # Re-key by the already projected point and canonical axis from the face item.
+    if not overlaps_face_region(f.BoundBox, face_bb, normal):
+        continue
+    canon_axis = canonical_axis(f.Surface.Axis)
+    projected = projected_axis_point(f.Surface, mount_face, normal)
+    face_ref = f"Face{{idx}}"
+    hole_faces.append(face_ref)
     key = (
-        round(hole_face["axis_point"][0], 3),
-        round(hole_face["axis_point"][1], 3),
-        round(hole_face["axis_point"][2], 3),
-        round(hole_face["canonical_axis"][0], 3),
-        round(hole_face["canonical_axis"][1], 3),
-        round(hole_face["canonical_axis"][2], 3),
+        round(projected.x, 3), round(projected.y, 3), round(projected.z, 3),
+        round(canon_axis.x, 3), round(canon_axis.y, 3), round(canon_axis.z, 3),
     )
-    unique = unique_by_key.setdefault(key, {{
-        "axis_point": hole_face["axis_point"],
-        "axis": hole_face["canonical_axis"],
+    hole = holes_by_key.setdefault(key, {{
+        "axis_point_local": arr(projected),
+        "axis_local": arr(canon_axis),
         "surface_types": [],
         "radii": [],
         "faces": [],
     }})
-    unique["faces"].append(hole_face["face"])
-    if hole_face["surface_type"] not in unique["surface_types"]:
-        unique["surface_types"].append(hole_face["surface_type"])
-    radius = round(hole_face["radius"], 6)
-    if radius and radius not in unique["radii"]:
-        unique["radii"].append(radius)
-unique_holes = list(unique_by_key.values())
-unique_holes.sort(key=lambda h: (h["axis_point"][0], h["axis_point"][1], h["axis_point"][2]))
-for unique in unique_holes:
-    unique["radii"].sort()
+    hole["faces"].append(face_ref)
+    if surface_type not in hole["surface_types"]:
+        hole["surface_types"].append(surface_type)
+    radius = round(getattr(f.Surface, "Radius", 0.0), 6)
+    if radius and radius not in hole["radii"]:
+        hole["radii"].append(radius)
+
+unique_holes = list(holes_by_key.values())
+unique_holes.sort(key=lambda h: (h["axis_point_local"][0], h["axis_point_local"][1], h["axis_point_local"][2]))
+for hole in unique_holes:
+    hole["radii"].sort()
 
 hole_array_center = None
 if unique_holes:
-    sx = sum(h["axis_point"][0] for h in unique_holes) / len(unique_holes)
-    sy = sum(h["axis_point"][1] for h in unique_holes) / len(unique_holes)
-    sz = sum(h["axis_point"][2] for h in unique_holes) / len(unique_holes)
-    hole_array_center = [round(sx, 6), round(sy, 6), round(sz, 6)]
+    hole_array_center = [
+        round(sum(h["axis_point_local"][0] for h in unique_holes) / len(unique_holes), 6),
+        round(sum(h["axis_point_local"][1] for h in unique_holes) / len(unique_holes), 6),
+        round(sum(h["axis_point_local"][2] for h in unique_holes) / len(unique_holes), 6),
+    ]
+
+tertiary = bbox_center_axis
+if tertiary is None:
+    trial = FreeCAD.Vector(0, 0, 1)
+    if abs(normal.dot(trial)) > 0.95:
+        trial = FreeCAD.Vector(0, 1, 0)
+    tertiary = projected_face_axis(trial, normal)
+secondary = tertiary.cross(normal)
+secondary.normalize()
+
+connector_candidates = [
+    {{
+        "name_hint": f"{{obj.Name}}_{{face_name}}_face_center",
+        "semantic_role": "mounting_face",
+        "origin_local": arr(mount_face.CenterOfMass),
+        "primary_axis_local": arr(normal),
+        "secondary_axis_local": arr(secondary),
+        "tertiary_axis_local": arr(tertiary),
+        "source_features": {{
+            "resolver": "face_center",
+            "face": face_name,
+            "hole_faces": hole_faces,
+        }},
+    }}
+]
+if hole_array_center is not None:
+    connector_candidates.append({{
+        "name_hint": f"{{obj.Name}}_{{face_name}}_hole_array",
+        "semantic_role": "hole_array_mount",
+        "origin_local": hole_array_center,
+        "primary_axis_local": arr(normal),
+        "secondary_axis_local": arr(secondary),
+        "tertiary_axis_local": arr(tertiary),
+        "source_features": {{
+            "resolver": "hole_array_center",
+            "face": face_name,
+            "hole_faces": hole_faces,
+        }},
+    }})
 
 _result_ = {{
     "object_name": obj.Name,
     "face": face_name,
     "surface_type": mount_face.Surface.__class__.__name__,
-    "face_center": arr(mount_face.CenterOfMass),
-    "face_normal": arr(normal),
-    "face_bbox": [face_bb.XMin, face_bb.YMin, face_bb.ZMin, face_bb.XMax, face_bb.YMax, face_bb.ZMax],
-    "holes": holes,
-    "cylindrical_face_count": len(holes),
     "unique_holes": unique_holes,
-    "unique_hole_count": len(unique_holes),
     "hole_count": len(unique_holes),
-    "hole_array_center": hole_array_center,
-    "primary_axis_candidates": {{
-        "face_normal": arr(normal),
-    }},
-    "tertiary_axis_candidates": {{
-        "bbox_center_to_face_center": arr(bbox_center_axis) if bbox_center_axis is not None else None,
-    }},
-    "origin_candidates": {{
-        "face_center": arr(mount_face.CenterOfMass),
-        "hole_array_center": hole_array_center,
-    }},
+    "connector_candidates": connector_candidates,
 }}
 """
         result = await bridge.execute_python(code)
@@ -699,25 +506,18 @@ _result_ = {{
         primary_axis: list[float] | dict[str, Any],
         tertiary_axis: list[float] | dict[str, Any] | None = None,
         reference_face: str | None = None,
+        semantic_role: str = "connector",
+        source_features: dict[str, Any] | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Create a deterministic local coordinate system marker.
+        """Create a local connector contract and derived marker.
 
-        Args:
-            object_name: Reference object name.
-            name: Name for the coordinate system marker object.
-            origin: Explicit point or resolver dict.
-            primary_axis: Explicit vector or resolver dict for local X.
-            tertiary_axis: Optional explicit vector or resolver dict for local Z.
-                Local Y is computed automatically as Z cross X.
-            reference_face: Optional face reference for face-based resolvers.
-            doc_name: Document containing the object. Uses active document if None.
-
-        Returns:
-            Created coordinate system marker and resolved axes.
+        The persisted contract contains local frame fields only. The marker
+        shape is resolved from the current object placement and is not truth.
         """
         bridge = await get_bridge()
         code = f"""
+import json
 import Part
 
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
@@ -734,9 +534,30 @@ origin_spec = {origin!r}
 primary_spec = {primary_axis!r}
 tertiary_spec = {tertiary_axis!r}
 reference_face = {reference_face!r}
+semantic_role = {semantic_role!r}
+source_features = {source_features!r} or {{}}
 
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
+
+def unit(vector):
+    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
+    result.normalize()
+    return result
+
+def scaled(vector, factor):
+    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
+    result.multiply(factor)
+    return result
+
+def object_placement(o):
+    return o.getGlobalPlacement() if hasattr(o, "getGlobalPlacement") else o.Placement
+
+def local_point_to_world(o, point):
+    return object_placement(o).multVec(point)
+
+def local_axis_to_world(o, axis):
+    return object_placement(o).Rotation.multVec(axis)
 
 def face_from_ref(ref):
     if not ref:
@@ -750,16 +571,6 @@ def normal_at(face):
     pr = face.ParameterRange
     result = face.normalAt((pr[0] + pr[1]) / 2, (pr[2] + pr[3]) / 2)
     result.normalize()
-    return result
-
-def unit(vector):
-    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
-    result.normalize()
-    return result
-
-def scaled(vector, factor):
-    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
-    result.multiply(factor)
     return result
 
 def canonical_axis(axis):
@@ -887,77 +698,122 @@ def resolve_axis(spec):
         return axis
     raise ValueError(f"Unsupported axis resolver: {{kind}}")
 
-origin_vec = resolve_origin(origin_spec)
-primary = resolve_axis(primary_spec)
-if primary is None or primary.Length <= 1e-9:
+def basis_from_primary_tertiary(primary, tertiary):
+    primary = unit(primary)
+    tertiary = tertiary - scaled(primary, primary.dot(tertiary))
+    if tertiary.Length <= 1e-9:
+        raise ValueError("Tertiary axis cannot be parallel to primary axis")
+    tertiary.normalize()
+    secondary = tertiary.cross(primary)
+    secondary.normalize()
+    return primary, secondary, tertiary
+
+def connector_contract(connector):
+    return {{
+        "name": connector.Name,
+        "reference_object": connector.ReferenceObject,
+        "reference_face": connector.ReferenceFace,
+        "origin_local": arr(connector.OriginLocal),
+        "primary_axis_local": arr(connector.PrimaryAxisLocal),
+        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
+        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
+        "semantic_role": connector.SemanticRole,
+        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
+        "contract_version": connector.ContractVersion,
+    }}
+
+def placement_info(o):
+    placement = object_placement(o)
+    return {{
+        "base": arr(placement.Base),
+        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
+    }}
+
+def describe_assembly_object(o):
+    connectors = []
+    for candidate in doc.Objects:
+        if getattr(candidate, "ReferenceObject", None) == o.Name and hasattr(candidate, "OriginLocal"):
+            connectors.append(connector_contract(candidate))
+    return {{
+        "name": o.Name,
+        "label": o.Label,
+        "type_id": o.TypeId,
+        "placement": placement_info(o),
+        "connectors": connectors,
+    }}
+
+def build_observation(touched):
+    return {{
+        "document": doc.Name,
+        "objects": [describe_assembly_object(o) for o in touched],
+        "relationships": [],
+        "warnings": [],
+    }}
+
+origin_local = resolve_origin(origin_spec)
+primary_local = resolve_axis(primary_spec)
+if primary_local is None or primary_local.Length <= 1e-9:
     raise ValueError("Primary axis must be non-zero")
 
-tertiary = resolve_axis(tertiary_spec)
+tertiary_local = resolve_axis(tertiary_spec)
 default_tertiary_face_ref = reference_face
 if default_tertiary_face_ref is None and isinstance(primary_spec, dict):
     default_tertiary_face_ref = primary_spec.get("face")
-if tertiary is None and default_tertiary_face_ref is not None:
+if tertiary_local is None and default_tertiary_face_ref is not None:
     default_tertiary_face = face_from_ref(default_tertiary_face_ref)
-    tertiary = face_orientation_reference(default_tertiary_face)
-underconstrained = tertiary is None
-if tertiary is not None:
-    tertiary = tertiary - scaled(primary, primary.dot(tertiary))
-    tertiary.normalize()
-    if tertiary.Length <= 1e-9:
-        raise ValueError("Tertiary axis cannot be parallel to primary axis")
-    secondary = tertiary.cross(primary)
-    secondary.normalize()
-else:
+    tertiary_local = face_orientation_reference(default_tertiary_face)
+if tertiary_local is None:
     trial = FreeCAD.Vector(0, 0, 1)
-    if abs(primary.dot(trial)) > 0.95:
+    if abs(primary_local.dot(trial)) > 0.95:
         trial = FreeCAD.Vector(0, 1, 0)
-    secondary = trial - scaled(primary, primary.dot(trial))
-    secondary.normalize()
+    tertiary_local = projected_face_axis(trial, primary_local)
+primary_local, secondary_local, tertiary_local = basis_from_primary_tertiary(primary_local, tertiary_local)
 
-if tertiary is None:
-    tertiary = primary.cross(secondary)
-    tertiary.normalize()
 axis_len = max(shape.BoundBox.DiagonalLength * 0.08, 10.0)
+marker_origin = local_point_to_world(obj, origin_local)
+marker_primary = unit(local_axis_to_world(obj, primary_local))
+marker_secondary = unit(local_axis_to_world(obj, secondary_local))
+marker_tertiary = unit(local_axis_to_world(obj, tertiary_local))
 axes_shape = Part.makeCompound([
-    Part.makeLine(origin_vec, origin_vec + scaled(primary, axis_len)),
-    Part.makeLine(origin_vec, origin_vec + scaled(secondary, axis_len * 0.8)),
-    Part.makeLine(origin_vec, origin_vec + scaled(tertiary, axis_len * 0.6)),
+    Part.makeLine(marker_origin, marker_origin + scaled(marker_primary, axis_len)),
+    Part.makeLine(marker_origin, marker_origin + scaled(marker_secondary, axis_len * 0.8)),
+    Part.makeLine(marker_origin, marker_origin + scaled(marker_tertiary, axis_len * 0.6)),
 ])
 
-doc.openTransaction("Create Local Coordinate System")
+doc.openTransaction("Create Connector Contract")
 try:
-    csys = doc.addObject("Part::Feature", {name!r})
-    csys.Shape = axes_shape
-    csys.addProperty("App::PropertyString", "ReferenceObject", "Assembly")
-    csys.addProperty("App::PropertyString", "ReferenceFace", "Assembly")
-    csys.addProperty("App::PropertyVector", "Origin", "Assembly")
-    csys.addProperty("App::PropertyVector", "PrimaryAxis", "Assembly")
-    csys.addProperty("App::PropertyVector", "SecondaryAxis", "Assembly")
-    csys.addProperty("App::PropertyVector", "TertiaryAxis", "Assembly")
-    csys.addProperty("App::PropertyBool", "RotationUnderconstrained", "Assembly")
-    csys.ReferenceObject = obj.Name
-    csys.ReferenceFace = reference_face or ""
-    csys.Origin = origin_vec
-    csys.PrimaryAxis = primary
-    csys.SecondaryAxis = secondary
-    csys.TertiaryAxis = tertiary
-    csys.RotationUnderconstrained = underconstrained
+    connector = doc.addObject("Part::Feature", {name!r})
+    connector.Shape = axes_shape
+    connector.addProperty("App::PropertyString", "ReferenceObject", "Assembly")
+    connector.addProperty("App::PropertyString", "ReferenceFace", "Assembly")
+    connector.addProperty("App::PropertyVector", "OriginLocal", "Assembly")
+    connector.addProperty("App::PropertyVector", "PrimaryAxisLocal", "Assembly")
+    connector.addProperty("App::PropertyVector", "SecondaryAxisLocal", "Assembly")
+    connector.addProperty("App::PropertyVector", "TertiaryAxisLocal", "Assembly")
+    connector.addProperty("App::PropertyString", "SemanticRole", "Assembly")
+    connector.addProperty("App::PropertyString", "SourceFeaturesJson", "Assembly")
+    connector.addProperty("App::PropertyInteger", "ContractVersion", "Assembly")
+    connector.ReferenceObject = obj.Name
+    connector.ReferenceFace = reference_face or ""
+    connector.OriginLocal = origin_local
+    connector.PrimaryAxisLocal = primary_local
+    connector.SecondaryAxisLocal = secondary_local
+    connector.TertiaryAxisLocal = tertiary_local
+    connector.SemanticRole = semantic_role
+    connector.SourceFeaturesJson = json.dumps(source_features, sort_keys=True)
+    connector.ContractVersion = 1
     doc.recompute()
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
     raise
 
+contract = connector_contract(connector)
 _result_ = {{
-    "name": csys.Name,
-    "label": csys.Label,
-    "reference_object": obj.Name,
-    "reference_face": reference_face,
-    "origin": arr(origin_vec),
-    "primary_axis": arr(primary),
-    "tertiary_axis": arr(tertiary),
-    "secondary_axis": arr(secondary),
-    "rotation_underconstrained": underconstrained,
+    "name": connector.Name,
+    "label": connector.Label,
+    "contract": contract,
+    "observation": build_observation([obj]),
 }}
 """
         result = await bridge.execute_python(code)
@@ -971,25 +827,15 @@ _result_ = {{
         fixed_csys: str,
         flip_primary: bool = False,
         preserve_offset: list[float] | None = None,
+        debug: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Align a moving object by matching two local coordinate systems.
-
-        Args:
-            moving_object: Object to transform.
-            moving_csys: Coordinate system attached to the moving object.
-            fixed_object: Fixed reference object name.
-            fixed_csys: Coordinate system attached to the fixed object.
-            flip_primary: If False, align moving primary to opposite fixed primary.
-                If True, align moving primary to the same fixed primary direction.
-            preserve_offset: Optional offset applied in target coordinate axes.
-            doc_name: Document containing the objects. Uses active document if None.
-
-        Returns:
-            Placement before/after, transform matrix, and residual alignment error.
-        """
+        """Align a moving object by matching two local connector contracts."""
         bridge = await get_bridge()
         code = f"""
+import json
+import Part
+
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
@@ -1003,18 +849,15 @@ if moving is None:
 if fixed is None:
     raise ValueError(f"Fixed object not found: {fixed_object!r}")
 if mcs is None:
-    raise ValueError(f"Moving coordinate system not found: {moving_csys!r}")
+    raise ValueError(f"Moving connector not found: {moving_csys!r}")
 if fcs is None:
-    raise ValueError(f"Fixed coordinate system not found: {fixed_csys!r}")
+    raise ValueError(f"Fixed connector not found: {fixed_csys!r}")
+for connector in [mcs, fcs]:
+    if not hasattr(connector, "OriginLocal"):
+        raise ValueError(f"Connector {{connector.Name}} is missing local contract fields")
 
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
-
-def placement_info(obj):
-    return {{
-        "base": arr(obj.Placement.Base),
-        "rotation": list(obj.Placement.Rotation.toEuler()),
-    }}
 
 def unit(vector):
     result = FreeCAD.Vector(vector.x, vector.y, vector.z)
@@ -1026,21 +869,31 @@ def scaled(vector, factor):
     result.multiply(factor)
     return result
 
-def basis_from_xz(primary, tertiary):
+def object_placement(o):
+    return o.getGlobalPlacement() if hasattr(o, "getGlobalPlacement") else o.Placement
+
+def local_point_to_world(o, point):
+    return object_placement(o).multVec(point)
+
+def local_axis_to_world(o, axis):
+    return object_placement(o).Rotation.multVec(axis)
+
+def placement_info(o):
+    placement = object_placement(o)
+    return {{
+        "base": arr(placement.Base),
+        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
+    }}
+
+def basis_from_primary_tertiary(primary, tertiary):
     x = unit(primary)
-    z_raw = FreeCAD.Vector(tertiary)
-    z = z_raw - scaled(x, z_raw.dot(x))
+    z = FreeCAD.Vector(tertiary) - scaled(x, FreeCAD.Vector(tertiary).dot(x))
     if z.Length <= 1e-9:
-        raise ValueError("Coordinate system tertiary axis is parallel to primary")
+        raise ValueError("Connector tertiary axis is parallel to primary axis")
     z.normalize()
     y = z.cross(x)
     y.normalize()
     return x, y, z
-
-def basis(csys):
-    if not hasattr(csys, "TertiaryAxis"):
-        raise ValueError("Coordinate system missing TertiaryAxis")
-    return basis_from_xz(csys.PrimaryAxis, csys.TertiaryAxis)
 
 def matrix_from_frame(origin, x, y, z):
     m = FreeCAD.Matrix()
@@ -1050,17 +903,72 @@ def matrix_from_frame(origin, x, y, z):
     m.A14, m.A24, m.A34 = origin.x, origin.y, origin.z
     return m
 
-mx, my, mz = basis(mcs)
-fx, fy, fz = basis(fcs)
-target_x = fx if {flip_primary} else fx.negative()
-target_z = fz
-target_z = target_z - scaled(target_x, target_z.dot(target_x))
+def connector_contract(connector):
+    return {{
+        "name": connector.Name,
+        "reference_object": connector.ReferenceObject,
+        "reference_face": connector.ReferenceFace,
+        "origin_local": arr(connector.OriginLocal),
+        "primary_axis_local": arr(connector.PrimaryAxisLocal),
+        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
+        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
+        "semantic_role": connector.SemanticRole,
+        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
+        "contract_version": connector.ContractVersion,
+    }}
+
+def resolve_connector_world_frame(o, connector):
+    origin = local_point_to_world(o, FreeCAD.Vector(connector.OriginLocal))
+    primary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.PrimaryAxisLocal)))
+    tertiary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.TertiaryAxisLocal)))
+    x, y, z = basis_from_primary_tertiary(primary, tertiary)
+    return {{"origin": origin, "x": x, "y": y, "z": z}}
+
+def refresh_marker(o, connector):
+    if not hasattr(o, "Shape"):
+        return
+    frame = resolve_connector_world_frame(o, connector)
+    length = max(o.Shape.BoundBox.DiagonalLength * 0.08, 10.0)
+    connector.Shape = Part.makeCompound([
+        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["x"], length)),
+        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["y"], length * 0.8)),
+        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["z"], length * 0.6)),
+    ])
+
+def describe_assembly_object(o):
+    connectors = []
+    for candidate in doc.Objects:
+        if getattr(candidate, "ReferenceObject", None) == o.Name and hasattr(candidate, "OriginLocal"):
+            connectors.append(connector_contract(candidate))
+    return {{
+        "name": o.Name,
+        "label": o.Label,
+        "type_id": o.TypeId,
+        "placement": placement_info(o),
+        "connectors": connectors,
+    }}
+
+def relationship_payload(error):
+    return {{
+        "type": "aligned",
+        "moving_object": moving.Name,
+        "moving_connector": mcs.Name,
+        "fixed_object": fixed.Name,
+        "fixed_connector": fcs.Name,
+        "flip_primary": {flip_primary},
+        "alignment_error": error,
+    }}
+
+moving_frame = resolve_connector_world_frame(moving, mcs)
+fixed_frame = resolve_connector_world_frame(fixed, fcs)
+target_x = fixed_frame["x"] if {flip_primary} else fixed_frame["x"].negative()
+target_z = fixed_frame["z"] - scaled(target_x, fixed_frame["z"].dot(target_x))
 if target_z.Length <= 1e-9:
     raise ValueError("Target tertiary axis is parallel to target primary axis")
 target_z.normalize()
 target_y = target_z.cross(target_x)
 target_y.normalize()
-target_origin = FreeCAD.Vector(fcs.Origin)
+target_origin = FreeCAD.Vector(fixed_frame["origin"])
 offset = {preserve_offset!r}
 if offset is not None:
     target_origin = (
@@ -1070,60 +978,172 @@ if offset is not None:
         + scaled(target_z, float(offset[2]))
     )
 
-moving_frame = matrix_from_frame(FreeCAD.Vector(mcs.Origin), mx, my, mz)
-target_frame = matrix_from_frame(target_origin, target_x, target_y, target_z)
-delta = FreeCAD.Placement(target_frame).multiply(FreeCAD.Placement(moving_frame).inverse())
+source_matrix = matrix_from_frame(moving_frame["origin"], moving_frame["x"], moving_frame["y"], moving_frame["z"])
+target_matrix = matrix_from_frame(target_origin, target_x, target_y, target_z)
+delta = FreeCAD.Placement(target_matrix).multiply(FreeCAD.Placement(source_matrix).inverse())
 
 before = placement_info(moving)
-doc.openTransaction("Align Coordinate Systems")
+doc.openTransaction("Align Connector Contracts")
 try:
     moving.Placement = delta.multiply(moving.Placement)
-    mcs.Placement = delta.multiply(mcs.Placement)
-    mcs.Origin = delta.multVec(FreeCAD.Vector(mcs.Origin))
-    mcs.PrimaryAxis = unit(delta.Rotation.multVec(FreeCAD.Vector(mcs.PrimaryAxis)))
-    mcs.SecondaryAxis = unit(delta.Rotation.multVec(FreeCAD.Vector(mcs.SecondaryAxis)))
-    if hasattr(mcs, "TertiaryAxis"):
-        mcs.TertiaryAxis = unit(delta.Rotation.multVec(FreeCAD.Vector(mcs.TertiaryAxis)))
+    doc.recompute()
+    refresh_marker(moving, mcs)
+    refresh_marker(fixed, fcs)
     doc.recompute()
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
     raise
 
-after = placement_info(moving)
-origin_error = (FreeCAD.Vector(mcs.Origin) - target_origin).Length
-primary_error = 1.0 - abs(unit(FreeCAD.Vector(mcs.PrimaryAxis)).dot(target_x))
-secondary_error = 1.0 - abs(unit(FreeCAD.Vector(mcs.SecondaryAxis)).dot(target_y))
-if hasattr(mcs, "TertiaryAxis"):
-    tertiary_error = 1.0 - abs(unit(FreeCAD.Vector(mcs.TertiaryAxis)).dot(target_z))
+aligned_frame = resolve_connector_world_frame(moving, mcs)
+origin_error = (aligned_frame["origin"] - target_origin).Length
+primary_error = 1.0 - abs(aligned_frame["x"].dot(target_x))
+secondary_error = 1.0 - abs(aligned_frame["y"].dot(target_y))
+tertiary_error = 1.0 - abs(aligned_frame["z"].dot(target_z))
+alignment_error = {{
+    "origin": round(origin_error, 9),
+    "primary_axis": round(primary_error, 9),
+    "secondary_axis": round(secondary_error, 9),
+    "tertiary_axis": round(tertiary_error, 9),
+}}
+
+relationship = relationship_payload(alignment_error)
+relationship_name = f"AssemblyRelation_{{moving.Name}}_{{mcs.Name}}_to_{{fixed.Name}}_{{fcs.Name}}"
+existing = doc.getObject(relationship_name)
+doc.openTransaction("Record Assembly Relationship")
+try:
+    rel = existing or doc.addObject("App::FeaturePython", relationship_name)
+    if not hasattr(rel, "RelationshipJson"):
+        rel.addProperty("App::PropertyString", "RelationshipJson", "Assembly")
+    rel.RelationshipJson = json.dumps(relationship, sort_keys=True)
+    doc.recompute()
+    doc.commitTransaction()
+except Exception:
+    doc.abortTransaction()
+    raise
+
 mat = delta.toMatrix()
+observation = {{
+    "document": doc.Name,
+    "objects": [describe_assembly_object(moving), describe_assembly_object(fixed)],
+    "relationships": [relationship],
+    "warnings": [],
+}}
 _result_ = {{
     "moving_object": moving.Name,
     "fixed_object": fixed.Name,
-    "moving_csys": mcs.Name,
-    "fixed_csys": fcs.Name,
+    "moving_connector": mcs.Name,
+    "fixed_connector": fcs.Name,
     "before": before,
-    "after": after,
+    "after": placement_info(moving),
     "transform_matrix": [
         [mat.A11, mat.A12, mat.A13, mat.A14],
         [mat.A21, mat.A22, mat.A23, mat.A24],
         [mat.A31, mat.A32, mat.A33, mat.A34],
         [0.0, 0.0, 0.0, 1.0],
     ],
-    "target_primary": arr(target_x),
-    "target_secondary": arr(target_y),
-    "target_tertiary": arr(target_z),
-    "target_origin": arr(target_origin),
-    "alignment_error": {{
-        "origin": origin_error,
-        "primary": primary_error,
-        "secondary": secondary_error,
-        "tertiary": tertiary_error,
-    }},
+    "alignment_error": alignment_error,
+    "relationship": relationship,
+    "observation": observation,
 }}
+if {debug}:
+    _result_["resolved_frames"] = {{
+        "moving_before": {{"origin": arr(moving_frame["origin"]), "primary": arr(moving_frame["x"]), "secondary": arr(moving_frame["y"]), "tertiary": arr(moving_frame["z"])}},
+        "fixed_target": {{"origin": arr(target_origin), "primary": arr(target_x), "secondary": arr(target_y), "tertiary": arr(target_z)}},
+        "moving_after": {{"origin": arr(aligned_frame["origin"]), "primary": arr(aligned_frame["x"]), "secondary": arr(aligned_frame["y"]), "tertiary": arr(aligned_frame["z"])}},
+    }}
 """
         result = await bridge.execute_python(code)
         return _raise_if_failed(result, "Align coordinate systems failed")
+
+    @mcp.tool()
+    async def list_assembly_state(
+        object_names: list[str] | None = None,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """List assembly objects, local connector contracts, and relationships."""
+        bridge = await get_bridge()
+        code = f"""
+import json
+
+object_names = {object_names!r}
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No document found")
+
+def arr(vec):
+    return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
+
+def object_placement(o):
+    return o.getGlobalPlacement() if hasattr(o, "getGlobalPlacement") else o.Placement
+
+def placement_info(o):
+    placement = object_placement(o)
+    return {{
+        "base": arr(placement.Base),
+        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
+    }}
+
+def connector_contract(connector):
+    return {{
+        "name": connector.Name,
+        "reference_object": connector.ReferenceObject,
+        "reference_face": connector.ReferenceFace,
+        "origin_local": arr(connector.OriginLocal),
+        "primary_axis_local": arr(connector.PrimaryAxisLocal),
+        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
+        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
+        "semantic_role": connector.SemanticRole,
+        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
+        "contract_version": connector.ContractVersion,
+    }}
+
+selected = set(object_names or [])
+connectors_by_object = {{}}
+warnings = []
+for candidate in doc.Objects:
+    if hasattr(candidate, "OriginLocal") and hasattr(candidate, "ReferenceObject"):
+        ref = candidate.ReferenceObject
+        if doc.getObject(ref) is None:
+            warnings.append(f"Connector {{candidate.Name}} references missing object {{ref}}")
+        connectors_by_object.setdefault(ref, []).append(candidate)
+        if not selected and ref:
+            selected.add(ref)
+
+objects = []
+for name in sorted(selected):
+    obj = doc.getObject(name)
+    if obj is None:
+        warnings.append(f"Assembly object not found: {{name}}")
+        continue
+    objects.append({{
+        "name": obj.Name,
+        "label": obj.Label,
+        "type_id": obj.TypeId,
+        "placement": placement_info(obj),
+        "connectors": [connector_contract(c) for c in connectors_by_object.get(obj.Name, [])],
+    }})
+
+relationships = []
+for candidate in doc.Objects:
+    if hasattr(candidate, "RelationshipJson"):
+        try:
+            rel = json.loads(candidate.RelationshipJson or "{{}}")
+        except Exception:
+            warnings.append(f"Relationship {{candidate.Name}} has invalid JSON")
+            continue
+        if not object_names or rel.get("moving_object") in selected or rel.get("fixed_object") in selected:
+            relationships.append(rel)
+
+_result_ = {{
+    "document": doc.Name,
+    "objects": objects,
+    "relationships": relationships,
+    "warnings": warnings,
+}}
+"""
+        result = await bridge.execute_python(code)
+        return _raise_if_failed(result, "List assembly state failed")
 
     @mcp.tool()
     async def preview_or_highlight_references(
@@ -1135,20 +1155,7 @@ _result_ = {{
         colors: dict[str, list[float]] | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Highlight faces/edges and create preview point/axis markers.
-
-        Args:
-            object_name: Object containing face/edge references.
-            faces: Face references such as ["Face19"].
-            edges: Edge references such as ["Edge3"].
-            points: Preview points as [[x, y, z], ...].
-            axes: Preview axes with origin, direction, and optional length.
-            colors: Optional color map with face/edge/point/axis RGB values.
-            doc_name: Document containing the object. Uses active document if None.
-
-        Returns:
-            Highlight result and created preview marker names.
-        """
+        """Highlight faces/edges and create preview point/axis markers."""
         bridge = await get_bridge()
         code = f"""
 import Part

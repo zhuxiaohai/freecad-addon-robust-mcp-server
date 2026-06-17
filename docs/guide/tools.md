@@ -426,6 +426,65 @@ Tools marked with **GUI** only work when FreeCAD is running in GUI mode.
 
 ---
 
+## Assembly Connector Tools
+
+> **Requires FreeCAD 1.1+** — uses `Part::LocalCoordinateSystem` for automatic state tracking.
+
+Implements the ArtiCAD connector schema `c = (name, origin ∈ ℝ³, primary_axis ẑ, tertiary_axis x̂, semantic_label)`.
+The LLM layer is software-free: only explicit `[x, y, z]` values are passed to connectors.
+FreeCAD adapts them internally into `Part::LocalCoordinateSystem` objects that follow part movement.
+
+### Discovery (adapter-specific, returns explicit coordinates)
+
+| Tool                          | Description                                                    |
+| ----------------------------- | -------------------------------------------------------------- |
+| `get_mounting_features`       | Extract connector candidates from a face — returns `[x,y,z]`   |
+| `find_faces_by_constraints`   | Find faces by geometric constraints (normal, area, hole count) |
+
+### Connector Creation and Alignment
+
+| Tool                         | Description                                                                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_connector`           | Create a `Part::LocalCoordinateSystem` connector on a part. Accepts only `list[float]` inputs, no resolver dicts. Returns `_global` and `_local` coordinates. |
+| `align_coordinate_systems`   | Align moving part by matching two connector frames (SE(3) transform)                                                                                          |
+
+### State Observation (geometric object list)
+
+| Tool                              | Description                                                                                                                          |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `list_assembly_state`             | Returns global-frame coords of all parts and connectors for reflective modeling. `include_local=True` adds local-frame debug fields. |
+| `preview_or_highlight_references` | Highlight faces/edges and draw axis preview markers                                                                                  |
+
+### Two-Phase Workflow
+
+```python
+# Phase 1: Discover candidates (adapter returns explicit coordinates)
+result = await get_mounting_features(object_name="PART_A", face="Face19")
+candidate = result["connector_candidates"][0]
+
+# Phase 2: Create connector (LLM passes plain numbers only)
+await create_connector(
+    object_name="PART_A",
+    name="mount_A",
+    origin=candidate["origin_local"],       # list[float]
+    primary_axis=candidate["primary_axis_local"],
+    tertiary_axis=candidate["tertiary_axis_local"],
+    semantic_label="top mounting face bolt pattern center",
+)
+
+# Phase 3: Align
+await align_coordinate_systems(
+    moving_object="PART_A", moving_csys="mount_A",
+    fixed_object="PART_B",  fixed_csys="mount_B",
+)
+
+# Phase 4: Verify (global coords for reflective modeling)
+state = await list_assembly_state()
+# state["objects"][i]["connectors"][j]["origin_global"] — live world position
+```
+
+---
+
 ## GUI vs Headless Mode
 
 When running in headless mode, GUI-only tools return structured errors instead of crashing:

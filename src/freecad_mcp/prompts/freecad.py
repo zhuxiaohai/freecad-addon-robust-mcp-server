@@ -125,6 +125,7 @@ For detailed guidance on specific tasks, use the `freecad-guidance` prompt with:
 - `task_type="boolean"` - Boolean operations
 - `task_type="debugging"` - Troubleshooting
 - `task_type="validation"` - Checking model health
+- `task_type="assembly"` - Assembly connector workflow (ArtiCAD connector schema)
 
 Or read the full `freecad://best-practices` resource for comprehensive documentation.
 """
@@ -150,6 +151,7 @@ Or read the full `freecad://best-practices` resource for comprehensive documenta
                 - "export": File export operations
                 - "debugging": Troubleshooting issues
                 - "validation": Checking model health
+                - "assembly": Assembly connector workflow (ArtiCAD schema)
 
         Returns:
             Targeted guidance for the task type.
@@ -469,6 +471,76 @@ safe_execute(
 - Object.State - FreeCAD error flags
 - Shape existence - Object has geometry
 - Recompute state - Object up to date""",
+            "assembly": """# Assembly Connector Workflow (ArtiCAD Schema)
+
+## Architecture: Three-Layer Separation
+
+1. **Discovery layer** (adapter): `get_mounting_features`, `find_faces_by_constraints`
+   - Analyzes B-rep geometry
+   - Returns explicit `[x, y, z]` coordinates — NO B-rep face names in output
+2. **LLM layer** (software-free): passes only plain `list[float]` values + `semantic_label`
+3. **Execution layer** (adapter): `create_connector`, `align_coordinate_systems`, `list_assembly_state`
+
+## Connector Definition (ArtiCAD Eq. 2)
+
+`c = (name, origin ∈ ℝ³, primary_axis ẑ ∈ S², tertiary_axis x̂ ∈ S², semantic_label l)`
+
+All coordinates passed to `create_connector` are in the **part's local frame**.
+
+## Two-Phase Workflow
+
+### Phase 1: Discover candidates
+```python
+# Returns connector_candidates with explicit [x,y,z] values
+result = await get_mounting_features(object_name="BODEN_VORN", face="Face19")
+# Pick a candidate, e.g.:
+# origin = result["connector_candidates"][0]["origin_local"]
+# primary_axis = result["connector_candidates"][0]["primary_axis_local"]
+# tertiary_axis = result["connector_candidates"][0]["tertiary_axis_local"]
+```
+
+### Phase 2: Create connector (software-free parameters only)
+```python
+await create_connector(
+    object_name="BODEN_VORN",
+    name="front_mount_A",
+    origin=[805.02, 354.59, -26.60],    # from get_mounting_features
+    primary_axis=[0.0, 0.0, 1.0],        # from get_mounting_features
+    tertiary_axis=[1.0, 0.0, 0.0],       # from get_mounting_features
+    semantic_label="top face bolt pattern center - primary mounting face",
+    source_features=candidate["source_features"],  # provenance metadata
+)
+# Returns contract with both origin_local and origin_global
+# LCS auto-tracks part movement via FreeCAD recompute
+```
+
+### Phase 3: Align parts
+```python
+await align_coordinate_systems(
+    moving_object="BODEN_VORN",
+    moving_csys="front_mount_A",
+    fixed_object="SEITENBLECH",
+    fixed_csys="bracket_mount_B",
+    # flip_primary=False (default) = antiparallel normals (mating faces)
+)
+# Returns observation with global coordinates for verification
+```
+
+### Phase 4: Verify via geometric object list
+```python
+state = await list_assembly_state()
+# state["objects"][i]["global_position"] = current world position
+# state["objects"][i]["connectors"][j]["origin_global"] = connector world origin
+# Use these for reflective modeling: compare with expected positions
+```
+
+## Key Rules
+- **LLM MUST pass only `list[float]` to `create_connector`** — no resolver dicts, no face names
+- `origin_local` is INVARIANT: does not change when part moves
+- `origin_global` is LIVE: computed on-query from `lcs.getGlobalPlacement()`
+- `include_local=True` in `list_assembly_state` for debugging local frames
+- Requires FreeCAD 1.1+ for `Part::LocalCoordinateSystem`
+- Legacy `Part::Feature` connectors are still readable for backward compatibility""",
         }
 
         return guidance.get(task_type, guidance["general"])

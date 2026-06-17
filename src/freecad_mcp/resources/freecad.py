@@ -1472,6 +1472,90 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         },
                     ],
                 },
+                "assembly": {
+                    "description": (
+                        "Assembly connector tools for deterministic part alignment. "
+                        "Implements ArtiCAD connector schema (origin, primary_axis, tertiary_axis, "
+                        "semantic_label) backed by Part::LocalCoordinateSystem for automatic "
+                        "state tracking. LLM passes only explicit [x,y,z] values (software-free "
+                        "intermediate layer). Requires FreeCAD 1.1+."
+                    ),
+                    "note": (
+                        "Two-phase workflow: (1) discover candidates via get_mounting_features "
+                        "which returns explicit [x,y,z] coordinates; (2) create connectors via "
+                        "create_connector passing those coordinates. list_assembly_state returns "
+                        "global world-frame coordinates for reflective modeling."
+                    ),
+                    "tools": [
+                        {
+                            "name": "get_mounting_features",
+                            "description": (
+                                "Extract connector candidates from a mounting face. Returns "
+                                "explicit [x,y,z] origin, primary_axis, tertiary_axis candidates "
+                                "for use as create_connector input."
+                            ),
+                            "key_params": ["object_name", "face"],
+                        },
+                        {
+                            "name": "find_faces_by_constraints",
+                            "description": (
+                                "Find faces matching geometric constraints (surface type, normal "
+                                "direction, hole count, area, etc.). Returns scored candidates "
+                                "with local coordinates."
+                            ),
+                            "key_params": ["object_name", "constraints"],
+                        },
+                        {
+                            "name": "create_connector",
+                            "description": (
+                                "Create a connector on a part as a Part::LocalCoordinateSystem "
+                                "(FreeCAD 1.1+). Accepts only explicit list[float] coordinates - "
+                                "no resolver dicts. The LCS tracks part movement automatically. "
+                                "Returns contract with both local and global coordinates."
+                            ),
+                            "key_params": [
+                                "object_name",
+                                "name",
+                                "origin",
+                                "primary_axis",
+                                "tertiary_axis",
+                                "semantic_label",
+                            ],
+                        },
+                        {
+                            "name": "align_coordinate_systems",
+                            "description": (
+                                "Align a moving part by matching two connector frames. Computes "
+                                "SE(3) rigid transform, updates moving.Placement, and triggers "
+                                "FreeCAD recompute so all LCS connectors auto-update."
+                            ),
+                            "key_params": [
+                                "moving_object",
+                                "moving_csys",
+                                "fixed_object",
+                                "fixed_csys",
+                                "flip_primary",
+                            ],
+                        },
+                        {
+                            "name": "list_assembly_state",
+                            "description": (
+                                "List assembly parts and connectors as a geometric object list "
+                                "with global world-frame coordinates (ToolCAD reflective modeling "
+                                "pattern). Set include_local=True for local-frame debug fields."
+                            ),
+                            "key_params": ["object_names", "include_local"],
+                        },
+                        {
+                            "name": "preview_or_highlight_references",
+                            "description": (
+                                "Highlight faces/edges and create preview point/axis markers "
+                                "for visual verification of assembly references."
+                            ),
+                            "key_params": ["object_name", "faces", "points", "axes"],
+                        },
+                    ],
+                },
                 "validation": {
                     "description": "Object and document validation for error detection",
                     "tools": [

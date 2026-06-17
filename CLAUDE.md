@@ -2077,6 +2077,33 @@ The MCP server provides a `freecad://capabilities` resource that returns a compl
 | `list_parts_library`       | List available parts in FreeCAD's parts library. |
 | `insert_part_from_library` | Insert a part from the library.                  |
 
+### Assembly Connector Tools (Requires FreeCAD 1.1+)
+
+Implements the ArtiCAD connector schema. LLM layer is software-free: only explicit
+`list[float]` values are passed. FreeCAD adapter creates `Part::LocalCoordinateSystem`
+objects that automatically track part movement.
+
+**Discovery tools** (return explicit `[x,y,z]` from B-rep analysis):
+
+| Tool                          | Description                                                    |
+| ----------------------------- | -------------------------------------------------------------- |
+| `get_mounting_features`       | Extract connector candidates from a face (returns `[x,y,z]`).  |
+| `find_faces_by_constraints`   | Find faces by geometric constraints (normal, area, holes).     |
+
+**Connector creation and alignment** (LLM passes plain numbers only):
+
+| Tool                         | Description                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `create_connector`           | Create a `Part::LocalCoordinateSystem` connector on a part. Accepts only `list[float]` inputs. FreeCAD 1.1+. |
+| `align_coordinate_systems`   | Align moving part by matching two connector frames (SE(3) rigid transform).                                  |
+
+**State observation** (geometric object list, global coords for reflective modeling):
+
+| Tool                              | Description                                                                                    |
+| --------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `list_assembly_state`             | Global-frame positions of all parts and connectors. `include_local=True` adds debug fields.    |
+| `preview_or_highlight_references` | Highlight faces/edges and draw axis preview markers.                                           |
+
 ### Example: Debugging a Macro
 
 To debug issues with a macro running in FreeCAD:

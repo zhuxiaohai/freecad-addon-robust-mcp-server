@@ -1,7 +1,24 @@
 """Assembly connector-contract tools for deterministic FreeCAD operations.
 
-The LLM supplies structured connector parameters. FreeCAD remains the
-deterministic adapter that resolves current geometry and placements.
+The LLM supplies structured connector parameters as a software-free intermediate
+layer. FreeCAD remains the deterministic adapter that creates and tracks connector
+frames via Part::LocalCoordinateSystem objects attached to parts.
+
+Three-layer architecture:
+  - Discovery (adapter-specific): get_mounting_features, find_faces_by_constraints
+    scan B-rep geometry and return explicit [x,y,z] candidates.
+  - LLM layer (software-free): receives explicit coordinates, adds semantic labels,
+    calls create_connector with plain list[float] values only.
+  - Execution (adapter-specific): create_connector, align_coordinate_systems,
+    list_assembly_state operate on FreeCAD objects directly.
+
+Connector state tracking:
+  Part::LocalCoordinateSystem objects are attached to reference parts via
+  AttachmentSupport + MapMode="ObjectXY". When a part moves, FreeCAD recompute
+  updates the LCS automatically. list_assembly_state reads lcs.getGlobalPlacement()
+  on-query to return the current world-frame coordinates.
+
+Requires FreeCAD 1.1+ for Part::LocalCoordinateSystem support.
 """
 
 from collections.abc import Awaitable, Callable
@@ -499,26 +516,48 @@ _result_ = {{
         return _raise_if_failed(result, "Get mounting features failed")
 
     @mcp.tool()
-    async def create_local_coordinate_system(
+    async def create_connector(
         object_name: str,
         name: str,
-        origin: list[float] | dict[str, Any],
-        primary_axis: list[float] | dict[str, Any],
-        tertiary_axis: list[float] | dict[str, Any] | None = None,
-        reference_face: str | None = None,
-        semantic_role: str = "connector",
+        origin: list[float],
+        primary_axis: list[float],
+        tertiary_axis: list[float],
+        semantic_label: str = "",
         source_features: dict[str, Any] | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Create a local connector contract and derived marker.
+        """Create a connector on a part as a Part::LocalCoordinateSystem (LCS).
 
-        The persisted contract contains local frame fields only. The marker
-        shape is resolved from the current object placement and is not truth.
+        The connector tracks the part's movement automatically via FreeCAD's
+        parametric attachment system. All input coordinates are in the part's
+        local frame (as returned by get_mounting_features candidates).
+
+        This tool implements the software-free intermediate layer: the LLM passes
+        only explicit [x, y, z] values derived from discovery tools. No B-rep
+        face references or resolver types are accepted.
+
+        The observation returned contains global coordinates reflecting the
+        connector's current world-frame position for reflective modeling.
+
+        Requires FreeCAD 1.1+.
+
+        Args:
+            object_name: Name of the part object to attach the connector to.
+            name: Unique identifier for this connector in the document.
+            origin: [x, y, z] origin point in the part's local frame.
+            primary_axis: [x, y, z] primary axis unit vector (assembly direction /
+                face normal). Corresponds to ArtiCAD connector ẑ.
+            tertiary_axis: [x, y, z] reference axis unit vector (orientation
+                reference, perpendicular to primary). Corresponds to ArtiCAD x̂.
+            semantic_label: Human-readable description of the connector's purpose,
+                e.g. "top face bolt pattern center". Corresponds to ArtiCAD label l.
+            source_features: Optional provenance metadata forwarded from
+                get_mounting_features candidates (face name, resolver type, etc.).
+            doc_name: Document name, defaults to active document.
         """
         bridge = await get_bridge()
         code = f"""
 import json
-import Part
 
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
@@ -526,15 +565,11 @@ if doc is None:
 obj = doc.getObject({object_name!r})
 if obj is None:
     raise ValueError(f"Object not found: {object_name!r}")
-if not hasattr(obj, "Shape"):
-    raise ValueError("Object has no shape")
 
-shape = obj.Shape
-origin_spec = {origin!r}
-primary_spec = {primary_axis!r}
-tertiary_spec = {tertiary_axis!r}
-reference_face = {reference_face!r}
-semantic_role = {semantic_role!r}
+origin_raw = {origin!r}
+primary_raw = {primary_axis!r}
+tertiary_raw = {tertiary_axis!r}
+semantic_label = {semantic_label!r}
 source_features = {source_features!r} or {{}}
 
 def arr(vec):
@@ -550,274 +585,135 @@ def scaled(vector, factor):
     result.multiply(factor)
     return result
 
-def object_placement(o):
-    return o.getGlobalPlacement() if hasattr(o, "getGlobalPlacement") else o.Placement
+# Validate: only explicit list[float] accepted - no resolver dicts
+if not isinstance(origin_raw, (list, tuple)) or len(origin_raw) != 3:
+    raise TypeError(f"origin must be a list of 3 floats, got: {{type(origin_raw).__name__}}")
+if not isinstance(primary_raw, (list, tuple)) or len(primary_raw) != 3:
+    raise TypeError(f"primary_axis must be a list of 3 floats, got: {{type(primary_raw).__name__}}")
+if not isinstance(tertiary_raw, (list, tuple)) or len(tertiary_raw) != 3:
+    raise TypeError(f"tertiary_axis must be a list of 3 floats, got: {{type(tertiary_raw).__name__}}")
 
-def local_point_to_world(o, point):
-    return object_placement(o).multVec(point)
+origin_local = FreeCAD.Vector(float(origin_raw[0]), float(origin_raw[1]), float(origin_raw[2]))
+primary_local = FreeCAD.Vector(float(primary_raw[0]), float(primary_raw[1]), float(primary_raw[2]))
+tertiary_raw_vec = FreeCAD.Vector(float(tertiary_raw[0]), float(tertiary_raw[1]), float(tertiary_raw[2]))
 
-def local_axis_to_world(o, axis):
-    return object_placement(o).Rotation.multVec(axis)
+if primary_local.Length <= 1e-9:
+    raise ValueError("primary_axis must be non-zero")
+primary_local = unit(primary_local)
 
-def face_from_ref(ref):
-    if not ref:
-        return None
-    idx = int(str(ref).replace("Face", "")) - 1
-    if idx < 0 or idx >= len(shape.Faces):
-        raise ValueError(f"Invalid face reference: {{ref}}")
-    return shape.Faces[idx]
+# Build orthonormal basis: primary->X, tertiary->Z (projected perp to primary), secondary=ZxX->Y
+tertiary_local = tertiary_raw_vec - scaled(primary_local, tertiary_raw_vec.dot(primary_local))
+if tertiary_local.Length <= 1e-9:
+    raise ValueError("tertiary_axis cannot be parallel to primary_axis")
+tertiary_local.normalize()
+secondary_local = tertiary_local.cross(primary_local)
+secondary_local.normalize()
 
-def normal_at(face):
-    pr = face.ParameterRange
-    result = face.normalAt((pr[0] + pr[1]) / 2, (pr[2] + pr[3]) / 2)
-    result.normalize()
-    return result
+# Build AttachmentOffset as 4x4 matrix: columns = [primary, secondary, tertiary, origin]
+# This encodes the connector frame in the part's local coordinate system.
+# Reading back: Rotation.multVec([1,0,0]) = primary, [0,1,0] = secondary, [0,0,1] = tertiary
+m = FreeCAD.Matrix()
+m.A11, m.A21, m.A31 = primary_local.x, primary_local.y, primary_local.z
+m.A12, m.A22, m.A32 = secondary_local.x, secondary_local.y, secondary_local.z
+m.A13, m.A23, m.A33 = tertiary_local.x, tertiary_local.y, tertiary_local.z
+m.A14, m.A24, m.A34 = origin_local.x, origin_local.y, origin_local.z
+attachment_offset = FreeCAD.Placement(m)
 
-def canonical_axis(axis):
-    axis = unit(axis)
-    vals = [axis.x, axis.y, axis.z]
-    for val in vals:
-        if abs(val) > 1e-9:
-            if val < 0:
-                axis = FreeCAD.Vector(-axis.x, -axis.y, -axis.z)
-            break
-    return axis
+# Require FreeCAD 1.1+ for Part::LocalCoordinateSystem
+ver = App.Version()
+ver_major = int(str(ver[0])) if str(ver[0]).isdigit() else 0
+ver_minor = int(str(ver[1])) if len(ver) > 1 and str(ver[1]).isdigit() else 0
+if (ver_major, ver_minor) < (1, 1):
+    raise RuntimeError(
+        f"Part::LocalCoordinateSystem requires FreeCAD 1.1+. "
+        f"Detected version: {{ver_major}}.{{ver_minor}}"
+    )
 
-def projected_axis_point(surface, face, normal):
-    center = surface.Center
-    offset = center - face.CenterOfMass
-    return center - scaled(normal, offset.dot(normal))
-
-def overlaps_face_region(surface_bbox, face_bbox, normal):
-    ax = max(
-        [("x", abs(normal.x)), ("y", abs(normal.y)), ("z", abs(normal.z))],
-        key=lambda item: item[1],
-    )[0]
-    checks = []
-    if ax != "x":
-        checks.append(not (surface_bbox.XMax < face_bbox.XMin or surface_bbox.XMin > face_bbox.XMax))
-    if ax != "y":
-        checks.append(not (surface_bbox.YMax < face_bbox.YMin or surface_bbox.YMin > face_bbox.YMax))
-    if ax != "z":
-        checks.append(not (surface_bbox.ZMax < face_bbox.ZMin or surface_bbox.ZMin > face_bbox.ZMax))
-    return all(checks)
-
-def hole_features_for_face(face):
-    normal = normal_at(face)
-    face_bb = face.BoundBox
-    unique_by_key = {{}}
-    for f in shape.Faces:
-        surface_type = f.Surface.__class__.__name__
-        if surface_type not in ["Cylinder", "Cone"]:
-            continue
-        axis = unit(f.Surface.Axis)
-        if abs(axis.dot(normal)) <= 0.98:
-            continue
-        if not overlaps_face_region(f.BoundBox, face_bb, normal):
-            continue
-        projected = projected_axis_point(f.Surface, face, normal)
-        canon_axis = canonical_axis(f.Surface.Axis)
-        key = (
-            round(projected.x, 3), round(projected.y, 3), round(projected.z, 3),
-            round(canon_axis.x, 3), round(canon_axis.y, 3), round(canon_axis.z, 3),
-        )
-        unique_by_key.setdefault(key, {{
-            "axis_point": projected,
-            "axis": canon_axis,
-        }})
-    holes = list(unique_by_key.values())
-    holes.sort(key=lambda h: (h["axis_point"].x, h["axis_point"].y, h["axis_point"].z))
-    return holes
-
-def projected_face_axis(vector, normal):
-    axis = vector - scaled(normal, vector.dot(normal))
-    if axis.Length <= 1e-9:
-        return None
-    axis.normalize()
-    return axis
-
-def face_orientation_reference(face):
-    return projected_face_axis(face.CenterOfMass - shape.BoundBox.Center, normal_at(face))
-
-def resolve_origin(spec):
-    if isinstance(spec, (list, tuple)):
-        return FreeCAD.Vector(float(spec[0]), float(spec[1]), float(spec[2]))
-    kind = spec.get("type")
-    face = face_from_ref(spec.get("face") or reference_face)
-    if kind == "explicit":
-        p = spec["point"]
-        return FreeCAD.Vector(float(p[0]), float(p[1]), float(p[2]))
-    if kind == "face_center":
-        if face is None:
-            raise ValueError("face_center origin requires a face")
-        return face.CenterOfMass
-    if kind == "bbox_center":
-        return shape.BoundBox.Center
-    if kind in ["hole_array_center", "hole_center"]:
-        if face is None:
-            raise ValueError(f"{{kind}} origin requires a face")
-        holes = hole_features_for_face(face)
-        if not holes:
-            raise ValueError("No matching cylindrical hole axes found")
-        if kind == "hole_center":
-            return holes[int(spec.get("index", 0))]["axis_point"]
-        return FreeCAD.Vector(
-            sum(h["axis_point"].x for h in holes) / len(holes),
-            sum(h["axis_point"].y for h in holes) / len(holes),
-            sum(h["axis_point"].z for h in holes) / len(holes),
-        )
-    raise ValueError(f"Unsupported origin resolver: {{kind}}")
-
-def resolve_axis(spec):
-    if spec is None:
-        return None
-    if isinstance(spec, (list, tuple)):
-        return unit(FreeCAD.Vector(float(spec[0]), float(spec[1]), float(spec[2])))
-    kind = spec.get("type")
-    face = face_from_ref(spec.get("face") or reference_face)
-    if kind == "explicit":
-        a = spec["vector"]
-        return unit(FreeCAD.Vector(float(a[0]), float(a[1]), float(a[2])))
-    if kind == "face_normal":
-        if face is None:
-            raise ValueError("face_normal axis requires a face")
-        return normal_at(face)
-    if kind == "hole_axis":
-        if face is None:
-            raise ValueError("hole_axis requires a face")
-        holes = hole_features_for_face(face)
-        if not holes:
-            raise ValueError("No matching cylindrical hole axes found")
-        return holes[int(spec.get("index", 0))]["axis"]
-    if kind == "bbox_center_to_face_center":
-        if face is None:
-            raise ValueError("bbox_center_to_face_center axis requires a face")
-        axis = face_orientation_reference(face)
-        if axis is None:
-            raise ValueError("bbox center to face center is parallel to primary axis")
-        return axis
-    raise ValueError(f"Unsupported axis resolver: {{kind}}")
-
-def basis_from_primary_tertiary(primary, tertiary):
-    primary = unit(primary)
-    tertiary = tertiary - scaled(primary, primary.dot(tertiary))
-    if tertiary.Length <= 1e-9:
-        raise ValueError("Tertiary axis cannot be parallel to primary axis")
-    tertiary.normalize()
-    secondary = tertiary.cross(primary)
-    secondary.normalize()
-    return primary, secondary, tertiary
-
-def connector_contract(connector):
-    return {{
-        "name": connector.Name,
-        "reference_object": connector.ReferenceObject,
-        "reference_face": connector.ReferenceFace,
-        "origin_local": arr(connector.OriginLocal),
-        "primary_axis_local": arr(connector.PrimaryAxisLocal),
-        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
-        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
-        "semantic_role": connector.SemanticRole,
-        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
-        "contract_version": connector.ContractVersion,
-    }}
-
-def placement_info(o):
-    placement = object_placement(o)
-    return {{
-        "base": arr(placement.Base),
-        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
-    }}
-
-def describe_assembly_object(o):
-    connectors = []
-    for candidate in doc.Objects:
-        if getattr(candidate, "ReferenceObject", None) == o.Name and hasattr(candidate, "OriginLocal"):
-            connectors.append(connector_contract(candidate))
-    return {{
-        "name": o.Name,
-        "label": o.Label,
-        "type_id": o.TypeId,
-        "placement": placement_info(o),
-        "connectors": connectors,
-    }}
-
-def build_observation(touched):
-    return {{
-        "document": doc.Name,
-        "objects": [describe_assembly_object(o) for o in touched],
-        "relationships": [],
-        "warnings": [],
-    }}
-
-origin_local = resolve_origin(origin_spec)
-primary_local = resolve_axis(primary_spec)
-if primary_local is None or primary_local.Length <= 1e-9:
-    raise ValueError("Primary axis must be non-zero")
-
-tertiary_local = resolve_axis(tertiary_spec)
-default_tertiary_face_ref = reference_face
-if default_tertiary_face_ref is None and isinstance(primary_spec, dict):
-    default_tertiary_face_ref = primary_spec.get("face")
-if tertiary_local is None and default_tertiary_face_ref is not None:
-    default_tertiary_face = face_from_ref(default_tertiary_face_ref)
-    tertiary_local = face_orientation_reference(default_tertiary_face)
-if tertiary_local is None:
-    trial = FreeCAD.Vector(0, 0, 1)
-    if abs(primary_local.dot(trial)) > 0.95:
-        trial = FreeCAD.Vector(0, 1, 0)
-    tertiary_local = projected_face_axis(trial, primary_local)
-primary_local, secondary_local, tertiary_local = basis_from_primary_tertiary(primary_local, tertiary_local)
-
-axis_len = max(shape.BoundBox.DiagonalLength * 0.08, 10.0)
-marker_origin = local_point_to_world(obj, origin_local)
-marker_primary = unit(local_axis_to_world(obj, primary_local))
-marker_secondary = unit(local_axis_to_world(obj, secondary_local))
-marker_tertiary = unit(local_axis_to_world(obj, tertiary_local))
-axes_shape = Part.makeCompound([
-    Part.makeLine(marker_origin, marker_origin + scaled(marker_primary, axis_len)),
-    Part.makeLine(marker_origin, marker_origin + scaled(marker_secondary, axis_len * 0.8)),
-    Part.makeLine(marker_origin, marker_origin + scaled(marker_tertiary, axis_len * 0.6)),
-])
-
-doc.openTransaction("Create Connector Contract")
+doc.openTransaction("Create Connector")
 try:
-    connector = doc.addObject("Part::Feature", {name!r})
-    connector.Shape = axes_shape
-    connector.addProperty("App::PropertyString", "ReferenceObject", "Assembly")
-    connector.addProperty("App::PropertyString", "ReferenceFace", "Assembly")
-    connector.addProperty("App::PropertyVector", "OriginLocal", "Assembly")
-    connector.addProperty("App::PropertyVector", "PrimaryAxisLocal", "Assembly")
-    connector.addProperty("App::PropertyVector", "SecondaryAxisLocal", "Assembly")
-    connector.addProperty("App::PropertyVector", "TertiaryAxisLocal", "Assembly")
-    connector.addProperty("App::PropertyString", "SemanticRole", "Assembly")
-    connector.addProperty("App::PropertyString", "SourceFeaturesJson", "Assembly")
-    connector.addProperty("App::PropertyInteger", "ContractVersion", "Assembly")
-    connector.ReferenceObject = obj.Name
-    connector.ReferenceFace = reference_face or ""
-    connector.OriginLocal = origin_local
-    connector.PrimaryAxisLocal = primary_local
-    connector.SecondaryAxisLocal = secondary_local
-    connector.TertiaryAxisLocal = tertiary_local
-    connector.SemanticRole = semantic_role
-    connector.SourceFeaturesJson = json.dumps(source_features, sort_keys=True)
-    connector.ContractVersion = 1
+    lcs = doc.addObject("Part::LocalCoordinateSystem", {name!r})
+    lcs.Label = {name!r}
+
+    # Place LCS in the same container as the reference object so it moves with
+    # the assembly hierarchy when a parent App::Part is repositioned.
+    parent = obj.getParentGeoFeatureGroup() if hasattr(obj, "getParentGeoFeatureGroup") else None
+    if parent is not None:
+        parent.addObjects([lcs])
+
+    # Parametric attachment: LCS tracks obj's full placement (translation + rotation).
+    # When obj.Placement changes, FreeCAD recompute updates lcs.getGlobalPlacement().
+    lcs.AttachmentSupport = [(obj, ("",))]
+    lcs.MapMode = "ObjectXY"
+    lcs.AttachmentOffset = attachment_offset
+
+    # Store semantic metadata as custom properties (software-agnostic connector contract)
+    lcs.addProperty("App::PropertyString", "SemanticLabel", "Assembly")
+    lcs.addProperty("App::PropertyString", "ReferenceObjectName", "Assembly")
+    lcs.addProperty("App::PropertyString", "SourceFeaturesJson", "Assembly")
+    lcs.addProperty("App::PropertyInteger", "ContractVersion", "Assembly")
+    lcs.SemanticLabel = semantic_label
+    lcs.ReferenceObjectName = obj.Name
+    lcs.SourceFeaturesJson = json.dumps(source_features, sort_keys=True)
+    lcs.ContractVersion = 2
+
     doc.recompute()
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
     raise
 
-contract = connector_contract(connector)
+# Read current global placement after recompute for observation
+global_pl = lcs.getGlobalPlacement()
+global_rot = global_pl.Rotation
+global_origin = global_pl.Base
+global_primary = global_rot.multVec(FreeCAD.Vector(1, 0, 0))
+global_secondary = global_rot.multVec(FreeCAD.Vector(0, 1, 0))
+global_tertiary = global_rot.multVec(FreeCAD.Vector(0, 0, 1))
+
+obj_global_pl = obj.getGlobalPlacement() if hasattr(obj, "getGlobalPlacement") else obj.Placement
+
+contract = {{
+    "name": lcs.Name,
+    "reference_object": obj.Name,
+    "semantic_label": semantic_label,
+    "origin_local": arr(origin_local),
+    "primary_axis_local": arr(primary_local),
+    "secondary_axis_local": arr(secondary_local),
+    "tertiary_axis_local": arr(tertiary_local),
+    "origin_global": arr(global_origin),
+    "primary_axis_global": arr(global_primary),
+    "secondary_axis_global": arr(global_secondary),
+    "tertiary_axis_global": arr(global_tertiary),
+    "source_features": source_features,
+    "contract_version": 2,
+}}
+
+observation = {{
+    "document": doc.Name,
+    "objects": [{{
+        "name": obj.Name,
+        "label": obj.Label,
+        "global_position": arr(obj_global_pl.Base),
+        "global_orientation_quat": [round(v, 9) for v in obj_global_pl.Rotation.Q],
+        "connectors": [{{
+            "name": lcs.Name,
+            "semantic_label": semantic_label,
+            "origin_global": arr(global_origin),
+            "primary_axis_global": arr(global_primary),
+        }}],
+    }}],
+    "relationships": [],
+}}
+
 _result_ = {{
-    "name": connector.Name,
-    "label": connector.Label,
+    "name": lcs.Name,
+    "label": lcs.Label,
     "contract": contract,
-    "observation": build_observation([obj]),
+    "observation": observation,
 }}
 """
         result = await bridge.execute_python(code)
-        return _raise_if_failed(result, "Create local coordinate system failed")
+        return _raise_if_failed(result, "Create connector failed")
 
     @mcp.tool()
     async def align_coordinate_systems(
@@ -830,11 +726,31 @@ _result_ = {{
         debug: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Align a moving object by matching two local connector contracts."""
+        """Align a moving object by matching two connector coordinate systems.
+
+        Computes a rigid SE(3) transform so that the moving connector frame
+        coincides with the fixed connector frame. The moving object's Placement
+        is updated and all LCS connectors attached to it update automatically
+        via FreeCAD recompute.
+
+        Supports both new LCS-based connectors (Part::LocalCoordinateSystem)
+        and legacy Part::Feature connectors for backward compatibility.
+
+        Args:
+            moving_object: Name of the part to move.
+            moving_csys: Name of the connector on the moving part.
+            fixed_object: Name of the fixed reference part.
+            fixed_csys: Name of the connector on the fixed part.
+            flip_primary: If True, align primary axes in the same direction.
+                Default False aligns them antiparallel (standard mating faces).
+            preserve_offset: [dx, dy, dz] offset along target frame axes applied
+                after alignment (e.g. to set a gap).
+            debug: If True, include resolved world frames in result.
+            doc_name: Document name, defaults to active document.
+        """
         bridge = await get_bridge()
         code = f"""
 import json
-import Part
 
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
@@ -852,9 +768,20 @@ if mcs is None:
     raise ValueError(f"Moving connector not found: {moving_csys!r}")
 if fcs is None:
     raise ValueError(f"Fixed connector not found: {fixed_csys!r}")
-for connector in [mcs, fcs]:
-    if not hasattr(connector, "OriginLocal"):
-        raise ValueError(f"Connector {{connector.Name}} is missing local contract fields")
+
+def _is_lcs_connector(c):
+    return c.TypeId == "Part::LocalCoordinateSystem" and hasattr(c, "SemanticLabel")
+
+def _is_legacy_connector(c):
+    return hasattr(c, "OriginLocal") and hasattr(c, "ReferenceObject")
+
+for connector, label in [(mcs, "Moving connector"), (fcs, "Fixed connector")]:
+    if not _is_lcs_connector(connector) and not _is_legacy_connector(connector):
+        raise ValueError(
+            f"{{label}} {{connector.Name}} is not a valid connector object. "
+            f"Expected Part::LocalCoordinateSystem with SemanticLabel or "
+            f"Part::Feature with OriginLocal."
+        )
 
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
@@ -878,22 +805,33 @@ def local_point_to_world(o, point):
 def local_axis_to_world(o, axis):
     return object_placement(o).Rotation.multVec(axis)
 
-def placement_info(o):
-    placement = object_placement(o)
-    return {{
-        "base": arr(placement.Base),
-        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
-    }}
-
 def basis_from_primary_tertiary(primary, tertiary):
     x = unit(primary)
-    z = FreeCAD.Vector(tertiary) - scaled(x, FreeCAD.Vector(tertiary).dot(x))
+    z = FreeCAD.Vector(tertiary.x, tertiary.y, tertiary.z) - scaled(x, tertiary.dot(x))
     if z.Length <= 1e-9:
         raise ValueError("Connector tertiary axis is parallel to primary axis")
     z.normalize()
     y = z.cross(x)
     y.normalize()
     return x, y, z
+
+def resolve_connector_world_frame(o, connector):
+    # Returns world-frame dict with keys: origin, x, y, z
+    if _is_lcs_connector(connector):
+        # LCS-based: getGlobalPlacement() directly encodes the connector frame.
+        # lcs world placement = obj.getGlobalPlacement() * AttachmentOffset
+        p = connector.getGlobalPlacement()
+        primary = p.Rotation.multVec(FreeCAD.Vector(1, 0, 0))
+        tertiary = p.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        x, y, z = basis_from_primary_tertiary(primary, tertiary)
+        return {{"origin": p.Base, "x": x, "y": y, "z": z}}
+    else:
+        # Legacy Part::Feature connector with OriginLocal/PrimaryAxisLocal properties
+        origin = local_point_to_world(o, FreeCAD.Vector(connector.OriginLocal))
+        primary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.PrimaryAxisLocal)))
+        tertiary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.TertiaryAxisLocal)))
+        x, y, z = basis_from_primary_tertiary(primary, tertiary)
+        return {{"origin": origin, "x": x, "y": y, "z": z}}
 
 def matrix_from_frame(origin, x, y, z):
     m = FreeCAD.Matrix()
@@ -903,49 +841,48 @@ def matrix_from_frame(origin, x, y, z):
     m.A14, m.A24, m.A34 = origin.x, origin.y, origin.z
     return m
 
-def connector_contract(connector):
+def placement_info(o):
+    placement = object_placement(o)
     return {{
-        "name": connector.Name,
-        "reference_object": connector.ReferenceObject,
-        "reference_face": connector.ReferenceFace,
-        "origin_local": arr(connector.OriginLocal),
-        "primary_axis_local": arr(connector.PrimaryAxisLocal),
-        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
-        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
-        "semantic_role": connector.SemanticRole,
-        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
-        "contract_version": connector.ContractVersion,
+        "base": arr(placement.Base),
+        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
     }}
 
-def resolve_connector_world_frame(o, connector):
-    origin = local_point_to_world(o, FreeCAD.Vector(connector.OriginLocal))
-    primary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.PrimaryAxisLocal)))
-    tertiary = unit(local_axis_to_world(o, FreeCAD.Vector(connector.TertiaryAxisLocal)))
-    x, y, z = basis_from_primary_tertiary(primary, tertiary)
-    return {{"origin": origin, "x": x, "y": y, "z": z}}
+def connector_global_info(connector, ref_obj=None):
+    if _is_lcs_connector(connector):
+        p = connector.getGlobalPlacement()
+        rot = p.Rotation
+        return {{
+            "name": connector.Name,
+            "semantic_label": connector.SemanticLabel,
+            "origin_global": arr(p.Base),
+            "primary_axis_global": arr(rot.multVec(FreeCAD.Vector(1, 0, 0))),
+        }}
+    elif ref_obj is not None and _is_legacy_connector(connector):
+        origin = local_point_to_world(ref_obj, FreeCAD.Vector(connector.OriginLocal))
+        primary = unit(local_axis_to_world(ref_obj, FreeCAD.Vector(connector.PrimaryAxisLocal)))
+        return {{
+            "name": connector.Name,
+            "semantic_label": getattr(connector, "SemanticRole", ""),
+            "origin_global": arr(origin),
+            "primary_axis_global": arr(primary),
+        }}
+    return {{"name": connector.Name}}
 
-def refresh_marker(o, connector):
-    if not hasattr(o, "Shape"):
-        return
-    frame = resolve_connector_world_frame(o, connector)
-    length = max(o.Shape.BoundBox.DiagonalLength * 0.08, 10.0)
-    connector.Shape = Part.makeCompound([
-        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["x"], length)),
-        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["y"], length * 0.8)),
-        Part.makeLine(frame["origin"], frame["origin"] + scaled(frame["z"], length * 0.6)),
-    ])
-
-def describe_assembly_object(o):
-    connectors = []
+def describe_object_global(obj):
+    global_pl = object_placement(obj)
+    obj_connectors = []
     for candidate in doc.Objects:
-        if getattr(candidate, "ReferenceObject", None) == o.Name and hasattr(candidate, "OriginLocal"):
-            connectors.append(connector_contract(candidate))
+        if _is_lcs_connector(candidate) and getattr(candidate, "ReferenceObjectName", None) == obj.Name:
+            obj_connectors.append(connector_global_info(candidate))
+        elif _is_legacy_connector(candidate) and getattr(candidate, "ReferenceObject", None) == obj.Name:
+            obj_connectors.append(connector_global_info(candidate, obj))
     return {{
-        "name": o.Name,
-        "label": o.Label,
-        "type_id": o.TypeId,
-        "placement": placement_info(o),
-        "connectors": connectors,
+        "name": obj.Name,
+        "label": obj.Label,
+        "global_position": arr(global_pl.Base),
+        "global_orientation_quat": [round(v, 9) for v in global_pl.Rotation.Q],
+        "connectors": obj_connectors,
     }}
 
 def relationship_payload(error):
@@ -961,6 +898,8 @@ def relationship_payload(error):
 
 moving_frame = resolve_connector_world_frame(moving, mcs)
 fixed_frame = resolve_connector_world_frame(fixed, fcs)
+
+# Default (flip_primary=False): antiparallel primary axes = mating faces pointing toward each other
 target_x = fixed_frame["x"] if {flip_primary} else fixed_frame["x"].negative()
 target_z = fixed_frame["z"] - scaled(target_x, fixed_frame["z"].dot(target_x))
 if target_z.Length <= 1e-9:
@@ -986,15 +925,14 @@ before = placement_info(moving)
 doc.openTransaction("Align Connector Contracts")
 try:
     moving.Placement = delta.multiply(moving.Placement)
-    doc.recompute()
-    refresh_marker(moving, mcs)
-    refresh_marker(fixed, fcs)
+    # Recompute updates all LCS connectors attached to moving automatically
     doc.recompute()
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()
     raise
 
+# After recompute, LCS connectors reflect updated placement
 aligned_frame = resolve_connector_world_frame(moving, mcs)
 origin_error = (aligned_frame["origin"] - target_origin).Length
 primary_error = 1.0 - abs(aligned_frame["x"].dot(target_x))
@@ -1025,9 +963,8 @@ except Exception:
 mat = delta.toMatrix()
 observation = {{
     "document": doc.Name,
-    "objects": [describe_assembly_object(moving), describe_assembly_object(fixed)],
+    "objects": [describe_object_global(moving), describe_object_global(fixed)],
     "relationships": [relationship],
-    "warnings": [],
 }}
 _result_ = {{
     "moving_object": moving.Name,
@@ -1059,14 +996,32 @@ if {debug}:
     @mcp.tool()
     async def list_assembly_state(
         object_names: list[str] | None = None,
+        include_local: bool = False,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """List assembly objects, local connector contracts, and relationships."""
+        """List assembly state as a geometric object list with global coordinates.
+
+        Returns the current spatial state of parts and their connectors in world
+        coordinates, suitable for reflective modeling (ToolCAD geometric object
+        list pattern). Global coordinates are always returned; local coordinates
+        are returned only when include_local=True (for debugging).
+
+        Both new LCS-based connectors (Part::LocalCoordinateSystem) and legacy
+        Part::Feature connectors are included for backward compatibility.
+
+        Args:
+            object_names: Filter to specific object names. Defaults to all objects
+                that have connectors.
+            include_local: Include local-frame coordinates for debugging.
+                Default False keeps the output concise.
+            doc_name: Document name, defaults to active document.
+        """
         bridge = await get_bridge()
         code = f"""
 import json
 
 object_names = {object_names!r}
+include_local = {include_local!r}
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No document found")
@@ -1074,41 +1029,87 @@ if doc is None:
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
 
+def unit(vector):
+    result = FreeCAD.Vector(vector.x, vector.y, vector.z)
+    result.normalize()
+    return result
+
 def object_placement(o):
     return o.getGlobalPlacement() if hasattr(o, "getGlobalPlacement") else o.Placement
 
-def placement_info(o):
-    placement = object_placement(o)
-    return {{
-        "base": arr(placement.Base),
-        "rotation_euler": [round(v, 6) for v in placement.Rotation.toEuler()],
-    }}
-
-def connector_contract(connector):
-    return {{
-        "name": connector.Name,
-        "reference_object": connector.ReferenceObject,
-        "reference_face": connector.ReferenceFace,
-        "origin_local": arr(connector.OriginLocal),
-        "primary_axis_local": arr(connector.PrimaryAxisLocal),
-        "secondary_axis_local": arr(connector.SecondaryAxisLocal),
-        "tertiary_axis_local": arr(connector.TertiaryAxisLocal),
-        "semantic_role": connector.SemanticRole,
-        "source_features": json.loads(connector.SourceFeaturesJson or "{{}}"),
-        "contract_version": connector.ContractVersion,
-    }}
-
-selected = set(object_names or [])
-connectors_by_object = {{}}
+# Collect connectors grouped by reference object (both LCS and legacy)
+lcs_by_object = {{}}
+legacy_by_object = {{}}
 warnings = []
-for candidate in doc.Objects:
-    if hasattr(candidate, "OriginLocal") and hasattr(candidate, "ReferenceObject"):
-        ref = candidate.ReferenceObject
-        if doc.getObject(ref) is None:
-            warnings.append(f"Connector {{candidate.Name}} references missing object {{ref}}")
-        connectors_by_object.setdefault(ref, []).append(candidate)
-        if not selected and ref:
-            selected.add(ref)
+
+for o in doc.Objects:
+    if o.TypeId == "Part::LocalCoordinateSystem" and hasattr(o, "SemanticLabel"):
+        ref = getattr(o, "ReferenceObjectName", "")
+        if ref:
+            if doc.getObject(ref) is None:
+                warnings.append(f"LCS connector {{o.Name}} references missing object {{ref}}")
+            lcs_by_object.setdefault(ref, []).append(o)
+    elif hasattr(o, "OriginLocal") and hasattr(o, "ReferenceObject"):
+        ref = o.ReferenceObject
+        if ref:
+            if doc.getObject(ref) is None:
+                warnings.append(f"Connector {{o.Name}} references missing object {{ref}}")
+            legacy_by_object.setdefault(ref, []).append(o)
+
+# Determine which objects to include
+selected = set(object_names or [])
+if not selected:
+    selected.update(lcs_by_object.keys())
+    selected.update(legacy_by_object.keys())
+
+def connector_info_lcs(lcs):
+    # Build connector info from LCS using live global placement (on-query)
+    global_pl = lcs.getGlobalPlacement()
+    global_rot = global_pl.Rotation
+    info = {{
+        "name": lcs.Name,
+        "semantic_label": lcs.SemanticLabel,
+        "reference_object": lcs.ReferenceObjectName,
+        "origin_global": arr(global_pl.Base),
+        "primary_axis_global": arr(global_rot.multVec(FreeCAD.Vector(1, 0, 0))),
+        "secondary_axis_global": arr(global_rot.multVec(FreeCAD.Vector(0, 1, 0))),
+        "tertiary_axis_global": arr(global_rot.multVec(FreeCAD.Vector(0, 0, 1))),
+        "source_features": json.loads(getattr(lcs, "SourceFeaturesJson", None) or "{{}}"),
+        "contract_version": getattr(lcs, "ContractVersion", 2),
+    }}
+    if include_local:
+        offset = lcs.AttachmentOffset
+        offset_rot = offset.Rotation
+        info["origin_local"] = arr(offset.Base)
+        info["primary_axis_local"] = arr(offset_rot.multVec(FreeCAD.Vector(1, 0, 0)))
+        info["secondary_axis_local"] = arr(offset_rot.multVec(FreeCAD.Vector(0, 1, 0)))
+        info["tertiary_axis_local"] = arr(offset_rot.multVec(FreeCAD.Vector(0, 0, 1)))
+    return info
+
+def connector_info_legacy(connector, obj):
+    # Build connector info from legacy Part::Feature connector
+    pl = object_placement(obj)
+    global_origin = pl.multVec(FreeCAD.Vector(connector.OriginLocal))
+    global_primary = unit(pl.Rotation.multVec(FreeCAD.Vector(connector.PrimaryAxisLocal)))
+    global_secondary = unit(pl.Rotation.multVec(FreeCAD.Vector(connector.SecondaryAxisLocal)))
+    global_tertiary = unit(pl.Rotation.multVec(FreeCAD.Vector(connector.TertiaryAxisLocal)))
+    info = {{
+        "name": connector.Name,
+        "semantic_label": getattr(connector, "SemanticRole", ""),
+        "reference_object": connector.ReferenceObject,
+        "origin_global": arr(global_origin),
+        "primary_axis_global": arr(global_primary),
+        "secondary_axis_global": arr(global_secondary),
+        "tertiary_axis_global": arr(global_tertiary),
+        "source_features": json.loads(getattr(connector, "SourceFeaturesJson", None) or "{{}}"),
+        "contract_version": getattr(connector, "ContractVersion", 1),
+    }}
+    if include_local:
+        info["origin_local"] = arr(FreeCAD.Vector(connector.OriginLocal))
+        info["primary_axis_local"] = arr(FreeCAD.Vector(connector.PrimaryAxisLocal))
+        info["secondary_axis_local"] = arr(FreeCAD.Vector(connector.SecondaryAxisLocal))
+        info["tertiary_axis_local"] = arr(FreeCAD.Vector(connector.TertiaryAxisLocal))
+    return info
 
 objects = []
 for name in sorted(selected):
@@ -1116,21 +1117,28 @@ for name in sorted(selected):
     if obj is None:
         warnings.append(f"Assembly object not found: {{name}}")
         continue
+    global_pl = object_placement(obj)
+    connectors = []
+    for lcs in lcs_by_object.get(name, []):
+        connectors.append(connector_info_lcs(lcs))
+    for legacy in legacy_by_object.get(name, []):
+        connectors.append(connector_info_legacy(legacy, obj))
     objects.append({{
         "name": obj.Name,
         "label": obj.Label,
         "type_id": obj.TypeId,
-        "placement": placement_info(obj),
-        "connectors": [connector_contract(c) for c in connectors_by_object.get(obj.Name, [])],
+        "global_position": arr(global_pl.Base),
+        "global_orientation_quat": [round(v, 9) for v in global_pl.Rotation.Q],
+        "connectors": connectors,
     }})
 
 relationships = []
-for candidate in doc.Objects:
-    if hasattr(candidate, "RelationshipJson"):
+for o in doc.Objects:
+    if hasattr(o, "RelationshipJson"):
         try:
-            rel = json.loads(candidate.RelationshipJson or "{{}}")
+            rel = json.loads(o.RelationshipJson or "{{}}")
         except Exception:
-            warnings.append(f"Relationship {{candidate.Name}} has invalid JSON")
+            warnings.append(f"Relationship {{o.Name}} has invalid JSON")
             continue
         if not object_names or rel.get("moving_object") in selected or rel.get("fixed_object") in selected:
             relationships.append(rel)
@@ -1175,38 +1183,38 @@ if obj is None:
 if not hasattr(obj, "Shape"):
     raise ValueError("Object has no shape")
 
-def rgba(values, default_alpha=0.0):
-    vals = list(values)
-    if len(vals) == 3:
-        vals.append(default_alpha)
-    return tuple(vals[:4])
+def rgb_color(values, default=(0.8, 0.8, 0.8)):
+    vals = list(values) if values else list(default)
+    return (float(vals[0]), float(vals[1]), float(vals[2]))
 
 def scaled(vector, factor):
     result = FreeCAD.Vector(vector.x, vector.y, vector.z)
     result.multiply(factor)
     return result
 
-face_color = rgba(colors.get("face", [1.0, 0.85, 0.0]), 0.0)
 created = []
 
 doc.openTransaction("Preview Assembly References")
 try:
-    if hasattr(obj, "ViewObject"):
+    if faces and hasattr(obj, "ViewObject") and obj.ViewObject:
+        if not FreeCAD.GuiUp:
+            raise ValueError("GUI not available - face highlighting requires GUI mode")
         face_count = len(obj.Shape.Faces)
+        highlight_color = rgb_color(colors.get("face", [1.0, 0.85, 0.0]))
         if "base" in colors:
-            diffuse = [rgba(colors["base"], 0.0)] * face_count
+            diffuse = [rgb_color(colors["base"])] * face_count
         else:
             existing = list(getattr(obj.ViewObject, "DiffuseColor", []) or [])
             if len(existing) == face_count:
-                diffuse = [rgba(color, 0.0) for color in existing]
+                diffuse = [rgb_color(c) for c in existing]
             else:
-                shape_color = getattr(obj.ViewObject, "ShapeColor", (0.8, 0.8, 0.8, 0.0))
-                diffuse = [rgba(shape_color, 0.0)] * face_count
+                default = rgb_color(getattr(obj.ViewObject, "ShapeColor", None))
+                diffuse = [default] * face_count
         for ref in faces:
             idx = int(str(ref).replace("Face", "")) - 1
             if idx < 0 or idx >= len(diffuse):
                 raise ValueError(f"Invalid face reference: {{ref}}")
-            diffuse[idx] = face_color
+            diffuse[idx] = highlight_color
         obj.ViewObject.DiffuseColor = diffuse
 
     for idx, point in enumerate(points, start=1):
@@ -1230,6 +1238,8 @@ try:
             FreeCADGui.Selection.addSelection(doc.Name, obj.Name, ref)
 
     doc.recompute()
+    if FreeCAD.GuiUp:
+        FreeCADGui.updateGui()
     doc.commitTransaction()
 except Exception:
     doc.abortTransaction()

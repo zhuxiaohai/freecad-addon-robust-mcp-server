@@ -261,7 +261,8 @@ repos:
     hooks:
       - id: mkdocs-build
         name: mkdocs (documentation build)
-        entry: uv run mkdocs build --strict
+        # Use .venv Python directly — Cursor/git GUI often lacks `uv` in PATH
+        entry: .venv/bin/python -m mkdocs build --strict
         language: system
         pass_filenames: false
         files: ^(docs/|mkdocs\.yaml)

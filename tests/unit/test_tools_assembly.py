@@ -53,10 +53,10 @@ class TestAssemblyTools:
 
     @pytest.mark.asyncio
     async def test_registers_expected_tools(self, register_tools):
-        """All assembly tools should be registered."""
+        """All assembly tools should be registered with updated names."""
         assert set(register_tools) == {
             "align_coordinate_systems",
-            "create_local_coordinate_system",
+            "create_connector",
             "find_faces_by_constraints",
             "get_mounting_features",
             "list_assembly_state",
@@ -168,43 +168,131 @@ class TestAssemblyTools:
         assert "origin_world" not in code
 
     @pytest.mark.asyncio
-    async def test_create_local_coordinate_system_accepts_resolvers(
-        self, register_tools, mock_bridge
-    ):
-        """create_local_coordinate_system should accept structured resolvers."""
+    async def test_create_connector_uses_lcs_backend(self, register_tools, mock_bridge):
+        """create_connector should create a Part::LocalCoordinateSystem with attachment."""
         mock_bridge.execute_python = AsyncMock(
             return_value=self._success(
                 {
                     "name": "MountCS",
-                    "contract": {"origin_local": [0, 0, 0]},
+                    "contract": {
+                        "origin_local": [805.0, 354.0, -26.0],
+                        "origin_global": [805.0, 354.0, -26.0],
+                        "contract_version": 2,
+                    },
+                    "observation": {"objects": []},
                 }
             )
         )
 
-        result = await register_tools["create_local_coordinate_system"](
+        result = await register_tools["create_connector"](
             object_name="Part",
             name="MountCS",
-            origin={"type": "face_center", "face": "Face1"},
-            primary_axis={"type": "face_normal", "face": "Face1"},
-            tertiary_axis={"type": "bbox_center_to_face_center", "face": "Face1"},
+            origin=[805.0, 354.0, -26.0],
+            primary_axis=[0.0, 0.0, 1.0],
+            tertiary_axis=[1.0, 0.0, 0.0],
+            semantic_label="top face bolt pattern center",
         )
 
         assert result["name"] == "MountCS"
         code = mock_bridge.execute_python.call_args.args[0]
-        assert "OriginLocal" in code
-        assert "PrimaryAxisLocal" in code
-        assert "TertiaryAxisLocal" in code
+
+        # LCS backend checks
+        assert "Part::LocalCoordinateSystem" in code
+        assert "AttachmentSupport" in code
+        assert "MapMode" in code
+        assert "AttachmentOffset" in code
+
+        # Semantic label (not role)
+        assert "SemanticLabel" in code
+        assert "SemanticRole" not in code
+        assert "ReferenceObjectName" in code
+        assert "ReferenceFace" not in code
+
+        # Contract version 2
         assert "ContractVersion" in code
-        assert "SemanticRole" in code
-        assert "face_center" in code
-        assert "bbox_center_to_face_center" in code
-        assert "face_orientation_reference" in code
-        assert "default_tertiary_face_ref" in code
-        assert "tertiary_spec" in code
-        assert "RotationUnderconstrained" not in code
-        assert "Origin =" not in code
-        assert "origin_world" not in code
-        assert "tertiary.cross(primary)" in code
+        assert "2" in code
+
+        # Global fields in observation
+        assert "origin_global" in code
+        assert "primary_axis_global" in code
+        assert "getGlobalPlacement" in code
+
+        # No resolver mechanism
+        assert "resolve_origin" not in code
+        assert "resolve_axis" not in code
+        assert "face_center" not in code
+        assert "face_normal" not in code
+
+    @pytest.mark.asyncio
+    async def test_create_connector_validates_explicit_coordinates(
+        self, register_tools, mock_bridge
+    ):
+        """create_connector generated code should reject non-list inputs."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"name": "CS", "contract": {}})
+        )
+
+        await register_tools["create_connector"](
+            object_name="Part",
+            name="CS",
+            origin=[1.0, 2.0, 3.0],
+            primary_axis=[0.0, 0.0, 1.0],
+            tertiary_axis=[1.0, 0.0, 0.0],
+        )
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        # Must validate that only list[float] is accepted
+        assert "isinstance(origin_raw, (list, tuple))" in code
+        assert "isinstance(primary_raw, (list, tuple))" in code
+        assert "isinstance(tertiary_raw, (list, tuple))" in code
+        assert "TypeError" in code
+
+    @pytest.mark.asyncio
+    async def test_create_connector_builds_orthonormal_basis(
+        self, register_tools, mock_bridge
+    ):
+        """create_connector should build an orthonormal frame from primary+tertiary."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"name": "CS", "contract": {}})
+        )
+
+        await register_tools["create_connector"](
+            object_name="Part",
+            name="CS",
+            origin=[0.0, 0.0, 0.0],
+            primary_axis=[0.0, 0.0, 1.0],
+            tertiary_axis=[1.0, 0.0, 0.0],
+        )
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert (
+            "tertiary_local.cross(primary_local)" in code
+            or "tertiary_local.cross" in code
+        )
+        assert "secondary_local" in code
+        assert "tertiary_local" in code
+
+    @pytest.mark.asyncio
+    async def test_create_connector_checks_freecad_version(
+        self, register_tools, mock_bridge
+    ):
+        """create_connector should require FreeCAD 1.1+ at runtime."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"name": "CS", "contract": {}})
+        )
+
+        await register_tools["create_connector"](
+            object_name="Part",
+            name="CS",
+            origin=[0.0, 0.0, 0.0],
+            primary_axis=[0.0, 0.0, 1.0],
+            tertiary_axis=[1.0, 0.0, 0.0],
+        )
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert "App.Version()" in code
+        assert "(1, 1)" in code
+        assert "FreeCAD 1.1+" in code
 
     @pytest.mark.asyncio
     async def test_align_coordinate_systems_returns_transform(
@@ -216,6 +304,7 @@ class TestAssemblyTools:
                 {
                     "moving_object": "Moving",
                     "transform_matrix": [[1, 0, 0, 5]],
+                    "observation": {"objects": []},
                 }
             )
         )
@@ -231,20 +320,33 @@ class TestAssemblyTools:
         assert result["moving_object"] == "Moving"
         code = mock_bridge.execute_python.call_args.args[0]
         assert "resolve_connector_world_frame" in code
-        assert "OriginLocal" in code
         assert "target_x = fixed_frame" in code
         assert "target_y = target_z.cross(target_x)" in code
         assert "RelationshipJson" in code
         assert "observation" in code
-        assert "Connector {connector.Name} is missing local contract fields" in code
-        assert "preserve_offset" not in code
         assert "[0, 0, 10]" in code
 
+        # LCS support
+        assert "_is_lcs_connector" in code
+        assert "getGlobalPlacement" in code
+        assert "Part::LocalCoordinateSystem" in code
+
+        # Legacy backward compatibility
+        assert "_is_legacy_connector" in code
+        assert "OriginLocal" in code
+
+        # No refresh_marker (LCS updates automatically)
+        assert "refresh_marker" not in code
+
+        # Global coords in observation
+        assert "global_position" in code
+        assert "global_orientation_quat" in code
+
     @pytest.mark.asyncio
-    async def test_list_assembly_state_returns_semantic_state(
+    async def test_list_assembly_state_returns_global_state(
         self, register_tools, mock_bridge
     ):
-        """list_assembly_state should expose connectors and relationships."""
+        """list_assembly_state should expose global-coord connectors and relationships."""
         mock_bridge.execute_python = AsyncMock(
             return_value=self._success({"objects": [], "relationships": []})
         )
@@ -257,9 +359,38 @@ class TestAssemblyTools:
         code = mock_bridge.execute_python.call_args.args[0]
         assert "object_names = ['Part']" in code
         assert "RelationshipJson" in code
-        assert "OriginLocal" in code
         assert "relationships" in code
+
+        # Global coordinates are primary output
+        assert "origin_global" in code
+        assert "primary_axis_global" in code
+        assert "getGlobalPlacement" in code
+
+        # LCS scanner
+        assert "Part::LocalCoordinateSystem" in code
+        assert "SemanticLabel" in code
+        assert "ReferenceObjectName" in code
+
+        # Legacy scanner for backward compatibility
+        assert "OriginLocal" in code
+
+        # No raw face geometry in assembly state
         assert "Faces" not in code
+
+    @pytest.mark.asyncio
+    async def test_list_assembly_state_include_local_parameter(
+        self, register_tools, mock_bridge
+    ):
+        """list_assembly_state should embed include_local flag in generated code."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"objects": [], "relationships": []})
+        )
+
+        await register_tools["list_assembly_state"](include_local=True)
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert "include_local = True" in code
+        assert "AttachmentOffset" in code
 
     @pytest.mark.asyncio
     async def test_preview_or_highlight_references_selects_subelements(
@@ -285,6 +416,28 @@ class TestAssemblyTools:
         assert "Selection.addSelection" in code
         assert "AssemblyPointPreview" in code
         assert "AssemblyAxisPreview" in code
+        assert "DiffuseColor" in code
+        assert "rgb_color" in code
+        assert "0.0)" not in code.split("rgb_color")[0]
+
+    @pytest.mark.asyncio
+    async def test_preview_or_highlight_skips_face_color_without_faces(
+        self, register_tools, mock_bridge
+    ):
+        """Edge-only preview should not rewrite DiffuseColor."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success(
+                {"success": True, "highlighted_edges": ["Edge1"]}
+            )
+        )
+
+        await register_tools["preview_or_highlight_references"](
+            "Part",
+            edges=["Edge1"],
+        )
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert 'if faces and hasattr(obj, "ViewObject")' in code
 
     @pytest.mark.asyncio
     async def test_failed_script_raises_value_error(self, register_tools, mock_bridge):

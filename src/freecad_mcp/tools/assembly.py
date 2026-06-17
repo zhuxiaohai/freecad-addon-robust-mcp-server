@@ -61,7 +61,11 @@ if obj is None:
 if not hasattr(obj, "Shape"):
     raise ValueError("Object has no shape")
 
-shape = obj.Shape
+# Transform shape to part's local design frame so constraints and outputs
+# are stable regardless of how the part has been moved or rotated.
+gpl = obj.getGlobalPlacement()
+shape = obj.Shape.copy()
+shape.transformShape(gpl.inverse().toMatrix())
 bb = shape.BoundBox
 
 def v(data):
@@ -352,12 +356,19 @@ if obj is None:
 if not hasattr(obj, "Shape"):
     raise ValueError("Object has no shape")
 
-shape = obj.Shape
 face_name = {face!r}
+
+# Transform shape to part's local design frame so all computations are stable
+# regardless of how the part has been moved or rotated.  obj.Shape coords are in
+# world space; applying the inverse global placement gives the design-frame shape.
+gpl = obj.getGlobalPlacement()
+local_shape = obj.Shape.copy()
+local_shape.transformShape(gpl.inverse().toMatrix())
+
 face_index = int(face_name.replace("Face", "")) - 1
-if face_index < 0 or face_index >= len(shape.Faces):
+if face_index < 0 or face_index >= len(local_shape.Faces):
     raise ValueError(f"Invalid face reference: {{face_name}}")
-mount_face = shape.Faces[face_index]
+mount_face = local_shape.Faces[face_index]
 
 def arr(vec):
     return [round(vec.x, 6), round(vec.y, 6), round(vec.z, 6)]
@@ -416,11 +427,13 @@ def projected_face_axis(vector, normal):
 
 normal = normal_at(mount_face)
 face_bb = mount_face.BoundBox
-bbox_center_axis = projected_face_axis(mount_face.CenterOfMass - shape.BoundBox.Center, normal)
+# BoundBox of the local-space shape is a stable AABB in the design frame,
+# so this direction is consistent across rotations.
+bbox_center_axis = projected_face_axis(mount_face.CenterOfMass - local_shape.BoundBox.Center, normal)
 
 holes_by_key = {{}}
 hole_faces = []
-for idx, f in enumerate(shape.Faces, start=1):
+for idx, f in enumerate(local_shape.Faces, start=1):
     surface_type = f.Surface.__class__.__name__
     if surface_type not in ["Cylinder", "Cone"]:
         continue

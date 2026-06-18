@@ -487,16 +487,60 @@ safe_execute(
 
 All coordinates passed to `create_connector` are in the **part's local frame**.
 
+## Describing Faces Without Raw Coordinate Vectors
+
+`find_faces_by_constraints` works in the part's design frame (inverse-transform applied
+internally), so constraints remain valid regardless of how the part has been rotated.
+
+**Prefer symbolic `bbox_side` over `normal_*` vector constraints:**
+
+```python
+# Preferred — symbolic, stable, no prior knowledge of design-frame directions needed:
+result = await find_faces_by_constraints(
+    object_name="MOTOR",
+    constraints={"bbox_side": "+z", "min_hole_count": 4, "surface_type": "Plane"},
+)
+# result["shape_bbox"] shows part dimensions: infer which axis is the main axis
+# result["candidates"][i]["bbox_side_hint"] shows which bbox sides the face sits on
+```
+
+**Initial exploration pattern** (import time, world = design frame):
+```python
+# Step 1: empty-constraint scan to discover face roles
+all_faces = await find_faces_by_constraints(object_name="MOTOR", constraints={})
+# all_faces["shape_bbox"] = {"x_length": 50, "y_length": 50, "z_length": 200, ...}
+# Longest axis = Z → end caps are at bbox_side +z and -z
+# Each face has bbox_side_hint, e.g. ["+z"] for top end cap
+
+# Step 2: record symbolic description in skill context:
+# "mounting flange: bbox_side=+z, min_hole_count=4"
+# This description remains valid after any rotation.
+```
+
+**After rotation** — same constraint still works because find_faces_by_constraints
+applies the inverse global placement before filtering:
+```python
+result = await find_faces_by_constraints(
+    object_name="MOTOR",
+    constraints={"bbox_side": "+z", "min_hole_count": 4},
+)
+# Same face returned even if MOTOR has been rotated 90° in world space
+```
+
 ## Two-Phase Workflow
 
 ### Phase 1: Discover candidates
 ```python
-# Returns connector_candidates with explicit [x,y,z] values
+# Option A: from a known face
 result = await get_mounting_features(object_name="BODEN_VORN", face="Face19")
-# Pick a candidate, e.g.:
-# origin = result["connector_candidates"][0]["origin_local"]
-# primary_axis = result["connector_candidates"][0]["primary_axis_local"]
-# tertiary_axis = result["connector_candidates"][0]["tertiary_axis_local"]
+# Returns connector_candidates with explicit [x,y,z] values
+
+# Option B: from constraint-based face search
+faces = await find_faces_by_constraints(
+    object_name="BODEN_VORN",
+    constraints={"bbox_side": "+z", "min_hole_count": 2},
+)
+# Then call get_mounting_features on the best candidate face
 ```
 
 ### Phase 2: Create connector (software-free parameters only)
@@ -510,34 +554,119 @@ await create_connector(
     semantic_label="top face bolt pattern center - primary mounting face",
     source_features=candidate["source_features"],  # provenance metadata
 )
-# Returns contract with both origin_local and origin_global
-# LCS auto-tracks part movement via FreeCAD recompute
+# Returns: contract (local+global coords) + observation with ALL connectors on the
+# part and body_frame_global showing design-frame axes in world space.
+# LCS auto-tracks part movement via FreeCAD recompute.
 ```
 
 ### Phase 3: Align parts
 ```python
-await align_coordinate_systems(
+result = await align_coordinate_systems(
     moving_object="BODEN_VORN",
     moving_csys="front_mount_A",
     fixed_object="SEITENBLECH",
     fixed_csys="bracket_mount_B",
     # flip_primary=False (default) = antiparallel normals (mating faces)
 )
-# Returns observation with global coordinates for verification
+# result["observation"]["objects"][i]["body_frame_global"] shows where design-frame
+# axes now point in world space — use for planning the next assembly step.
 ```
 
-### Phase 4: Verify via geometric object list
+### Phase 4: Verify or plan next step
+
+Each tool returns its own **minimal sufficient observation** covering only the
+affected parts. Call `list_assembly_state` explicitly when a full assembly view
+is needed (multi-part planning, collision checks, reporting):
+
 ```python
+# Per-tool observation is enough to verify the last operation:
+# result["alignment_error"]["origin"] < 1e-6  → alignment succeeded
+
+# For full assembly view (planning next step, checking all parts):
 state = await list_assembly_state()
 # state["objects"][i]["global_position"] = current world position
+# state["objects"][i]["body_frame_global"]["z_axis"] = where design +Z points now
 # state["objects"][i]["connectors"][j]["origin_global"] = connector world origin
-# Use these for reflective modeling: compare with expected positions
 ```
+
+## Interpreting `body_frame_global`
+
+After a part is rotated by assembly operations:
+```python
+# body_frame_global.z_axis = [0.0, -1.0, 0.0] means:
+# the part's design-frame +Z axis now points in the world -Y direction.
+# To find faces that were "on top" (bbox_side=+z), use:
+find_faces_by_constraints(constraints={"bbox_side": "+z", ...})  # still works!
+# or to align another part's face to this orientation:
+create_connector(..., primary_axis=[0.0, -1.0, 0.0])  # world direction
+```
+
+## Two-Layer LCS Pattern
+
+Assembly work uses two layers of `Part::LocalCoordinateSystem` objects:
+
+**Layer 1 — Semantic frame (part-level, one per part):**
+Defines the part's own coordinate semantics: which axis is "up", which face is
+the base, etc.  Create it once at labeling/import time with `create_connector`
+at the part's design origin.  Its only purpose is to give a stable reference for
+describing the part's faces in a consistent vocabulary.
+
+```python
+# Establish semantic frame: primary_axis = part's "height" direction in design frame,
+# tertiary_axis = any orthogonal axis.  origin=[0,0,0] = design origin.
+await create_connector(
+    object_name="COLUMN",
+    name="semantic_frame",
+    semantic_label="body_semantic_frame",
+    origin=[0.0, 0.0, 0.0],
+    primary_axis=[0.0, 0.0, 1.0],   # height direction in design frame
+    tertiary_axis=[1.0, 0.0, 0.0],
+)
+# Store "semantic_frame" connector name in skill context for this part.
+```
+
+**Layer 2 — Assembly connectors (face-level, one per mounting face):**
+Created after the semantic frame is established.  Pass the semantic frame LCS
+name as `reference_frame_connector` so that constraint vectors are expressed in
+the semantic vocabulary rather than the raw design frame.
+
+```python
+# Find mounting face using semantic-frame coordinates:
+faces = await find_faces_by_constraints(
+    object_name="COLUMN",
+    reference_frame_connector="LCS_semantic_frame",   # Layer 1 LCS name
+    constraints={"bbox_side": "-z", "surface_type": "Plane"},
+)
+# bbox_side="-z" now means "-Z of the semantic frame", not raw design frame -Z.
+# bbox_side_hint on each candidate is also expressed in the semantic frame.
+
+# Create assembly connector using face candidate coordinates (design frame):
+candidate = faces["candidates"][0]
+await create_connector(
+    object_name="COLUMN",
+    name="base_mount",
+    semantic_label="base_mount",
+    origin=candidate["center_local"],
+    primary_axis=candidate["normal_local"],
+    tertiary_axis=[0.0, 0.0, 1.0],
+)
+```
+
+**When to use `reference_frame_connector`:**
+- When the part has a semantic frame connector (Layer 1) established
+- When you want constraint vectors to be expressed in semantic-frame terms
+  (e.g. "+y = front of part") rather than raw design-frame axes
+- Omit when the design frame already matches the intended semantics (most
+  native FreeCAD parts) — default behaviour is unchanged
 
 ## Key Rules
 - **LLM MUST pass only `list[float]` to `create_connector`** — no resolver dicts, no face names
 - `origin_local` is INVARIANT: does not change when part moves
 - `origin_global` is LIVE: computed on-query from `lcs.getGlobalPlacement()`
+- Prefer `bbox_side` over `normal_*` vector constraints for stability and readability
+- `shape_bbox` in `find_faces_by_constraints` response reveals principal axes without needing prior knowledge
+- `bbox_side_hint` per candidate face enables discovery of bbox-side roles at import time
+- `body_frame_global` replaces manual quaternion parsing for orientation reasoning
 - `include_local=True` in `list_assembly_state` for debugging local frames
 - Requires FreeCAD 1.1+ for `Part::LocalCoordinateSystem`
 - Legacy `Part::Feature` connectors are still readable for backward compatibility""",

@@ -40,11 +40,38 @@ def register_assembly_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
         object_name: str,
         constraints: dict[str, Any],
         doc_name: str | None = None,
+        reference_frame_connector: str | None = None,
     ) -> dict[str, Any]:
         """Find faces matching structured local geometric constraints.
 
-        Constraint vectors and regions are interpreted in the object's local
-        geometry frame. Returned candidate geometry is local-only.
+        Constraint vectors and regions are interpreted in the reference frame.
+        By default the reference frame is the object's design frame (the original
+        modeling coordinate system), which is stable regardless of how the part
+        has been moved or rotated in the assembly.
+
+        When ``reference_frame_connector`` is provided, the named
+        ``Part::LocalCoordinateSystem`` connector's frame is used instead.  This
+        lets constraints be expressed in a part-level **semantic frame** — for
+        example a frame created at labeling time to define which axis is the
+        part's height direction — without knowing the design-frame axis alignment.
+        Pass the LCS object name (e.g. ``"LCS_semantic_frame"``).  If omitted,
+        behaviour is identical to the previous default (design frame).
+
+        Args:
+            object_name: Name of the FreeCAD object to inspect.
+            constraints: Dict of geometric filter criteria (bbox_side, surface_type,
+                normal_same_direction_to, min_hole_count, area, region_hint, etc.).
+                Vectors are interpreted in the chosen reference frame.
+            doc_name: Document name. Uses active document when None.
+            reference_frame_connector: Optional name of a
+                ``Part::LocalCoordinateSystem`` object whose global placement
+                defines the reference frame for all constraints and outputs.
+                When None (default), the object's design frame is used.
+
+        Returns:
+            Dict with object_name, shape_bbox, constraints mirror, and ranked
+            candidates list. Each candidate includes center_local, normal_local,
+            bbox_local, bbox_side_hint and hole info — all in the chosen frame.
         """
         bridge = await get_bridge()
         code = f"""
@@ -61,11 +88,18 @@ if obj is None:
 if not hasattr(obj, "Shape"):
     raise ValueError("Object has no shape")
 
-# Transform shape to part's local design frame so constraints and outputs
-# are stable regardless of how the part has been moved or rotated.
-gpl = obj.getGlobalPlacement()
+# Choose reference frame: semantic-frame connector if supplied, else design frame.
+# The design-frame default keeps behaviour identical to the previous implementation.
+ref_connector_name = {reference_frame_connector!r}
+if ref_connector_name is not None:
+    ref_lcs = doc.getObject(ref_connector_name)
+    if ref_lcs is None:
+        raise ValueError(f"reference_frame_connector not found: {{ref_connector_name!r}}")
+    ref_pl = ref_lcs.getGlobalPlacement()
+else:
+    ref_pl = obj.getGlobalPlacement()   # design frame (default)
 shape = obj.Shape.copy()
-shape.transformShape(gpl.inverse().toMatrix())
+shape.transformShape(ref_pl.inverse().toMatrix())
 bb = shape.BoundBox
 
 def v(data):
@@ -229,6 +263,17 @@ def filter_holes_by_radius(holes, hole_constraints):
     hole_faces = sorted({{face for hole in filtered for face in hole["faces"]}})
     return filtered, hole_faces
 
+def detect_bbox_sides(face_bb, shape_bb):
+    eps = max(shape_bb.XLength, shape_bb.YLength, shape_bb.ZLength, 1.0) * 1e-5
+    sides = []
+    if abs(face_bb.XMax - shape_bb.XMax) <= eps: sides.append("+x")
+    if abs(face_bb.XMin - shape_bb.XMin) <= eps: sides.append("-x")
+    if abs(face_bb.YMax - shape_bb.YMax) <= eps: sides.append("+y")
+    if abs(face_bb.YMin - shape_bb.YMin) <= eps: sides.append("-y")
+    if abs(face_bb.ZMax - shape_bb.ZMax) <= eps: sides.append("+z")
+    if abs(face_bb.ZMin - shape_bb.ZMin) <= eps: sides.append("-z")
+    return sides
+
 candidates = []
 for idx, face in enumerate(shape.Faces, start=1):
     surface_type = face.Surface.__class__.__name__
@@ -325,6 +370,7 @@ for idx, face in enumerate(shape.Faces, start=1):
         "center_local": arr(face.CenterOfMass),
         "normal_local": arr(normal) if normal is not None else None,
         "bbox_local": bbox_values(face.BoundBox),
+        "bbox_side_hint": detect_bbox_sides(face.BoundBox, bb),
         "is_external": is_ext,
         "matching_hole_faces": hole_faces,
         "matching_holes": holes,
@@ -333,7 +379,17 @@ for idx, face in enumerate(shape.Faces, start=1):
     }})
 
 candidates.sort(key=lambda item: (-item["score"], -item["area"], item["index"]))
-_result_ = {{"object_name": obj.Name, "constraints": constraints, "candidates": candidates}}
+_result_ = {{
+    "object_name": obj.Name,
+    "shape_bbox": {{
+        "x_length": round(bb.XLength, 6),
+        "y_length": round(bb.YLength, 6),
+        "z_length": round(bb.ZLength, 6),
+        "center": arr(bb.Center),
+    }},
+    "constraints": constraints,
+    "candidates": candidates,
+}}
 """
         result = await bridge.execute_python(code)
         return _raise_if_failed(result, "Find faces by constraints failed")
@@ -684,6 +740,7 @@ global_secondary = global_rot.multVec(FreeCAD.Vector(0, 1, 0))
 global_tertiary = global_rot.multVec(FreeCAD.Vector(0, 0, 1))
 
 obj_global_pl = obj.getGlobalPlacement() if hasattr(obj, "getGlobalPlacement") else obj.Placement
+obj_rot = obj_global_pl.Rotation
 
 contract = {{
     "name": lcs.Name,
@@ -701,19 +758,33 @@ contract = {{
     "contract_version": 2,
 }}
 
+# Collect all connectors on the reference object for a complete observation
+all_obj_connectors = []
+for c in doc.Objects:
+    if c.TypeId == "Part::LocalCoordinateSystem" and hasattr(c, "SemanticLabel"):
+        if getattr(c, "ReferenceObjectName", "") == obj.Name:
+            c_pl = c.getGlobalPlacement()
+            c_rot = c_pl.Rotation
+            all_obj_connectors.append({{
+                "name": c.Name,
+                "semantic_label": c.SemanticLabel,
+                "origin_global": arr(c_pl.Base),
+                "primary_axis_global": arr(c_rot.multVec(FreeCAD.Vector(1, 0, 0))),
+            }})
+
 observation = {{
     "document": doc.Name,
     "objects": [{{
         "name": obj.Name,
         "label": obj.Label,
         "global_position": arr(obj_global_pl.Base),
-        "global_orientation_quat": [round(v, 9) for v in obj_global_pl.Rotation.Q],
-        "connectors": [{{
-            "name": lcs.Name,
-            "semantic_label": semantic_label,
-            "origin_global": arr(global_origin),
-            "primary_axis_global": arr(global_primary),
-        }}],
+        "global_orientation_quat": [round(v, 9) for v in obj_rot.Q],
+        "body_frame_global": {{
+            "x_axis": arr(obj_rot.multVec(FreeCAD.Vector(1, 0, 0))),
+            "y_axis": arr(obj_rot.multVec(FreeCAD.Vector(0, 1, 0))),
+            "z_axis": arr(obj_rot.multVec(FreeCAD.Vector(0, 0, 1))),
+        }},
+        "connectors": all_obj_connectors,
     }}],
     "relationships": [],
 }}
@@ -884,6 +955,7 @@ def connector_global_info(connector, ref_obj=None):
 
 def describe_object_global(obj):
     global_pl = object_placement(obj)
+    rot = global_pl.Rotation
     obj_connectors = []
     for candidate in doc.Objects:
         if _is_lcs_connector(candidate) and getattr(candidate, "ReferenceObjectName", None) == obj.Name:
@@ -894,7 +966,12 @@ def describe_object_global(obj):
         "name": obj.Name,
         "label": obj.Label,
         "global_position": arr(global_pl.Base),
-        "global_orientation_quat": [round(v, 9) for v in global_pl.Rotation.Q],
+        "global_orientation_quat": [round(v, 9) for v in rot.Q],
+        "body_frame_global": {{
+            "x_axis": arr(rot.multVec(FreeCAD.Vector(1, 0, 0))),
+            "y_axis": arr(rot.multVec(FreeCAD.Vector(0, 1, 0))),
+            "z_axis": arr(rot.multVec(FreeCAD.Vector(0, 0, 1))),
+        }},
         "connectors": obj_connectors,
     }}
 
@@ -1131,6 +1208,7 @@ for name in sorted(selected):
         warnings.append(f"Assembly object not found: {{name}}")
         continue
     global_pl = object_placement(obj)
+    rot = global_pl.Rotation
     connectors = []
     for lcs in lcs_by_object.get(name, []):
         connectors.append(connector_info_lcs(lcs))
@@ -1141,7 +1219,12 @@ for name in sorted(selected):
         "label": obj.Label,
         "type_id": obj.TypeId,
         "global_position": arr(global_pl.Base),
-        "global_orientation_quat": [round(v, 9) for v in global_pl.Rotation.Q],
+        "global_orientation_quat": [round(v, 9) for v in rot.Q],
+        "body_frame_global": {{
+            "x_axis": arr(rot.multVec(FreeCAD.Vector(1, 0, 0))),
+            "y_axis": arr(rot.multVec(FreeCAD.Vector(0, 1, 0))),
+            "z_axis": arr(rot.multVec(FreeCAD.Vector(0, 0, 1))),
+        }},
         "connectors": connectors,
     }})
 

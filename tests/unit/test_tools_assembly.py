@@ -455,3 +455,48 @@ class TestAssemblyTools:
 
         with pytest.raises(ValueError, match="boom"):
             await register_tools["find_faces_by_constraints"]("Missing", {})
+
+    @pytest.mark.asyncio
+    async def test_find_faces_by_constraints_default_uses_design_frame(
+        self, register_tools, mock_bridge
+    ):
+        """Without reference_frame_connector the design frame (obj.getGlobalPlacement) is used."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"candidates": []})
+        )
+
+        await register_tools["find_faces_by_constraints"]("Part", {})
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        # Default path: ref_connector_name is None, so design frame branch is taken
+        assert "ref_connector_name = None" in code
+        assert "ref_pl = obj.getGlobalPlacement()" in code
+        # Semantic-frame lookup must not be attempted
+        assert "ref_lcs = doc.getObject(ref_connector_name)" in code  # branch exists
+        # But the None value means it will not be executed at runtime
+
+    @pytest.mark.asyncio
+    async def test_find_faces_by_constraints_semantic_frame_connector(
+        self, register_tools, mock_bridge
+    ):
+        """When reference_frame_connector is set, the LCS connector frame is used."""
+        mock_bridge.execute_python = AsyncMock(
+            return_value=self._success({"candidates": []})
+        )
+
+        await register_tools["find_faces_by_constraints"](
+            "Part",
+            {"bbox_side": "-z"},
+            reference_frame_connector="LCS_semantic_frame",
+        )
+
+        code = mock_bridge.execute_python.call_args.args[0]
+        # Connector name is embedded
+        assert "ref_connector_name = 'LCS_semantic_frame'" in code
+        # Lookup and global placement of the LCS are present
+        assert "ref_lcs = doc.getObject(ref_connector_name)" in code
+        assert "ref_pl = ref_lcs.getGlobalPlacement()" in code
+        # Error path for missing connector is present
+        assert "reference_frame_connector not found" in code
+        # Shape is transformed using ref_pl, not directly obj.getGlobalPlacement()
+        assert "shape.transformShape(ref_pl.inverse().toMatrix())" in code

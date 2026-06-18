@@ -1482,9 +1482,12 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                     ),
                     "note": (
                         "Two-phase workflow: (1) discover candidates via get_mounting_features "
-                        "which returns explicit [x,y,z] coordinates; (2) create connectors via "
-                        "create_connector passing those coordinates. list_assembly_state returns "
-                        "global world-frame coordinates for reflective modeling."
+                        "or find_faces_by_constraints (returns shape_bbox + bbox_side_hint per "
+                        "face so faces can be described by symbolic bbox-side names rather than "
+                        "raw normal vectors); (2) create connectors via create_connector. "
+                        "list_assembly_state and create_connector/align_coordinate_systems "
+                        "observations include body_frame_global showing the design-frame X/Y/Z "
+                        "axes in world coordinates for reflective modeling after rotation."
                     ),
                     "tools": [
                         {
@@ -1500,10 +1503,20 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "name": "find_faces_by_constraints",
                             "description": (
                                 "Find faces matching geometric constraints (surface type, normal "
-                                "direction, hole count, area, etc.). Returns scored candidates "
-                                "with local coordinates."
+                                "direction, hole count, area, bbox_side, etc.). Returns scored "
+                                "candidates with local coordinates, bbox_side_hint (which bbox "
+                                "sides each face sits on), and shape_bbox (overall bounding box "
+                                "dimensions to infer the part's principal axes without needing "
+                                "to know design-frame vectors). Optionally accepts "
+                                "reference_frame_connector (LCS object name) to interpret all "
+                                "constraints and outputs in a part-level semantic frame instead "
+                                "of the default design frame."
                             ),
-                            "key_params": ["object_name", "constraints"],
+                            "key_params": [
+                                "object_name",
+                                "constraints",
+                                "reference_frame_connector",
+                            ],
                         },
                         {
                             "name": "create_connector",
@@ -1511,7 +1524,9 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "Create a connector on a part as a Part::LocalCoordinateSystem "
                                 "(FreeCAD 1.1+). Accepts only explicit list[float] coordinates - "
                                 "no resolver dicts. The LCS tracks part movement automatically. "
-                                "Returns contract with both local and global coordinates."
+                                "Returns contract with local/global coordinates and an observation "
+                                "containing all connectors on the reference part plus "
+                                "body_frame_global showing current design-frame axis directions."
                             ),
                             "key_params": [
                                 "object_name",
@@ -1527,7 +1542,9 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": (
                                 "Align a moving part by matching two connector frames. Computes "
                                 "SE(3) rigid transform, updates moving.Placement, and triggers "
-                                "FreeCAD recompute so all LCS connectors auto-update."
+                                "FreeCAD recompute so all LCS connectors auto-update. Observation "
+                                "includes body_frame_global for both parts so the agent can "
+                                "verify final orientation without calling list_assembly_state."
                             ),
                             "key_params": [
                                 "moving_object",
@@ -1542,7 +1559,11 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": (
                                 "List assembly parts and connectors as a geometric object list "
                                 "with global world-frame coordinates (ToolCAD reflective modeling "
-                                "pattern). Set include_local=True for local-frame debug fields."
+                                "pattern). Each part entry includes body_frame_global showing "
+                                "design-frame X/Y/Z axes in world space (readable alternative to "
+                                "global_orientation_quat). Set include_local=True for "
+                                "local-frame debug fields. Call when a full assembly view is "
+                                "needed; individual tools return their own minimal observations."
                             ),
                             "key_params": ["object_names", "include_local"],
                         },

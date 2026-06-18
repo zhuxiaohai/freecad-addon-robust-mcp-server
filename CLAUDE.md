@@ -2085,24 +2085,24 @@ objects that automatically track part movement.
 
 **Discovery tools** (return explicit `[x,y,z]` from B-rep analysis):
 
-| Tool                          | Description                                                    |
-| ----------------------------- | -------------------------------------------------------------- |
-| `get_mounting_features`       | Extract connector candidates from a face (returns `[x,y,z]`).  |
-| `find_faces_by_constraints`   | Find faces by geometric constraints (normal, area, holes).     |
+| Tool                          | Description                                                                                                                                                                             |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `get_mounting_features`       | Extract connector candidates from a face (returns `[x,y,z]`).                                                                                                                           |
+| `find_faces_by_constraints`   | Find faces by geometric constraints (normal, area, holes, `bbox_side`). Returns `shape_bbox` (overall bounding box) and `bbox_side_hint` per face for coordinate-free face description. |
 
 **Connector creation and alignment** (LLM passes plain numbers only):
 
-| Tool                         | Description                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `create_connector`           | Create a `Part::LocalCoordinateSystem` connector on a part. Accepts only `list[float]` inputs. FreeCAD 1.1+. |
-| `align_coordinate_systems`   | Align moving part by matching two connector frames (SE(3) rigid transform).                                  |
+| Tool                       | Description                                                                                                                                                                                               |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_connector`         | Create a `Part::LocalCoordinateSystem` connector on a part. Accepts only `list[float]` inputs. FreeCAD 1.1+. Observation includes all connectors on the part plus `body_frame_global`.                    |
+| `align_coordinate_systems` | Align moving part by matching two connector frames (SE(3) rigid transform). Observation includes `body_frame_global` for both parts so orientation can be verified without calling `list_assembly_state`. |
 
 **State observation** (geometric object list, global coords for reflective modeling):
 
-| Tool                              | Description                                                                                    |
-| --------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `list_assembly_state`             | Global-frame positions of all parts and connectors. `include_local=True` adds debug fields.    |
-| `preview_or_highlight_references` | Highlight faces/edges and draw axis preview markers.                                           |
+| Tool                              | Description                                                                                                                                                                                                                                                                                                                            |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list_assembly_state`             | Global-frame positions of all parts and connectors. Each part includes `body_frame_global` (design-frame X/Y/Z axes in world coords) as a readable alternative to the quaternion. `include_local=True` adds debug fields. Call explicitly when a full assembly view is needed; individual tools return their own minimal observations. |
+| `preview_or_highlight_references` | Highlight faces/edges and draw axis preview markers.                                                                                                                                                                                                                                                                                   |
 
 ### Example: Debugging a Macro
 

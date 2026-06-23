@@ -1,0 +1,16 @@
+# Codex HTTP MCP config example (Streamable HTTP)
+# Docs: https://developers.openai.com/codex/mcp
+#
+# Usage:
+#   1. Start MCP HTTP server: just docker::run-http 8001
+#      (or: docker compose -f deploy/docker-compose.yml up)
+#   2. Copy relevant section into ~/.codex/config.toml
+#      or replace .codex/config.toml in a trusted project.
+#   3. Disable or remove the stdio [mcp_servers.freecad] block first.
+#
+# In Codex TUI: /mcp to verify the server is active.
+
+[mcp_servers.freecad]
+url = "http://localhost:8001/mcp"
+startup_timeout_sec = 30
+tool_timeout_sec = 120

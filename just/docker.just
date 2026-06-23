@@ -64,6 +64,19 @@ run-env *args:
         {{args}} \
         {{image_name}}
 
+# Run container in HTTP mode (persistent, connects to FreeCAD on host)
+# Use this to preview cloud deployment locally with Windows FreeCAD still on host.
+# The container stays running in the background; connect via http://localhost:{port}/mcp
+run-http port="8000":
+    docker run -d --name freecad-mcp-http \
+        --add-host=host.docker.internal:host-gateway \
+        -p {{port}}:8000 \
+        -e FREECAD_MODE=xmlrpc \
+        -e FREECAD_SOCKET_HOST=host.docker.internal \
+        -e FREECAD_TRANSPORT=http \
+        -e FREECAD_HTTP_PORT=8000 \
+        {{image_name}}
+
 # Run container interactively with shell
 shell:
     docker run --rm -it \

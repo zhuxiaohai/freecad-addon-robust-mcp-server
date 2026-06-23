@@ -12,8 +12,11 @@
 # Build multi-arch:
 #   docker buildx build --platform linux/amd64,linux/arm64 -t freecad-mcp .
 #
-# Run:
+# Run (stdio mode, for Cursor/Claude Code):
 #   docker run --rm -i freecad-mcp
+#
+# Run (HTTP mode, for cloud/compose deployment):
+#   docker run -d -p 8000:8000 -e FREECAD_TRANSPORT=http freecad-mcp
 
 # =============================================================================
 # Stage 1: Builder - Install dependencies and build the package
@@ -104,13 +107,20 @@ ENV PATH="/opt/venv/bin:$PATH" \
     FREECAD_XMLRPC_PORT="9875" \
     FREECAD_TIMEOUT_MS="30000"
 
+# Declare HTTP port for MCP HTTP transport mode
+# Enable with: docker run -e FREECAD_TRANSPORT=http -p 8000:8000 freecad-mcp
+EXPOSE 8000
+
 # Switch to non-root user
 USER mcpuser
 WORKDIR /home/mcpuser
 
-# Health check - verify the server can start
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import freecad_mcp; print('ok')" || exit 1
+# Health check - verify the server is running:
+# - HTTP mode (FREECAD_TRANSPORT=http): verifies port is accepting TCP connections
+# - stdio mode (default): verifies Python package imports successfully
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import os,socket; t=os.environ.get('FREECAD_TRANSPORT','stdio'); p=int(os.environ.get('FREECAD_HTTP_PORT','8000')); socket.create_connection(('localhost',p),timeout=5).close() if t=='http' else (__import__('freecad_mcp'),print('ok'))" || exit 1
 
 # Default command - run the MCP server in stdio mode
+# For HTTP mode: docker run -e FREECAD_TRANSPORT=http -p 8000:8000 freecad-mcp
 ENTRYPOINT ["freecad-mcp"]

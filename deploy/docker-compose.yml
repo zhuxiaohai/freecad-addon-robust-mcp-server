@@ -1,0 +1,84 @@
+# Docker Compose for FreeCAD Robust MCP Stack (cloud / pre-production)
+#
+# Services:
+#   freecad      - FreeCAD headless + Robust MCP Bridge (XML-RPC :9875)
+#   freecad-mcp  - Robust MCP Server in HTTP mode (:8000/mcp)
+#
+# Usage:
+#   # Build images locally and start (first time or after code changes)
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+#   # Start with pre-built images (set image tags in .env)
+#   cp deploy/.env.example deploy/.env   # edit image tags
+#   docker compose -f deploy/docker-compose.yml pull
+#   docker compose -f deploy/docker-compose.yml up
+#
+#   # Stop
+#   docker compose -f deploy/docker-compose.yml down
+#
+# MCP endpoint (for OpenCode / assembly_agent):
+#   http://localhost:8000/mcp
+#   OpenCode config: { "type": "remote", "url": "http://freecad-mcp:8000/mcp" }
+
+services:
+  freecad:
+    # Production: set FREECAD_BRIDGE_IMAGE in .env to use a pre-built registry image
+    # Development: omit image to always build from source
+    image: ${FREECAD_BRIDGE_IMAGE:-freecad-bridge:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile.freecad-bridge
+      args:
+        FREECAD_TAG: ${FREECAD_TAG:-1.0.2}
+    volumes:
+      # Shared session data volume: FreeCAD reads/writes STP files here.
+      # assembly-opencode must mount this volume at the same path.
+      - assembly-data:/app/sessions
+    restart: unless-stopped
+    # Bridge takes 30-90s to initialise; freecad-mcp waits for healthy status.
+    healthcheck:
+      test:
+        - "CMD"
+        - "curl"
+        - "-sf"
+        - "-X"
+        - "POST"
+        - "-H"
+        - "Content-Type: text/xml"
+        - "-d"
+        - "<?xml version='1.0'?><methodCall><methodName>system.listMethods</methodName></methodCall>"
+        - "--max-time"
+        - "5"
+        - "http://localhost:9875"
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+
+  freecad-mcp:
+    # Production: set FREECAD_MCP_IMAGE in .env to use a pre-built registry image
+    image: ${FREECAD_MCP_IMAGE:-freecad-robust-mcp:latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      FREECAD_MODE: xmlrpc
+      # Connect to the freecad service via compose internal network
+      FREECAD_SOCKET_HOST: freecad
+      FREECAD_XMLRPC_PORT: "9875"
+      # HTTP transport: exposes MCP over :8000/mcp for OpenCode / remote clients
+      FREECAD_TRANSPORT: http
+      FREECAD_HTTP_PORT: "8000"
+    ports:
+      # Expose to host for local testing; in production restrict to internal network
+      - "${FREECAD_MCP_PORT:-8000}:8000"
+    depends_on:
+      freecad:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  # Shared volume for STP session files.
+  # assembly-opencode (in assembly_agent compose) must mount this same volume
+  # at the same container path to share files with the freecad container.
+  assembly-data:

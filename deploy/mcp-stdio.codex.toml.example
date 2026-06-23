@@ -1,0 +1,19 @@
+# Codex stdio MCP config example (local development)
+# Docs: https://developers.openai.com/codex/mcp
+#
+# Replace /path/to/freecad-addon-robust-mcp-server with your clone path.
+# Requires FreeCAD + Bridge running on the host (Windows GUI or freecadcmd).
+
+[mcp_servers.freecad]
+command = "uv"
+args = [
+  "run",
+  "--project",
+  "/path/to/freecad-addon-robust-mcp-server",
+  "freecad-mcp",
+]
+
+[mcp_servers.freecad.env]
+FREECAD_MODE = "xmlrpc"
+FREECAD_SOCKET_HOST = "localhost"
+FREECAD_XMLRPC_PORT = "9875"

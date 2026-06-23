@@ -41,6 +41,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from freecad_mcp.config import FreecadMode, TransportType, get_config
 
@@ -426,11 +427,14 @@ def main() -> None:
     # Run the server
     if config.transport == TransportType.HTTP:
         logger.info("Starting HTTP transport on port %d", config.http_port)
-        mcp.run(  # type: ignore[call-arg]
-            transport="streamable-http",
-            host="0.0.0.0",  # noqa: S104
-            port=config.http_port,
+        # FastMCP (mcp>=1.25) reads host/port from settings, not run() kwargs.
+        mcp.settings.host = "0.0.0.0"  # noqa: S104
+        mcp.settings.port = config.http_port
+        # Allow Docker compose service names and port-mapped host access.
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
         )
+        mcp.run(transport="streamable-http")  # type: ignore[call-arg]
     else:
         logger.info("Starting stdio transport")
         logger.info(

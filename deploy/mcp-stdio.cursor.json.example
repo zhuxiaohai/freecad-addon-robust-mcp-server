@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "freecad": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/path/to/freecad-addon-robust-mcp-server",
+        "freecad-mcp"
+      ],
+      "env": {
+        "FREECAD_MODE": "xmlrpc",
+        "FREECAD_SOCKET_HOST": "localhost",
+        "FREECAD_XMLRPC_PORT": "9875"
+      }
+    }
+  }
+}

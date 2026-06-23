@@ -58,6 +58,7 @@ class TestDockerSyntax:
         "docker::build-load",
         "docker::run",
         "docker::run-env",
+        "docker::run-http",
         "docker::shell",
         "docker::inspect",
         "docker::clean",

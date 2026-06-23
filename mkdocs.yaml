@@ -122,6 +122,7 @@ nav:
   - Home: index.md
   - Getting Started:
       - Installation: getting-started/installation.md
+      - Docker Compose: getting-started/docker-compose.md
       - Configuration: getting-started/configuration.md
       - Quick Start: getting-started/quickstart.md
   - User Guide:

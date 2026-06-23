@@ -61,9 +61,12 @@ RUN /usr/local/bin/setup-freecad.sh
 # blocking_bridge.py adds its own directory to sys.path, so no package install needed.
 COPY freecad/RobustMCPBridge/ /opt/RobustMCPBridge/
 
-# Default bridge ports (can be overridden at runtime via environment variables)
+# Default bridge configuration (can be overridden at runtime via environment variables)
+# FREECAD_BRIDGE_BIND_HOST=0.0.0.0 allows connections from other containers on the Docker
+# bridge network. In local (non-Docker) use this defaults to localhost in blocking_bridge.py.
 ENV FREECAD_XMLRPC_PORT=9875 \
-    FREECAD_SOCKET_PORT=9876
+    FREECAD_SOCKET_PORT=9876 \
+    FREECAD_BRIDGE_BIND_HOST=0.0.0.0
 
 # Expose XML-RPC port for MCP Server to connect
 EXPOSE 9875

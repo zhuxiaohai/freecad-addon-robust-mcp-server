@@ -80,9 +80,13 @@ if plugin is None:
         print("FREECAD_SOCKET_PORT and FREECAD_XMLRPC_PORT must be integers.")
         sys.exit(1)
 
+    # Bind host: defaults to localhost for local use.
+    # Set FREECAD_BRIDGE_BIND_HOST=0.0.0.0 in Docker so other containers can connect.
+    bind_host = os.environ.get("FREECAD_BRIDGE_BIND_HOST", "localhost")
+
     # Create and run the plugin
     plugin = FreecadMCPPlugin(
-        host="localhost",
+        host=bind_host,
         port=socket_port,  # JSON-RPC socket port
         xmlrpc_port=xmlrpc_port,  # XML-RPC port
         enable_xmlrpc=True,

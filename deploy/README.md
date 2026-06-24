@@ -33,13 +33,17 @@ container from other workflows.
 
 ## Files in this directory
 
-| File                           | Purpose                                           |
-| ------------------------------ | ------------------------------------------------- |
-| `docker-compose.yml`           | Two-service stack definition                      |
-| `.env.example`                 | Template for image tags and ports                 |
-| `.env`                         | Local overrides (create from example; gitignored) |
-| `mcp-http.cursor.json.example` | Cursor remote MCP config (HTTP)                   |
-| `mcp-http.codex.toml.example`  | Codex remote MCP config (HTTP)                    |
+| File                             | Purpose                                           |
+| -------------------------------- | ------------------------------------------------- |
+| `docker-compose.yml`             | Two-service stack definition                      |
+| `.env.example`                   | Template for image tags and ports                 |
+| `.env`                           | Local overrides (create from example; gitignored) |
+| `mcp-http.cursor.json.example`   | Cursor remote MCP config (HTTP)                   |
+| `mcp-http.codex.toml.example`    | Codex remote MCP config (HTTP)                    |
+| `mcp-stdio.cursor.json.example`  | Cursor local stdio MCP config template            |
+| `mcp-stdio.codex.toml.example`   | Codex local stdio MCP config template             |
+| `mcp-stdio.mcp.json.example`     | Claude Code project `.mcp.json` template (stdio)  |
+| `mcp-http.mcp.json.example`      | Claude Code project `.mcp.json` template (HTTP)   |
 
 ## Prerequisites
 

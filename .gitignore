@@ -119,6 +119,9 @@ Thumbs.db
 *.FCBak
 *.log
 
-# Local configuration
+# Local configuration (IDE / agent MCP — machine-specific paths)
 .mcp.json
 .claude
+.cursor/mcp.json
+.codex/
+.agents/

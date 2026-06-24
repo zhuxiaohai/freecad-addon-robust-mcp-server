@@ -102,7 +102,7 @@ ENV DISPLAY=:99 \
     LIBGL_ALWAYS_SOFTWARE=1 \
     FONTCONFIG_FILE=/etc/fonts/fonts.conf \
     FONTCONFIG_PATH=/etc/fonts \
-    FREECAD_TAG=1.0.2
+    FREECAD_TAG=1.1.1
 
 # Script to setup FreeCAD AppImage
 COPY tests/ci-test/setup-freecad.sh /usr/local/bin/setup-freecad.sh

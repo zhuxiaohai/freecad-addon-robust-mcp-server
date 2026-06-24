@@ -29,7 +29,7 @@ services:
       context: ..
       dockerfile: Dockerfile.freecad-bridge
       args:
-        FREECAD_TAG: ${FREECAD_TAG:-1.0.2}
+        FREECAD_TAG: ${FREECAD_TAG:-1.1.1}
     volumes:
       # Shared session data volume: FreeCAD reads/writes STP files here.
       # assembly-opencode must mount this volume at the same path.

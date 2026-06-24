@@ -21,7 +21,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # FreeCAD version to install (must match Python 3.11 requirement; see CLAUDE.md)
-ARG FREECAD_TAG=1.0.2
+ARG FREECAD_TAG=1.1.1
 ENV FREECAD_TAG=${FREECAD_TAG}
 
 # AppImage installation directory (setup-freecad.sh respects this variable)

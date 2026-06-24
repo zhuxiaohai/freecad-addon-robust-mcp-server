@@ -84,9 +84,9 @@ to validate FreeCAD + Bridge before pulling up the full stack.
 # From repository root
 docker build -f Dockerfile.freecad-bridge -t freecad-bridge:latest .
 
-# Optional: pin FreeCAD AppImage version (must match Python 3.11 / FreeCAD 1.0.x)
+# Optional: pin FreeCAD AppImage version (must match Python 3.11 / FreeCAD 1.1.x)
 docker build -f Dockerfile.freecad-bridge \
-  --build-arg FREECAD_TAG=1.0.2 \
+  --build-arg FREECAD_TAG=1.1.1 \
   -t freecad-bridge:latest .
 ```
 
@@ -138,7 +138,7 @@ cp deploy/.env.example deploy/.env
 | ---------------------- | --------------------------- | ----------------------------------------------------- |
 | `FREECAD_BRIDGE_IMAGE` | `freecad-bridge:latest`     | Bridge image tag (use local build or registry)        |
 | `FREECAD_MCP_IMAGE`    | `freecad-robust-mcp:latest` | MCP server image tag                                  |
-| `FREECAD_TAG`          | `1.0.2`                     | FreeCAD AppImage version when **building** bridge     |
+| `FREECAD_TAG`          | `1.1.1`                     | FreeCAD AppImage version when **building** bridge     |
 | `FREECAD_MCP_PORT`     | `8000`                      | Host port mapped to MCP HTTP `:8000` inside container |
 
 Set `FREECAD_BRIDGE_IMAGE=freecad-bridge:latest` after a local `docker build` so

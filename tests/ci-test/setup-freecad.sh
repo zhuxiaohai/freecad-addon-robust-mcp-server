@@ -3,7 +3,7 @@
 set -euo pipefail
 
 # Validate required variables have safe defaults
-FREECAD_TAG="${FREECAD_TAG:-1.0.2}"
+FREECAD_TAG="${FREECAD_TAG:-1.1.1}"
 APPIMAGE_DIR="${APPIMAGE_DIR:-$HOME/freecad-appimage}"
 # Optional SHA256 checksum for verification (if provided, download will be verified)
 APPIMAGE_SHA256="${APPIMAGE_SHA256:-}"
@@ -123,10 +123,16 @@ case "$ARCH" in
 esac
 echo "Detected architecture: $ARCH -> Linux-$ARCH_SUFFIX"
 
-# Use direct download URL to avoid GitHub API rate limits
-# Format: FreeCAD_1.0.2-conda-Linux-aarch64-py311.AppImage
-APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_TAG}/FreeCAD_${FREECAD_TAG}-conda-Linux-${ARCH_SUFFIX}-py311.AppImage"
-APPIMAGE_NAME="FreeCAD_${FREECAD_TAG}-conda-Linux-${ARCH_SUFFIX}-py311.AppImage"
+# Use direct download URL to avoid GitHub API rate limits.
+# AppImage naming changed in FreeCAD 1.1 (no -conda- segment):
+#   1.0.x: FreeCAD_1.0.2-conda-Linux-x86_64-py311.AppImage
+#   1.1+:  FreeCAD_1.1.1-Linux-x86_64-py311.AppImage
+if [[ "$FREECAD_TAG" == 1.0.* ]]; then
+    APPIMAGE_NAME="FreeCAD_${FREECAD_TAG}-conda-Linux-${ARCH_SUFFIX}-py311.AppImage"
+else
+    APPIMAGE_NAME="FreeCAD_${FREECAD_TAG}-Linux-${ARCH_SUFFIX}-py311.AppImage"
+fi
+APPIMAGE_URL="https://github.com/FreeCAD/FreeCAD/releases/download/${FREECAD_TAG}/${APPIMAGE_NAME}"
 # APPIMAGE_PATH is defined earlier for use in cleanup_on_error trap
 
 echo "FreeCAD release: $FREECAD_TAG"

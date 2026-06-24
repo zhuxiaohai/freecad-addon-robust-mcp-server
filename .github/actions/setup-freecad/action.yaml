@@ -3,7 +3,7 @@ description: Downloads and sets up FreeCAD AppImage for CI testing (supports x86
 
 inputs:
   freecad-tag:
-    description: "Specific FreeCAD release tag to install (e.g., '1.0.2'). If empty, uses latest stable release."
+    description: "Specific FreeCAD release tag to install (e.g., '1.1.1'). If empty, uses latest stable release."
     required: false
     default: ""
 
@@ -62,23 +62,29 @@ runs:
         echo "tag=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
         # Find the Linux AppImage asset URL for the detected architecture
-        # Priority: conda build with py311 > any conda build > any AppImage
-        # The conda builds are the officially recommended AppImages
+        # Priority: conda py311 (1.0.x) > standard py311 (1.1+) > any conda > any AppImage
         APPIMAGE_URL=""
         APPIMAGE_NAME=""
 
-        # First try: conda build with py311 (most specific, preferred)
+        # First try: conda build with py311 (FreeCAD 1.0.x)
         APPIMAGE_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"conda-Linux-${ARCH_SUFFIX}-py311\\\\.AppImage$\")) | .browser_download_url" | head -1)
         APPIMAGE_NAME=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"conda-Linux-${ARCH_SUFFIX}-py311\\\\.AppImage$\")) | .name" | head -1)
 
-        # Second try: any conda build for the architecture
+        # Second try: standard py311 build (FreeCAD 1.1+)
         if [ -z "$APPIMAGE_URL" ] || [ "$APPIMAGE_URL" = "null" ]; then
-            echo "Note: py311 conda build not found, trying any conda build..."
+            echo "Note: conda py311 build not found, trying standard py311 AppImage..."
+            APPIMAGE_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"Linux-${ARCH_SUFFIX}-py311\\\\.AppImage$\")) | .browser_download_url" | head -1)
+            APPIMAGE_NAME=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"Linux-${ARCH_SUFFIX}-py311\\\\.AppImage$\")) | .name" | head -1)
+        fi
+
+        # Third try: any conda build for the architecture
+        if [ -z "$APPIMAGE_URL" ] || [ "$APPIMAGE_URL" = "null" ]; then
+            echo "Note: py311 build not found, trying any conda build..."
             APPIMAGE_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"conda-Linux-${ARCH_SUFFIX}.*\\\\.AppImage$\")) | .browser_download_url" | head -1)
             APPIMAGE_NAME=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"conda-Linux-${ARCH_SUFFIX}.*\\\\.AppImage$\")) | .name" | head -1)
         fi
 
-        # Third try: any AppImage for the architecture (fallback)
+        # Fourth try: any AppImage for the architecture (fallback)
         if [ -z "$APPIMAGE_URL" ] || [ "$APPIMAGE_URL" = "null" ]; then
             echo "Note: conda build not found, trying any ${ARCH_SUFFIX} AppImage..."
             APPIMAGE_URL=$(echo "$RELEASE_INFO" | jq -r ".assets[] | select(.name | test(\"Linux-${ARCH_SUFFIX}.*\\\\.AppImage$\")) | .browser_download_url" | head -1)

@@ -22,14 +22,43 @@ the host—no changes required.
 └──────────────────────────────────────────────────────────────┘
 ```
 
-| Service (compose) | Container name (example) | Image                       | Host port                    |
-| ----------------- | ------------------------ | --------------------------- | ---------------------------- |
-| `freecad`         | `deploy-freecad-1`       | `freecad-bridge:latest`     | none (internal)              |
-| `freecad-mcp`     | `deploy-freecad-mcp-1`   | `freecad-robust-mcp:latest` | `FREECAD_MCP_PORT` → 8000    |
+| Service (compose) | Container name (example) | Image (from `deploy/.env`)     | Host port                 |
+| ----------------- | ------------------------ | ------------------------------ | ------------------------- |
+| `freecad`         | `deploy-freecad-1`       | `FREECAD_BRIDGE_IMAGE`         | none (internal)           |
+| `freecad-mcp`     | `deploy-freecad-mcp-1`   | `FREECAD_MCP_IMAGE`            | `FREECAD_MCP_PORT` → 8000 |
 
 **Important:** Compose creates **two separate containers**. The MCP server is **not**
-inside the FreeCAD container, and compose does **not** reuse a `docker run` MCP
-container from other workflows.
+inside the FreeCAD container.
+
+## Unified image workflow
+
+**One image name** in `deploy/.env` is used for local build, `compose up`, and
+registry push. There is no separate `freecad-bridge:latest` vs registry tag — that
+causes duplicate images with different IDs.
+
+```text
+deploy/.env  →  FREECAD_*_IMAGE (e.g. zhuxiaohai/freecad-bridge:dev)
+       │
+       ├─ just docker::compose-build     →  local image with that tag
+       ├─ just docker::compose-up        →  run stack (same local image)
+       └─ just docker::publish-push-*    →  push same tag to registry
+```
+
+### Tag policy
+
+| Tag        | Mutable? | Who uses it                              | How to publish                 |
+| ---------- | -------- | ---------------------------------------- | ------------------------------ |
+| `dev`      | Yes      | Dev / staging; downstream fast iteration | `just docker::publish-dev`     |
+| `X.Y.Z`    | No       | Production                               | `just docker::publish 1.0.0`   |
+
+Downstream compose should **pin `:dev`** (or a semver for production) and update with:
+
+```bash
+docker compose pull && docker compose up -d --no-build
+```
+
+You overwrite `:dev` on the registry after each iteration; downstream does not change
+their `.env`.
 
 ## Files in this directory
 
@@ -48,8 +77,9 @@ container from other workflows.
 ## Prerequisites
 
 - Docker and Docker Compose v2
+- `deploy/.env` created from `.env.example` (**required** — compose reads image tags from here)
 - Enough disk space for `freecad-bridge` (~6 GB; includes FreeCAD AppImage)
-- Ports on the host planned to avoid conflicts (see [Port planning](#port-planning))
+- Docker Hub (or other registry) login if you push images
 
 ## Quick start (full stack)
 
@@ -57,16 +87,33 @@ From the repository root:
 
 ```bash
 cp deploy/.env.example deploy/.env
-# Edit deploy/.env if needed (image tags, FREECAD_MCP_PORT)
+# Edit FREECAD_*_IMAGE if your registry namespace differs
 
-# Build MCP image (bridge image may already exist from a prior build)
-docker compose -f deploy/docker-compose.yml build freecad-mcp
+# First time or after code changes: build both images (tags from deploy/.env)
+just docker::compose-build
 
-# Start in background
-docker compose -f deploy/docker-compose.yml up -d
+# Start in background (no rebuild)
+just docker::compose-up
 
 # Check status
 docker compose -f deploy/docker-compose.yml ps
+```
+
+### Publish to a registry (same tags as local)
+
+```bash
+# Build + push both images (e.g. zhuxiaohai/freecad-bridge:dev)
+just docker::publish-dev
+
+# Or build locally first, push when ready:
+just docker::compose-build-mcp
+just docker::publish-push-mcp
+```
+
+Show resolved image names and commands:
+
+```bash
+just docker::publish-show
 ```
 
 ### MCP endpoints
@@ -79,58 +126,17 @@ docker compose -f deploy/docker-compose.yml ps
 Default `FREECAD_MCP_PORT` in `.env.example` is `8000`. Change it if that port is
 already in use (for example `8002`).
 
-## Build `freecad-bridge` only
+## Daily development
 
-Build and tag the bridge image **without** starting compose. Useful when you want
-to validate FreeCAD + Bridge before pulling up the full stack.
+| Step | Command |
+| ---- | ------- |
+| Changed MCP server code | `just docker::compose-build-mcp` then `just docker::compose-up` |
+| Changed bridge / workbench | `just docker::compose-build-bridge` then `just docker::compose-up` |
+| Share with downstream | `just docker::publish-push-mcp` and/or `just docker::publish-push-bridge` |
+| Remove old `freecad-*:latest` images | `just docker::clean-legacy-tags` |
 
-```bash
-# From repository root
-docker build -f Dockerfile.freecad-bridge -t freecad-bridge:latest .
-
-# Optional: pin FreeCAD AppImage version (must match Python 3.11 / FreeCAD 1.1.x)
-docker build -f Dockerfile.freecad-bridge \
-  --build-arg FREECAD_TAG=1.1.1 \
-  -t freecad-bridge:latest .
-```
-
-First build downloads the FreeCAD AppImage and may take several minutes.
-
-### Smoke test (standalone bridge)
-
-```bash
-docker run -d --name freecad-bridge-test -p 9875:9875 freecad-bridge:latest
-
-# Wait 30–90s, then:
-curl -sf -X POST -H "Content-Type: text/xml" \
-  -d '<?xml version="1.0"?><methodCall><methodName>ping</methodName></methodCall>' \
-  http://localhost:9875
-
-docker logs -f freecad-bridge-test
-docker rm -f freecad-bridge-test
-```
-
-**Note:** `-p 9875:9875` maps bridge to the host and **conflicts** with a FreeCAD
-Bridge already running on Windows/macOS/Linux at `localhost:9875`. For compose,
-the `freecad` service does **not** publish 9875 to the host—only this standalone
-test needs the port mapping.
-
-### How the Docker image installs Bridge (vs FreeCAD wiki)
-
-The [Robust MCP Bridge wiki](https://wiki.freecad.org/Robust_MCP_Bridge_Workbench/en)
-describes manual install: download a GitHub release into
-`~/.local/share/FreeCAD/Mod/FreecadRobustMCPBridge/`.
-
-The Docker image instead:
-
-1. Installs FreeCAD from the official **AppImage** (via `tests/ci-test/setup-freecad.sh`)
-2. **Copies** `freecad/RobustMCPBridge/` from this repository to `/opt/RobustMCPBridge/`
-3. Starts headless with:
-   `freecadcmd /opt/RobustMCPBridge/freecad_mcp_bridge/blocking_bridge.py`
-
-This skips the Mod directory because headless mode only needs `blocking_bridge.py`
-(which imports the bridge server directly). GUI workbench features (toolbar,
-preferences UI) are not used in the container.
+**Avoid** `docker compose up --build` with legacy `freecad-*:latest` tags — use
+`compose-build` + `compose-up` so the image name always matches `deploy/.env`.
 
 ## Configuration (`deploy/.env`)
 
@@ -138,57 +144,94 @@ preferences UI) are not used in the container.
 cp deploy/.env.example deploy/.env
 ```
 
-| Variable               | Default                     | Description                                           |
-| ---------------------- | --------------------------- | ----------------------------------------------------- |
-| `FREECAD_BRIDGE_IMAGE` | `freecad-bridge:latest`     | Bridge image tag (use local build or registry)        |
-| `FREECAD_MCP_IMAGE`    | `freecad-robust-mcp:latest` | MCP server image tag                                  |
-| `FREECAD_TAG`          | `1.1.1`                     | FreeCAD AppImage version when **building** bridge     |
-| `FREECAD_MCP_PORT`     | `8000`                      | Host port mapped to MCP HTTP `:8000` inside container |
+| Variable               | Example                              | Description                                        |
+| ---------------------- | ------------------------------------ | -------------------------------------------------- |
+| `FREECAD_BRIDGE_IMAGE` | `zhuxiaohai/freecad-bridge:dev`      | Bridge image tag (local build + registry push)     |
+| `FREECAD_MCP_IMAGE`    | `zhuxiaohai/freecad-robust-mcp:dev`  | MCP server image tag (local build + registry push) |
+| `FREECAD_TAG`          | `1.1.1`                              | FreeCAD AppImage version when **building** bridge  |
+| `FREECAD_MCP_PORT`     | `8000`                               | Host port mapped to MCP HTTP `:8000` in container  |
 
-Set `FREECAD_BRIDGE_IMAGE=freecad-bridge:latest` after a local `docker build` so
-compose reuses the image instead of rebuilding.
+Override registry namespace for publish (optional):
 
-`.env` is only read by **docker compose**, not by `docker build -f Dockerfile.freecad-bridge`.
+```bash
+export DOCKER_USER=zhuxiaohai
+export DOCKER_PUBLISH_TAG=dev
+export DOCKER_REGISTRY=ghcr.io   # omit for Docker Hub
+```
+
+Image lines in `deploy/.env` must match the namespace and tag you push.
 
 ## Common commands
 
-All commands run from the **repository root**.
+All commands run from the **repository root**. Prefer `just` wrappers — they read
+`deploy/.env` automatically.
 
 ```bash
-# --- Lifecycle ---
-docker compose -f deploy/docker-compose.yml up -d      # start (detached)
-docker compose -f deploy/docker-compose.yml up --build # rebuild + start (foreground)
-docker compose -f deploy/docker-compose.yml down         # stop and remove containers
-docker compose -f deploy/docker-compose.yml down -v    # also remove assembly-data volume
+# --- Build (tags from deploy/.env) ---
+just docker::compose-build              # both services
+just docker::compose-build-bridge       # bridge only
+just docker::compose-build-mcp          # MCP only
 
-# --- Status and logs ---
-docker compose -f deploy/docker-compose.yml ps
+# --- Run ---
+just docker::compose-up                   # start detached, no rebuild
+docker compose -f deploy/docker-compose.yml down
+docker compose -f deploy/docker-compose.yml down -v   # also remove volume
+
+# --- Publish to registry (same tags as local) ---
+just docker::publish-dev                  # build + push both
+just docker::publish-push-mcp             # push MCP only (after compose build)
+just docker::publish-push-bridge          # push bridge only (after compose build)
+just docker::publish 1.0.0                # immutable release tag
+
+# --- Logs ---
 docker compose -f deploy/docker-compose.yml logs -f
 docker compose -f deploy/docker-compose.yml logs -f freecad
 docker compose -f deploy/docker-compose.yml logs -f freecad-mcp
-
-# --- Build ---
-docker compose -f deploy/docker-compose.yml build              # both services
-docker compose -f deploy/docker-compose.yml build freecad      # bridge only
-docker compose -f deploy/docker-compose.yml build freecad-mcp  # MCP only
-
-# --- Use pre-built images (no build) ---
-docker compose -f deploy/docker-compose.yml up -d --no-build
-
-# --- Bridge image only (no compose) ---
-docker build -f Dockerfile.freecad-bridge -t freecad-bridge:latest .
 ```
 
-### Equivalent `just` commands (MCP server only)
+### Downstream compose
 
-These target the **MCP server image** on Docker Hub naming; they do **not** build
-`freecad-bridge` or run compose:
+Use the **same** `FREECAD_*_IMAGE` values in their `.env`:
 
 ```bash
-just docker::build          # build freecad-robust-mcp image
-just docker::run-http       # MCP HTTP container → host FreeCAD (route 3 style)
-just docker::test           # integration test vs host bridge
+FREECAD_BRIDGE_IMAGE=zhuxiaohai/freecad-bridge:dev
+FREECAD_MCP_IMAGE=zhuxiaohai/freecad-robust-mcp:dev
 ```
+
+Update after you push:
+
+```bash
+docker compose pull && docker compose up -d --no-build
+```
+
+## Bridge smoke test (standalone, optional)
+
+Uses the image tag from `deploy/.env` (not a separate `freecad-bridge:latest`):
+
+```bash
+set -a && source deploy/.env && set +a
+docker run -d --name freecad-bridge-test -p 9875:9875 "${FREECAD_BRIDGE_IMAGE}"
+
+# Wait 30–90s, then:
+curl -sf -X POST -H "Content-Type: text/xml" \
+  -d '<?xml version="1.0"?><methodCall><methodName>ping</methodName></methodCall>' \
+  http://localhost:9875
+
+docker rm -f freecad-bridge-test
+```
+
+**Note:** `-p 9875:9875` conflicts with a bridge on the host. Compose does **not**
+publish 9875 to the host.
+
+### How the Docker image installs Bridge (vs FreeCAD wiki)
+
+The [Robust MCP Bridge wiki](https://wiki.freecad.org/Robust_MCP_Bridge_Workbench/en)
+describes manual install via Addon Manager. The Docker image instead:
+
+1. Installs FreeCAD from the official **AppImage** (via `tests/ci-test/setup-freecad.sh`)
+2. **Copies** `freecad/RobustMCPBridge/` from this repository to `/opt/RobustMCPBridge/`
+3. Starts headless with:
+   `freecadcmd /opt/RobustMCPBridge/freecad_mcp_bridge/blocking_bridge.py`
 
 ## Deployment modes compared
 
@@ -198,8 +241,8 @@ just docker::test           # integration test vs host bridge
 | Route 3 (`just docker::run-http`) | Host (`host.docker.internal:9875`) | HTTP | `http://localhost:<port>/mcp` |
 | **Compose (this doc)** | `deploy-freecad-1` container | HTTP | `http://localhost:<FREECAD_MCP_PORT>/mcp` |
 
-Route 3 and compose each run their **own** MCP container. They do not share a
-container. You can run both if host ports differ.
+Route 3 uses `just docker::build` (local `freecad-robust-mcp` image only) — **not**
+the compose stack workflow. Route 3 and compose each run their **own** MCP container.
 
 ## Port planning
 
@@ -210,8 +253,7 @@ container. You can run both if host ports differ.
 | `8001` | Example: route-3 `freecad-mcp-http` on host |
 | `8002` | Example: compose `FREECAD_MCP_PORT` when 8000/8001 are taken |
 
-Compose **does not** publish bridge port `9875` to the host, so Docker full stack
-and Windows Bridge on `localhost:9875` can run at the same time.
+Compose **does not** publish bridge port `9875` to the host.
 
 ## MCP client examples
 
@@ -231,8 +273,7 @@ and Windows Bridge on `localhost:9875` can run at the same time.
 Replace `8002` with your `FREECAD_MCP_PORT`.
 
 **Assembly agent** (same compose network): use `http://freecad-mcp:8000/mcp` and
-mount the `assembly-data` volume at the same path as the `freecad` service
-(`/app/sessions`).
+mount the `assembly-data` volume at `/app/sessions`.
 
 ## Troubleshooting
 
@@ -240,8 +281,7 @@ mount the `assembly-data` volume at the same path as the `freecad` service
 
 - First start can take 30–90 seconds while FreeCAD initializes.
 - Check logs: `docker compose -f deploy/docker-compose.yml logs freecad`
-- Rebuild bridge after code changes:
-  `docker build -f Dockerfile.freecad-bridge -t freecad-bridge:latest .`
+- Rebuild bridge: `just docker::compose-build-bridge` then `just docker::compose-up`
 
 ### MCP cannot connect to FreeCAD
 
@@ -249,6 +289,11 @@ mount the `assembly-data` volume at the same path as the `freecad` service
   `Dockerfile.freecad-bridge`).
 - In compose, MCP must use `FREECAD_SOCKET_HOST: freecad` (service name), not
   `localhost`.
+
+### Duplicate images in Docker Desktop
+
+- Use only `deploy/.env` tags (`zhuxiaohai/...:dev`), not `freecad-*:latest`.
+- Run `just docker::clean-legacy-tags` to remove legacy local tags.
 
 ### Port already allocated
 
@@ -260,7 +305,7 @@ mount the `assembly-data` volume at the same path as the `freecad` service
 | Container name         | Source                            |
 | ---------------------- | --------------------------------- |
 | `freecad-mcp-http`     | `just docker::run-http` (route 3) |
-| `deploy-freecad-mcp-1` | `docker compose up` (this stack)  |
+| `deploy-freecad-mcp-1` | `just docker::compose-up`         |
 
 ## Related documentation
 

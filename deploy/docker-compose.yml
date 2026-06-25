@@ -4,27 +4,22 @@
 #   freecad      - FreeCAD headless + Robust MCP Bridge (XML-RPC :9875)
 #   freecad-mcp  - Robust MCP Server in HTTP mode (:8000/mcp)
 #
-# Usage:
-#   # Build images locally and start (first time or after code changes)
-#   docker compose -f deploy/docker-compose.yml up --build
+# Unified workflow (build, run, and push use the SAME image tags from deploy/.env):
+#   cp deploy/.env.example deploy/.env   # set FREECAD_*_IMAGE (e.g. user/freecad-bridge:dev)
+#   just docker::compose-build           # build both images locally
+#   just docker::compose-up                # start stack (no rebuild)
+#   just docker::publish-dev               # build + push to registry (same tags)
 #
-#   # Start with pre-built images (set image tags in .env)
-#   cp deploy/.env.example deploy/.env   # edit image tags
-#   docker compose -f deploy/docker-compose.yml pull
-#   docker compose -f deploy/docker-compose.yml up
+# Downstream: pin the same FREECAD_*_IMAGE values; run pull + up --no-build to update.
 #
-#   # Stop
-#   docker compose -f deploy/docker-compose.yml down
+# Stop: docker compose -f deploy/docker-compose.yml down
 #
-# MCP endpoint (for OpenCode / assembly_agent):
-#   http://localhost:8000/mcp
-#   OpenCode config: { "type": "remote", "url": "http://freecad-mcp:8000/mcp" }
+# MCP endpoint: http://localhost:<FREECAD_MCP_PORT>/mcp
 
 services:
   freecad:
-    # Production: set FREECAD_BRIDGE_IMAGE in .env to use a pre-built registry image
-    # Development: omit image to always build from source
-    image: ${FREECAD_BRIDGE_IMAGE:-freecad-bridge:latest}
+    # Image tag from deploy/.env — same name for local build and registry push
+    image: ${FREECAD_BRIDGE_IMAGE:?Set FREECAD_BRIDGE_IMAGE in deploy/.env}
     build:
       context: ..
       dockerfile: Dockerfile.freecad-bridge
@@ -56,8 +51,7 @@ services:
       retries: 5
 
   freecad-mcp:
-    # Production: set FREECAD_MCP_IMAGE in .env to use a pre-built registry image
-    image: ${FREECAD_MCP_IMAGE:-freecad-robust-mcp:latest}
+    image: ${FREECAD_MCP_IMAGE:?Set FREECAD_MCP_IMAGE in deploy/.env}
     build:
       context: ..
       dockerfile: Dockerfile

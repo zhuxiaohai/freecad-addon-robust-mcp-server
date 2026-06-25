@@ -6,14 +6,13 @@
 # This container is the FreeCAD backend for the cloud compose stack.
 # The freecad-mcp container connects to this container via XML-RPC.
 #
-# Build:
-#   docker build -f Dockerfile.freecad-bridge -t freecad-bridge .
+# Build and run via compose (recommended — tag from deploy/.env):
+#   cp deploy/.env.example deploy/.env
+#   just docker::compose-build-bridge
+#   just docker::compose-up
 #
-# Run (standalone):
-#   docker run -p 9875:9875 freecad-bridge
-#
-# Run (via compose):
-#   docker compose -f deploy/docker-compose.yml up
+# Publish to registry (same tag as local):
+#   just docker::publish-push-bridge
 
 FROM ubuntu:24.04
 

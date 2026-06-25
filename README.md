@@ -147,9 +147,10 @@ git clone https://github.com/spkane/freecad-addon-robust-mcp-server.git
 cd freecad-addon-robust-mcp-server
 docker build -t freecad-robust-mcp .
 
-# Or use just commands (if you have mise/just installed)
-just docker::build        # Build for local architecture
-just docker::build-multi  # Build multi-arch (amd64 + arm64)
+# Or build and run the full compose stack (FreeCAD + Bridge + MCP HTTP):
+#   cp deploy/.env.example deploy/.env
+#   just docker::compose-build && just docker::compose-up
+# See deploy/README.md for publish workflow (same image tags locally and on registry).
 ```
 
 **Note:** The containerized Robust MCP Server only supports `xmlrpc` and `socket` modes since FreeCAD runs on your host machine (not in the container). The container connects to FreeCAD via `host.docker.internal`.
@@ -601,10 +602,14 @@ just testing::integration # Run integration tests
 just mcp::run
 just mcp::run-debug
 
-# Docker commands
-just docker::build        # Build image for local architecture
-just docker::build-multi  # Build multi-arch image (amd64 + arm64)
-just docker::run          # Run container
+# Docker — compose stack (FreeCAD + Bridge + MCP)
+just docker::compose-build   # build both images (tags from deploy/.env)
+just docker::compose-up        # start stack
+just docker::publish-dev       # build + push to registry (same tags)
+
+# Docker — Route 3 only (MCP container → FreeCAD on host)
+just docker::build             # build MCP image for route 3
+just docker::run-http          # run MCP HTTP container
 ```
 
 ### Running FreeCAD with the MCP Bridge

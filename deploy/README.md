@@ -151,15 +151,8 @@ cp deploy/.env.example deploy/.env
 | `FREECAD_TAG`          | `1.1.1`                              | FreeCAD AppImage version when **building** bridge  |
 | `FREECAD_MCP_PORT`     | `8000`                               | Host port mapped to MCP HTTP `:8000` in container  |
 
-Override registry namespace for publish (optional):
-
-```bash
-export DOCKER_USER=zhuxiaohai
-export DOCKER_PUBLISH_TAG=dev
-export DOCKER_REGISTRY=ghcr.io   # omit for Docker Hub
-```
-
-Image lines in `deploy/.env` must match the namespace and tag you push.
+Image lines in `deploy/.env` are the **only** place to set registry namespace and tag.
+Downstream repos copy the same `FREECAD_*_IMAGE` values.
 
 ## Common commands
 

@@ -9,23 +9,16 @@
 #
 # See deploy/README.md for the full workflow.
 
-# Default Docker image name (matches Docker Hub and PyPI package name)
+# Image repo names for Route 3 and upstream release (not compose stack tags).
 image_name := "freecad-robust-mcp"
 bridge_image_name := "freecad-bridge"
 registry := "spkane"
 gui_test_image := "freecad-gui-test"
 
-# Personal / fork image publish settings (override via environment):
-#   export DOCKER_USER=zhuxiaohai          # Docker Hub or GHCR namespace
-#   export DOCKER_PUBLISH_TAG=dev          # mutable tag for fast iteration
-#   export DOCKER_REGISTRY=ghcr.io         # omit for Docker Hub (default)
-#
-# Image names for compose + publish come from deploy/.env (FREECAD_*_IMAGE).
-# One build tags locally and is the same image pushed to the registry.
-publish_user := env_var_or_default('DOCKER_USER', 'zhuxiaohai')
-publish_tag_default := env_var_or_default('DOCKER_PUBLISH_TAG', 'dev')
-publish_registry := env_var_or_default('DOCKER_REGISTRY', '')
+# Compose stack: ALL image tags and deploy settings live in deploy/.env only.
+#   FREECAD_BRIDGE_IMAGE, FREECAD_MCP_IMAGE, FREECAD_TAG, FREECAD_MCP_PORT
 deploy_compose := project_root + "/deploy/docker-compose.yml"
+deploy_env := project_root + "/deploy/.env"
 
 # Project root directory (justfile_directory() returns the main justfile's directory)
 project_root := justfile_directory()
@@ -55,35 +48,28 @@ build-push tag="latest": setup-buildx
         -t {{registry}}/{{image_name}}:{{tag}} \
         --push {{project_root}}
 
-# Show resolved image names for deploy/.env (downstream compose pins these tags)
-publish-show tag=publish_tag_default:
+# Show image tags from deploy/.env (single source of truth)
+publish-show:
     #!/usr/bin/env bash
     set -euo pipefail
-    REGISTRY_HOST="{{publish_registry}}"
-    DOCKER_USER="{{publish_user}}"
-    TAG="{{tag}}"
-    if [ -n "$REGISTRY_HOST" ]; then
-        PREFIX="${REGISTRY_HOST}/${DOCKER_USER}"
-    else
-        PREFIX="${DOCKER_USER}"
+    ENV_FILE="{{deploy_env}}"
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "ERROR: Missing ${ENV_FILE}"
+        echo "  cp deploy/.env.example deploy/.env"
+        exit 1
     fi
-    echo "Set deploy/.env (compose build + push use the same tags):"
-    echo "  FREECAD_BRIDGE_IMAGE=${PREFIX}/{{bridge_image_name}}:${TAG}"
-    echo "  FREECAD_MCP_IMAGE=${PREFIX}/{{image_name}}:${TAG}"
+    echo "Compose stack settings (deploy/.env — single source of truth):"
+    grep -E '^(FREECAD_BRIDGE_IMAGE|FREECAD_MCP_IMAGE|FREECAD_TAG|FREECAD_MCP_PORT)=' "$ENV_FILE" || true
     echo ""
-    if [ -f "{{project_root}}/deploy/.env" ]; then
-        echo "Current deploy/.env image lines:"
-        grep -E '^FREECAD_(BRIDGE|MCP)_IMAGE=' "{{project_root}}/deploy/.env" || true
-        echo ""
-    fi
-    echo "Dev workflow (one image locally and on Hub — no extra freecad-*:latest):"
-    echo "  just docker::compose-build          # build both (tags from deploy/.env)"
-    echo "  just docker::compose-build-mcp      # MCP only"
-    echo "  just docker::compose-up               # run stack (no rebuild)"
-    echo "  just docker::publish-push-mcp         # push MCP only (after build)"
-    echo "  just docker::publish-dev              # compose build + push both"
-    echo "  just docker::clean-legacy-tags        # remove old freecad-*:latest images"
-    echo "  just docker::publish 1.0.0            # immutable release tag"
+    echo "Resolved by docker compose config:"
+    docker compose -f {{deploy_compose}} config --images
+    echo ""
+    echo "Dev workflow:"
+    echo "  just docker::compose-build          # build both"
+    echo "  just docker::compose-up               # run stack"
+    echo "  just docker::publish-dev              # build + push both"
+    echo "  just docker::publish 1.0.0            # semver release (same repo, new tag)"
+    echo "  just docker::clean-legacy-tags        # remove Route 3 freecad-*:latest tags"
 
 # Build compose stack images (output tags = deploy/.env FREECAD_*_IMAGE values)
 compose-build:
@@ -134,7 +120,7 @@ publish-push-bridge:
     echo "✓ Pushed ${IMAGE}"
 
 # Compose build + push MCP (same tag locally and on registry)
-publish-dev-mcp tag=publish_tag_default:
+publish-dev-mcp:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Building freecad-mcp via compose (tag from deploy/.env) ..."
@@ -142,35 +128,32 @@ publish-dev-mcp tag=publish_tag_default:
     just docker::publish-push-mcp
 
 # Compose build + push bridge (same tag locally and on registry)
-publish-dev-bridge tag=publish_tag_default freecad_tag="1.1.1":
+publish-dev-bridge:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "Building freecad bridge via compose (tag from deploy/.env, FREECAD_TAG={{freecad_tag}}) ..."
+    echo "Building freecad bridge via compose (tag from deploy/.env) ..."
     echo "Note: first bridge build can take a long time (FreeCAD AppImage download)."
-    FREECAD_TAG="{{freecad_tag}}" docker compose -f {{deploy_compose}} build freecad
+    docker compose -f {{deploy_compose}} build freecad
     just docker::publish-push-bridge
 
 # Compose build + push both images (bridge first, then MCP)
-publish-dev tag=publish_tag_default freecad_tag="1.1.1":
-    @just docker::publish-dev-bridge {{tag}} {{freecad_tag}}
-    @just docker::publish-dev-mcp {{tag}}
+publish-dev:
+    @just docker::publish-dev-bridge
+    @just docker::publish-dev-mcp
 
-# Push immutable semver tag (temporarily overrides deploy/.env image tags for one build)
-publish version freecad_tag="1.1.1":
+# Push immutable semver tag (same repo as deploy/.env, tag replaced for this build only)
+publish version:
     #!/usr/bin/env bash
     set -euo pipefail
-    REGISTRY_HOST="{{publish_registry}}"
-    DOCKER_USER="{{publish_user}}"
+    ENV_FILE="{{deploy_env}}"
     VERSION="{{version}}"
-    if [ -n "$REGISTRY_HOST" ]; then
-        PREFIX="${REGISTRY_HOST}/${DOCKER_USER}"
-    else
-        PREFIX="${DOCKER_USER}"
-    fi
-    export FREECAD_BRIDGE_IMAGE="${PREFIX}/{{bridge_image_name}}:${VERSION}"
-    export FREECAD_MCP_IMAGE="${PREFIX}/{{image_name}}:${VERSION}"
+    # Read current image repos from deploy/.env and swap tag to VERSION
+    BRIDGE_BASE=$(grep '^FREECAD_BRIDGE_IMAGE=' "$ENV_FILE" | cut -d= -f2 | sed 's/:[^:]*$//')
+    MCP_BASE=$(grep '^FREECAD_MCP_IMAGE=' "$ENV_FILE" | cut -d= -f2 | sed 's/:[^:]*$//')
+    export FREECAD_BRIDGE_IMAGE="${BRIDGE_BASE}:${VERSION}"
+    export FREECAD_MCP_IMAGE="${MCP_BASE}:${VERSION}"
     echo "Release build: ${FREECAD_BRIDGE_IMAGE} and ${FREECAD_MCP_IMAGE}"
-    FREECAD_TAG="{{freecad_tag}}" docker compose -f {{deploy_compose}} build
+    docker compose -f {{deploy_compose}} build
     docker push "${FREECAD_BRIDGE_IMAGE}"
     docker push "${FREECAD_MCP_IMAGE}"
     echo "✓ Pushed release images (${VERSION})"

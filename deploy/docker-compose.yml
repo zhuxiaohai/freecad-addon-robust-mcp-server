@@ -56,6 +56,8 @@ services:
       dockerfile: Dockerfile
       args:
         DOCKER_REGISTRY: ${DOCKER_REGISTRY:-hub.designorder.cn/}
+        APK_MIRROR: ${APK_MIRROR:-https://mirrors.aliyun.com/alpine/}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
     environment:
       FREECAD_MODE: xmlrpc
       # Connect to the freecad service via compose internal network

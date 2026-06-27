@@ -165,6 +165,8 @@ cp deploy/.env.example deploy/.env
 | `FREECAD_BRIDGE_IMAGE` | `hub.designorder.cn/freecad-bridge:dev`      | Bridge image (built in `service_freecad_bridge`)   |
 | `FREECAD_MCP_IMAGE`    | `hub.designorder.cn/freecad-robust-mcp:dev`  | MCP server image (built in **this** repo)          |
 | `DOCKER_REGISTRY`      | `hub.designorder.cn/`                        | Base image prefix for `Dockerfile` `FROM` lines    |
+| `APK_MIRROR`           | `https://mirrors.aliyun.com/alpine/`         | Alpine apk mirror (MCP image; not Ubuntu/apt)      |
+| `PIP_INDEX_URL`        | `https://mirrors.aliyun.com/pypi/simple/`    | PyPI mirror for pip/uv during MCP image build      |
 | `FREECAD_TAG`          | `1.1.1`                                      | FreeCAD version (bridge repo; informational here)  |
 | `FREECAD_MCP_PORT`     | `8000`                                       | Host port mapped to MCP HTTP `:8000` in container  |
 

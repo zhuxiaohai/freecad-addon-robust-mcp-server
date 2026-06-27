@@ -61,7 +61,7 @@ publish-show:
         exit 1
     fi
     echo "Compose stack settings (deploy/.env — single source of truth):"
-    grep -E '^(FREECAD_BRIDGE_IMAGE|FREECAD_MCP_IMAGE|DOCKER_REGISTRY|FREECAD_TAG|FREECAD_MCP_PORT)=' "$ENV_FILE" || true
+    grep -E '^(FREECAD_BRIDGE_IMAGE|FREECAD_MCP_IMAGE|DOCKER_REGISTRY|APK_MIRROR|PIP_INDEX_URL|FREECAD_TAG|FREECAD_MCP_PORT)=' "$ENV_FILE" || true
     echo ""
     echo "Resolved by docker compose config:"
     docker compose -f {{deploy_compose}} config --images

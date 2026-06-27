@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # FreeCAD Robust MCP Server Dockerfile
 # Multi-stage build with BuildKit optimizations for multi-arch support
 #

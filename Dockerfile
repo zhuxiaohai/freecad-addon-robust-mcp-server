@@ -21,15 +21,25 @@
 
 # Prefix for base images (empty = Docker Hub). Corporate CI uses hub.designorder.cn/.
 ARG DOCKER_REGISTRY=hub.designorder.cn/
+# Alpine apk / PyPI mirrors for corporate networks that block dl-cdn.alpinelinux.org and pypi.org.
+# Override at build time: --build-arg APK_MIRROR= --build-arg PIP_INDEX_URL= (empty = upstream defaults)
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine/
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 
 # =============================================================================
 # Stage 1: Builder - Install dependencies and build the package
 # =============================================================================
 FROM ${DOCKER_REGISTRY}python:3.11-alpine AS builder
 
-# Install build dependencies for compiling Python packages with native extensions
+ARG APK_MIRROR
+ARG PIP_INDEX_URL
+
+# Replace Alpine CDN and install build deps (Jenkins often cannot reach dl-cdn.alpinelinux.org).
 # hadolint ignore=DL3018
-RUN apk add --no-cache \
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i "s|https\?://dl-cdn.alpinelinux.org/alpine/|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi && \
+    apk add --no-cache \
     build-base \
     libffi-dev
 
@@ -39,6 +49,7 @@ WORKDIR /app
 # Upgrade pip to fix CVE-2025-8869, then install uv for fast dependency management
 # hadolint ignore=DL3013
 RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ -n "${PIP_INDEX_URL}" ]; then export PIP_INDEX_URL="${PIP_INDEX_URL}"; fi && \
     pip install --no-cache-dir --upgrade "pip>=25.3" && \
     pip install --no-cache-dir --no-compile uv
 
@@ -56,6 +67,7 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}
 # Using uv cache mount for faster rebuilds
 # --frozen ensures uv.lock is used exactly without updates
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -n "${PIP_INDEX_URL}" ]; then export UV_INDEX_URL="${PIP_INDEX_URL}"; fi && \
     uv venv /opt/venv && \
     UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-dev --no-editable
 
@@ -63,7 +75,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Stage 2: Runtime - Minimal image for running the server
 # =============================================================================
 ARG DOCKER_REGISTRY=hub.designorder.cn/
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine/
 FROM ${DOCKER_REGISTRY}python:3.11-alpine AS runtime
+
+ARG APK_MIRROR
+
+# Replace Alpine CDN and upgrade packages (same corporate network issue as builder stage).
+# hadolint ignore=DL3018
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i "s|https\?://dl-cdn.alpinelinux.org/alpine/|${APK_MIRROR}|g" /etc/apk/repositories; \
+    fi && \
+    apk upgrade --no-cache
 
 # Labels for container metadata (OCI Image Spec)
 # Note: version, revision, and created are set dynamically in CI/CD workflows
@@ -76,11 +98,6 @@ LABEL org.opencontainers.image.title="FreeCAD Robust MCP Server" \
       org.opencontainers.image.vendor="Sean P. Kane" \
       org.opencontainers.image.authors="Sean P. Kane <spkane@gmail.com>" \
       org.opencontainers.image.base.name="hub.designorder.cn/python:3.11-alpine"
-
-# Upgrade all Alpine packages to fix CVEs in base image (zlib, busybox, etc.)
-# This ensures we get security patches even if the base image is slightly stale
-# hadolint ignore=DL3018
-RUN apk upgrade --no-cache
 
 # Create non-root user for security (Alpine uses addgroup/adduser)
 RUN addgroup -g 1000 mcpuser && \

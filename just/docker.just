@@ -1,8 +1,10 @@
 # Docker build and run commands.
 #
-# Compose stack (FreeCAD + Bridge + MCP) — one image name in deploy/.env for
-# build, run, and push:
-#   just docker::compose-build | compose-up | publish-dev | publish-push-*
+# This repo builds ONLY the MCP server image (hub.designorder.cn/freecad-robust-mcp).
+# The bridge image (hub.designorder.cn/freecad-bridge) is built in service_freecad_bridge.
+#
+# Compose stack (FreeCAD + Bridge + MCP) — image tags in deploy/.env:
+#   just docker::compose-pull-bridge | compose-build-mcp | compose-up | publish-dev
 #
 # Route 3 only (MCP container → FreeCAD on host) — separate from compose:
 #   just docker::build | run-http | test
@@ -59,24 +61,40 @@ publish-show:
         exit 1
     fi
     echo "Compose stack settings (deploy/.env — single source of truth):"
-    grep -E '^(FREECAD_BRIDGE_IMAGE|FREECAD_MCP_IMAGE|FREECAD_TAG|FREECAD_MCP_PORT)=' "$ENV_FILE" || true
+    grep -E '^(FREECAD_BRIDGE_IMAGE|FREECAD_MCP_IMAGE|DOCKER_REGISTRY|FREECAD_TAG|FREECAD_MCP_PORT)=' "$ENV_FILE" || true
     echo ""
     echo "Resolved by docker compose config:"
     docker compose -f {{deploy_compose}} config --images
     echo ""
-    echo "Dev workflow:"
-    echo "  just docker::compose-build          # build both"
+    echo "Dev workflow (MCP built here; bridge from service_freecad_bridge or registry):"
+    echo "  just docker::compose-pull-bridge     # pull hub.designorder.cn/freecad-bridge:dev"
+    echo "  just docker::compose-build-mcp       # build MCP locally"
     echo "  just docker::compose-up               # run stack"
-    echo "  just docker::publish-dev              # build + push both"
-    echo "  just docker::publish 1.0.0            # semver release (same repo, new tag)"
+    echo "  just docker::publish-dev              # build + push MCP only"
+    echo "  just docker::publish 1.0.0            # semver MCP release"
     echo "  just docker::clean-legacy-tags        # remove Route 3 freecad-*:latest tags"
 
-# Build compose stack images (output tags = deploy/.env FREECAD_*_IMAGE values)
+# Build compose MCP image (output tag = deploy/.env FREECAD_MCP_IMAGE)
 compose-build:
-    docker compose -f {{deploy_compose}} build
+    docker compose -f {{deploy_compose}} build freecad-mcp
 
+# Pull bridge image (built in service_freecad_bridge repo / Jenkins)
+compose-pull-bridge:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV_FILE="{{deploy_env}}"
+    if [ ! -f "$ENV_FILE" ]; then
+        echo "ERROR: Missing ${ENV_FILE}"
+        echo "  cp deploy/.env.example deploy/.env"
+        exit 1
+    fi
+    IMAGE=$(grep '^FREECAD_BRIDGE_IMAGE=' "$ENV_FILE" | cut -d= -f2-)
+    echo "Pulling bridge image (built in service_freecad_bridge repo): ${IMAGE}"
+    docker pull "${IMAGE}"
+
+# Alias for older docs/scripts — bridge is not built in this repo
 compose-build-bridge:
-    docker compose -f {{deploy_compose}} build freecad
+    @just docker::compose-pull-bridge
 
 compose-build-mcp:
     docker compose -f {{deploy_compose}} build freecad-mcp
@@ -95,7 +113,7 @@ clean-legacy-tags:
             docker rmi "$img" || true
         fi
     done
-    echo "Done. Keep only deploy/.env tags (e.g. zhuxiaohai/freecad-bridge:dev)."
+    echo "Done. Keep only deploy/.env tags (e.g. hub.designorder.cn/freecad-bridge:dev)."
 
 # Push MCP image only (must already be built via compose-build-mcp)
 publish-push-mcp:
@@ -108,16 +126,12 @@ publish-push-mcp:
     docker push "${IMAGE}"
     echo "✓ Pushed ${IMAGE}"
 
-# Push bridge image only (must already be built via compose-build-bridge)
+# Push bridge image — not supported in this repo (use service_freecad_bridge)
 publish-push-bridge:
     #!/usr/bin/env bash
-    set -euo pipefail
-    COMPOSE_FILE="{{deploy_compose}}"
-    IMAGE=$(docker compose -f "$COMPOSE_FILE" config --format json \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['services']['freecad']['image'])")
-    echo "Pushing ${IMAGE} ..."
-    docker push "${IMAGE}"
-    echo "✓ Pushed ${IMAGE}"
+    echo "ERROR: freecad-bridge image is built in service_freecad_bridge repo."
+    echo "  Push from that repo, or pull with: just docker::compose-pull-bridge"
+    exit 1
 
 # Compose build + push MCP (same tag locally and on registry)
 publish-dev-mcp:
@@ -127,36 +141,29 @@ publish-dev-mcp:
     docker compose -f {{deploy_compose}} build freecad-mcp
     just docker::publish-push-mcp
 
-# Compose build + push bridge (same tag locally and on registry)
+# Bridge publish — not supported in this repo (use service_freecad_bridge)
 publish-dev-bridge:
     #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Building freecad bridge via compose (tag from deploy/.env) ..."
-    echo "Note: first bridge build can take a long time (FreeCAD AppImage download)."
-    docker compose -f {{deploy_compose}} build freecad
-    just docker::publish-push-bridge
+    echo "ERROR: freecad-bridge image is built in service_freecad_bridge repo."
+    echo "  Use that repo's Jenkins job or: just docker::compose-pull-bridge"
+    exit 1
 
-# Compose build + push both images (bridge first, then MCP)
+# Compose build + push MCP image only
 publish-dev:
-    @just docker::publish-dev-bridge
     @just docker::publish-dev-mcp
 
-# Push immutable semver tag (same repo as deploy/.env, tag replaced for this build only)
+# Push immutable semver tag for MCP (same repo as deploy/.env, tag replaced for this build only)
 publish version:
     #!/usr/bin/env bash
     set -euo pipefail
     ENV_FILE="{{deploy_env}}"
     VERSION="{{version}}"
-    # Read current image repos from deploy/.env and swap tag to VERSION
-    BRIDGE_BASE=$(grep '^FREECAD_BRIDGE_IMAGE=' "$ENV_FILE" | cut -d= -f2 | sed 's/:[^:]*$//')
     MCP_BASE=$(grep '^FREECAD_MCP_IMAGE=' "$ENV_FILE" | cut -d= -f2 | sed 's/:[^:]*$//')
-    export FREECAD_BRIDGE_IMAGE="${BRIDGE_BASE}:${VERSION}"
     export FREECAD_MCP_IMAGE="${MCP_BASE}:${VERSION}"
-    echo "Release build: ${FREECAD_BRIDGE_IMAGE} and ${FREECAD_MCP_IMAGE}"
-    docker compose -f {{deploy_compose}} build
-    docker push "${FREECAD_BRIDGE_IMAGE}"
+    echo "Release build: ${FREECAD_MCP_IMAGE}"
+    docker compose -f {{deploy_compose}} build freecad-mcp
     docker push "${FREECAD_MCP_IMAGE}"
-    echo "✓ Pushed release images (${VERSION})"
+    echo "✓ Pushed release image (${VERSION})"
 
 # Build and load image for current architecture using buildx
 build-load: setup-buildx

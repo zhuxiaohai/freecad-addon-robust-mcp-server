@@ -2,13 +2,16 @@
 #
 # Services:
 #   freecad      - FreeCAD headless + Robust MCP Bridge (XML-RPC :9875)
+#                  Image built in service_freecad_bridge repo — pull only here.
 #   freecad-mcp  - Robust MCP Server in HTTP mode (:8000/mcp)
+#                  Image built from this repo's Dockerfile.
 #
 # Unified workflow (build, run, and push use the SAME image tags from deploy/.env):
-#   cp deploy/.env.example deploy/.env   # set FREECAD_*_IMAGE (e.g. user/freecad-bridge:dev)
-#   just docker::compose-build           # build both images locally
+#   cp deploy/.env.example deploy/.env
+#   just docker::compose-pull-bridge     # hub.designorder.cn/freecad-bridge:dev
+#   just docker::compose-build-mcp       # build MCP locally
 #   just docker::compose-up                # start stack (no rebuild)
-#   just docker::publish-dev               # build + push to registry (same tags)
+#   just docker::publish-dev               # build + push MCP (same tag)
 #
 # Downstream: pin the same FREECAD_*_IMAGE values; run pull + up --no-build to update.
 #
@@ -18,13 +21,9 @@
 
 services:
   freecad:
-    # Image tag from deploy/.env — same name for local build and registry push
+    # Bridge image from service_freecad_bridge repo (Jenkins → hub.designorder.cn)
     image: ${FREECAD_BRIDGE_IMAGE:?Set FREECAD_BRIDGE_IMAGE in deploy/.env}
-    build:
-      context: ..
-      dockerfile: Dockerfile.freecad-bridge
-      args:
-        FREECAD_TAG: ${FREECAD_TAG:-1.1.1}
+    pull_policy: missing
     volumes:
       # Shared session data volume: FreeCAD reads/writes STP files here.
       # assembly-opencode must mount this volume at the same path.
@@ -55,6 +54,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+      args:
+        DOCKER_REGISTRY: ${DOCKER_REGISTRY:-hub.designorder.cn/}
     environment:
       FREECAD_MODE: xmlrpc
       # Connect to the freecad service via compose internal network

@@ -17,11 +17,17 @@
 #
 # Run (HTTP mode, for cloud/compose deployment):
 #   docker run -d -p 8000:8000 -e FREECAD_TRANSPORT=http freecad-mcp
+#
+# Corporate registry (base images mirrored on hub.designorder.cn):
+#   docker build --build-arg DOCKER_REGISTRY=hub.designorder.cn/ -t freecad-mcp .
+
+# Prefix for base images (empty = Docker Hub). Corporate CI uses hub.designorder.cn/.
+ARG DOCKER_REGISTRY=hub.designorder.cn/
 
 # =============================================================================
 # Stage 1: Builder - Install dependencies and build the package
 # =============================================================================
-FROM python:3.11-alpine AS builder
+FROM ${DOCKER_REGISTRY}python:3.11-alpine AS builder
 
 # Install build dependencies for compiling Python packages with native extensions
 # hadolint ignore=DL3018
@@ -58,7 +64,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # =============================================================================
 # Stage 2: Runtime - Minimal image for running the server
 # =============================================================================
-FROM python:3.11-alpine AS runtime
+ARG DOCKER_REGISTRY=hub.designorder.cn/
+FROM ${DOCKER_REGISTRY}python:3.11-alpine AS runtime
 
 # Labels for container metadata (OCI Image Spec)
 # Note: version, revision, and created are set dynamically in CI/CD workflows
@@ -70,7 +77,7 @@ LABEL org.opencontainers.image.title="FreeCAD Robust MCP Server" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Sean P. Kane" \
       org.opencontainers.image.authors="Sean P. Kane <spkane@gmail.com>" \
-      org.opencontainers.image.base.name="python:3.11-alpine"
+      org.opencontainers.image.base.name="hub.designorder.cn/python:3.11-alpine"
 
 # Upgrade all Alpine packages to fix CVEs in base image (zlib, busybox, etc.)
 # This ensures we get security patches even if the base image is slightly stale

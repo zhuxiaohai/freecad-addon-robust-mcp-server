@@ -7,6 +7,21 @@ integration.
 For local IDE debugging with stdio, keep using `uv run freecad-mcp` and FreeCAD on
 the host—no changes required.
 
+## Two repositories (corporate split)
+
+| Repository | Jenkins image | Dockerfile |
+| ---------- | ------------- | ---------- |
+| `service_freecad_bridge` | `hub.designorder.cn/freecad-bridge:dev` | root `Dockerfile` |
+| **This repo** (MCP server) | `hub.designorder.cn/freecad-robust-mcp:dev` | root `Dockerfile` |
+
+Both Jenkins jobs use the **dev** branch and are triggered manually. Base images
+(`python:3.11-alpine`, `ubuntu:24.04`, etc.) pull from `hub.designorder.cn/` via the
+`DOCKER_REGISTRY` build arg.
+
+This repo **does not build** the bridge image. Compose pulls
+`FREECAD_BRIDGE_IMAGE` from the registry (or you build it locally in
+`service_freecad_bridge`).
+
 ## Architecture
 
 ```text
@@ -37,7 +52,7 @@ registry push. There is no separate `freecad-bridge:latest` vs registry tag — 
 causes duplicate images with different IDs.
 
 ```text
-deploy/.env  →  FREECAD_*_IMAGE (e.g. zhuxiaohai/freecad-bridge:dev)
+deploy/.env  →  FREECAD_*_IMAGE (e.g. hub.designorder.cn/freecad-bridge:dev)
        │
        ├─ just docker::compose-build     →  local image with that tag
        ├─ just docker::compose-up        →  run stack (same local image)
@@ -89,8 +104,9 @@ From the repository root:
 cp deploy/.env.example deploy/.env
 # Edit FREECAD_*_IMAGE if your registry namespace differs
 
-# First time or after code changes: build both images (tags from deploy/.env)
-just docker::compose-build
+# Pull bridge + build MCP (tags from deploy/.env)
+just docker::compose-pull-bridge
+just docker::compose-build-mcp
 
 # Start in background (no rebuild)
 just docker::compose-up
@@ -102,7 +118,7 @@ docker compose -f deploy/docker-compose.yml ps
 ### Publish to a registry (same tags as local)
 
 ```bash
-# Build + push both images (e.g. zhuxiaohai/freecad-bridge:dev)
+# Build + push MCP only (bridge: use service_freecad_bridge Jenkins)
 just docker::publish-dev
 
 # Or build locally first, push when ready:
@@ -131,8 +147,8 @@ already in use (for example `8002`).
 | Step | Command |
 | ---- | ------- |
 | Changed MCP server code | `just docker::compose-build-mcp` then `just docker::compose-up` |
-| Changed bridge / workbench | `just docker::compose-build-bridge` then `just docker::compose-up` |
-| Share with downstream | `just docker::publish-push-mcp` and/or `just docker::publish-push-bridge` |
+| Changed bridge / workbench | Build in `service_freecad_bridge`, push via Jenkins, then `just docker::compose-pull-bridge` |
+| Share MCP with downstream | `just docker::publish-push-mcp` |
 | Remove old `freecad-*:latest` images | `just docker::clean-legacy-tags` |
 
 **Avoid** `docker compose up --build` with legacy `freecad-*:latest` tags — use
@@ -144,12 +160,13 @@ already in use (for example `8002`).
 cp deploy/.env.example deploy/.env
 ```
 
-| Variable               | Example                              | Description                                        |
-| ---------------------- | ------------------------------------ | -------------------------------------------------- |
-| `FREECAD_BRIDGE_IMAGE` | `zhuxiaohai/freecad-bridge:dev`      | Bridge image tag (local build + registry push)     |
-| `FREECAD_MCP_IMAGE`    | `zhuxiaohai/freecad-robust-mcp:dev`  | MCP server image tag (local build + registry push) |
-| `FREECAD_TAG`          | `1.1.1`                              | FreeCAD AppImage version when **building** bridge  |
-| `FREECAD_MCP_PORT`     | `8000`                               | Host port mapped to MCP HTTP `:8000` in container  |
+| Variable               | Example                                      | Description                                        |
+| ---------------------- | -------------------------------------------- | -------------------------------------------------- |
+| `FREECAD_BRIDGE_IMAGE` | `hub.designorder.cn/freecad-bridge:dev`      | Bridge image (built in `service_freecad_bridge`)   |
+| `FREECAD_MCP_IMAGE`    | `hub.designorder.cn/freecad-robust-mcp:dev`  | MCP server image (built in **this** repo)          |
+| `DOCKER_REGISTRY`      | `hub.designorder.cn/`                        | Base image prefix for `Dockerfile` `FROM` lines    |
+| `FREECAD_TAG`          | `1.1.1`                                      | FreeCAD version (bridge repo; informational here)  |
+| `FREECAD_MCP_PORT`     | `8000`                                       | Host port mapped to MCP HTTP `:8000` in container  |
 
 Image lines in `deploy/.env` are the **only** place to set registry namespace and tag.
 Downstream repos copy the same `FREECAD_*_IMAGE` values.
@@ -160,21 +177,20 @@ All commands run from the **repository root**. Prefer `just` wrappers — they r
 `deploy/.env` automatically.
 
 ```bash
-# --- Build (tags from deploy/.env) ---
-just docker::compose-build              # both services
-just docker::compose-build-bridge       # bridge only
-just docker::compose-build-mcp          # MCP only
+# --- Build / pull (tags from deploy/.env) ---
+just docker::compose-pull-bridge        # pull bridge from registry
+just docker::compose-build-mcp          # build MCP in this repo
+just docker::compose-build              # alias: build MCP only
 
 # --- Run ---
 just docker::compose-up                   # start detached, no rebuild
 docker compose -f deploy/docker-compose.yml down
 docker compose -f deploy/docker-compose.yml down -v   # also remove volume
 
-# --- Publish to registry (same tags as local) ---
-just docker::publish-dev                  # build + push both
+# --- Publish MCP to registry (same tag as local) ---
+just docker::publish-dev                  # build + push MCP
 just docker::publish-push-mcp             # push MCP only (after compose build)
-just docker::publish-push-bridge          # push bridge only (after compose build)
-just docker::publish 1.0.0                # immutable release tag
+just docker::publish 1.0.0                # immutable MCP release tag
 
 # --- Logs ---
 docker compose -f deploy/docker-compose.yml logs -f
@@ -187,8 +203,8 @@ docker compose -f deploy/docker-compose.yml logs -f freecad-mcp
 Use the **same** `FREECAD_*_IMAGE` values in their `.env`:
 
 ```bash
-FREECAD_BRIDGE_IMAGE=zhuxiaohai/freecad-bridge:dev
-FREECAD_MCP_IMAGE=zhuxiaohai/freecad-robust-mcp:dev
+FREECAD_BRIDGE_IMAGE=hub.designorder.cn/freecad-bridge:dev
+FREECAD_MCP_IMAGE=hub.designorder.cn/freecad-robust-mcp:dev
 ```
 
 Update after you push:
@@ -274,18 +290,19 @@ mount the `assembly-data` volume at `/app/sessions`.
 
 - First start can take 30–90 seconds while FreeCAD initializes.
 - Check logs: `docker compose -f deploy/docker-compose.yml logs freecad`
-- Rebuild bridge: `just docker::compose-build-bridge` then `just docker::compose-up`
+- Rebuild bridge: push from `service_freecad_bridge` Jenkins, then
+  `just docker::compose-pull-bridge` and `just docker::compose-up`
 
 ### MCP cannot connect to FreeCAD
 
 - Ensure `FREECAD_BRIDGE_BIND_HOST=0.0.0.0` in the bridge image (set in
-  `Dockerfile.freecad-bridge`).
+  `service_freecad_bridge` root `Dockerfile`).
 - In compose, MCP must use `FREECAD_SOCKET_HOST: freecad` (service name), not
   `localhost`.
 
 ### Duplicate images in Docker Desktop
 
-- Use only `deploy/.env` tags (`zhuxiaohai/...:dev`), not `freecad-*:latest`.
+- Use only `deploy/.env` tags (`hub.designorder.cn/...:dev`), not `freecad-*:latest`.
 - Run `just docker::clean-legacy-tags` to remove legacy local tags.
 
 ### Port already allocated

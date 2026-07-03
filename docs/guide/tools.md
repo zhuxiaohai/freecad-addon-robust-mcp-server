@@ -485,6 +485,129 @@ state = await list_assembly_state()
 
 ---
 
+## Fabrication Tools (HistCAD-Style Layer 1 Primitives)
+
+HistCAD-style generic fabrication primitives for parametric solid modeling.
+The LLM or RL agent specifies geometry and constraints using kernel-independent
+JSON schemas; the adapter translates them deterministically to FreeCAD API calls.
+
+### Two-Layer Architecture
+
+```text
+User Intent (L0–L2)
+    │
+    ▼
+Layer 2 — Domain Template Tools  (tools/templates/)
+    e.g. resolve_connector_params() → FabricationPlan
+    │  FabricationPlan dict
+    ▼
+Layer 1 — Generic Fabrication Primitives  (these tools)
+    create_coordinate_system → create_sketch_geometry
+    → apply_sketch_constraints → execute_extrude / revolve / helix
+    → feature_fillet / chamfer
+    → list_tunable_params / set_tunable_param
+```
+
+### Group A: Coordinate System
+
+| Tool                       | Description                                                                            |
+| -------------------------- | -------------------------------------------------------------------------------------- |
+| `create_coordinate_system` | Create a named datum LCS from Euler angles + translation. Returns `cs_name` for reuse. |
+
+### Group B: Sketch Geometry
+
+| Tool                     | Description                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `create_sketch_geometry` | Create a 2-D sketch from HistCAD entity dict with inline or named coordinate system.     |
+| `parse_freecad_sketch`   | Reverse-parse an existing FreeCAD sketch into HistCAD JSON for STEP reverse engineering. |
+
+### Group C: Sketch Constraints
+
+| Tool                       | Description                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `check_sketch_constraints` | Dry-run constraint validation without modifying the sketch. Returns `valid` and `estimated_dof_after`. |
+| `apply_sketch_constraints` | Apply 19 HistCAD constraint types. Returns `dof_after`, `redundant_constraints`, `sketch_valid`.       |
+
+### Group D: Feature Execution
+
+| Tool              | Description                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------- |
+| `execute_extrude` | Extrude a sketch (Pad or Pocket). `param_aliases` auto-creates spreadsheet slider bindings. |
+| `execute_revolve` | Revolve a sketch around an axis (Revolution or Groove).                                     |
+| `execute_helix`   | Sweep a sketch along a helix (PartDesign::Helix or fallback Part::Sweep).                   |
+
+### Group E: Finishing Features
+
+| Tool              | Description                                                                               |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `feature_fillet`  | Add fillets to edges resolved by 3-D proximity (`near_points`). Bypasses TNP.             |
+| `feature_chamfer` | Add chamfers to edges resolved by 3-D proximity (`near_points`).                          |
+
+### Group F: Parametric Controls
+
+| Tool                  | Description                                                                                |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `list_tunable_params` | List all named parameters from `FabricationParams` spreadsheet for frontend slider panel.  |
+| `set_tunable_param`   | Update a named parameter and trigger model recompute (backend for slider drag events).     |
+
+### Group G: Observation
+
+| Tool                | Description                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `get_body_snapshot` | Get bounding box, volume, feature list, and `edge_samples` of a PartDesign Body for fillet/chamfer.  |
+
+### Batch Execution
+
+| Tool                       | Description                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| `execute_fabrication_plan` | Batch-execute a complete `FabricationPlan` dict produced by a Layer 2 template.   |
+
+### Standard Workflow Example
+
+```python
+# Step 1: Create a datum plane
+cs = await create_coordinate_system([0,0,0], [0,0,0], name="XY_Base")
+
+# Step 2: Create sketch geometry
+geo = await create_sketch_geometry(
+    sketch={
+        "line_1": {"start":[0,0], "end":[20,0]},
+        "line_2": {"start":[20,0], "end":[20,10]},
+        "line_3": {"start":[20,10], "end":[0,10]},
+        "line_4": {"start":[0,10], "end":[0,0]},
+    },
+    coordinate_system_name="XY_Base",
+)
+# geo["dof_remaining"] → 8 (unconstrained rectangle)
+
+# Step 3: Apply constraints
+result = await apply_sketch_constraints(geo["sketch_name"], {
+    "Coincident": [["line_1.end","line_2.start"],["line_2.end","line_3.start"],
+                   ["line_3.end","line_4.start"],["line_4.end","line_1.start"]],
+    "Horizontal": ["line_1","line_3"],
+    "Vertical":   ["line_2","line_4"],
+    "Fix":        ["line_1.start"],
+    "Length":     [["line_1","20 mm"],["line_2","10 mm"]],
+})
+# result["dof_after"] → 0  (fully constrained)
+
+# Step 4: Extrude with named parameter
+feat = await execute_extrude(geo["sketch_name"], towards=30.0,
+                              param_aliases={"towards": "box_height"})
+
+# Step 5: Get edge midpoints for filleting
+snap = await get_body_snapshot()
+# snap["edge_samples"] → [{near_point:[x,y,z], length:..., curve_type:...}, ...]
+
+# Step 6: Fillet by proximity
+await feature_fillet([[10.0, 0.0, 30.0]], radius=2.0)
+
+# Step 7: Frontend slider
+await set_tunable_param("box_height", 50.0)  # updates model live
+```
+
+---
+
 ## GUI vs Headless Mode
 
 When running in headless mode, GUI-only tools return structured errors instead of crashing:

@@ -14,6 +14,16 @@ Tools are organized by category:
 - view: View and screenshot tools
 - validation: Object and document validation tools
 - assembly: Assembly semantics and coordinate-system alignment tools
+- fabrication: Layer 1 generic HistCAD-style fabrication primitives
+- templates: Layer 2 domain-specific template tools (placeholder)
+
+Two-layer architecture
+----------------------
+
+Layer 2 (tools/templates/) converts domain-specific user intent into a
+``FabricationPlan`` (fabrication_schema.py).  Layer 1 (tools/fabrication.py)
+executes it via ``execute_fabrication_plan()``.  See
+``tools/templates/README.md`` for how to add new domain templates.
 """
 
 from collections.abc import Awaitable, Callable
@@ -24,10 +34,12 @@ from freecad_mcp.tools.documents import register_document_tools
 from freecad_mcp.tools.draft import register_draft_tools
 from freecad_mcp.tools.execution import register_execution_tools
 from freecad_mcp.tools.export import register_export_tools
+from freecad_mcp.tools.fabrication import register_fabrication_tools
 from freecad_mcp.tools.macros import register_macro_tools
 from freecad_mcp.tools.objects import register_object_tools
 from freecad_mcp.tools.partdesign import register_partdesign_tools
 from freecad_mcp.tools.spreadsheet import register_spreadsheet_tools
+from freecad_mcp.tools.templates import register_template_tools
 from freecad_mcp.tools.validation import register_validation_tools
 from freecad_mcp.tools.view import register_view_tools
 
@@ -38,10 +50,12 @@ __all__ = [
     "register_draft_tools",
     "register_execution_tools",
     "register_export_tools",
+    "register_fabrication_tools",
     "register_macro_tools",
     "register_object_tools",
     "register_partdesign_tools",
     "register_spreadsheet_tools",
+    "register_template_tools",
     "register_validation_tools",
     "register_view_tools",
 ]
@@ -65,3 +79,5 @@ def register_all_tools(mcp: Any, get_bridge_func: Callable[[], Awaitable[Any]]) 
     register_view_tools(mcp, get_bridge_func)
     register_validation_tools(mcp, get_bridge_func)
     register_assembly_tools(mcp, get_bridge_func)
+    register_fabrication_tools(mcp, get_bridge_func)
+    register_template_tools(mcp, get_bridge_func)

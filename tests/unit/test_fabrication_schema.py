@@ -1,0 +1,280 @@
+"""Tests for fabrication schema (FabricationPlan dataclass) serialisation."""
+
+import pytest
+
+from freecad_mcp.tools.fabrication_schema import (
+    CoordinateSystemSpec,
+    FabricationPlan,
+    FeatureSpec,
+    FinishSpec,
+    SketchSpec,
+)
+
+
+class TestCoordinateSystemSpec:
+    """Tests for CoordinateSystemSpec serialisation / deserialisation."""
+
+    def test_round_trip_no_name(self) -> None:
+        """to_dict / from_dict round-trip for a nameless CS."""
+        cs = CoordinateSystemSpec(
+            euler_angles=[0.0, 0.0, 90.0], translation=[10.0, 0.0, 0.0]
+        )
+        d = cs.to_dict()
+        cs2 = CoordinateSystemSpec.from_dict(d)
+        assert cs2.euler_angles == [0.0, 0.0, 90.0]
+        assert cs2.translation == [10.0, 0.0, 0.0]
+        assert cs2.name is None
+
+    def test_round_trip_with_name(self) -> None:
+        """to_dict / from_dict preserves the name field."""
+        cs = CoordinateSystemSpec([0, 0, 0], [0, 0, 50], name="TopPlane")
+        cs2 = CoordinateSystemSpec.from_dict(cs.to_dict())
+        assert cs2.name == "TopPlane"
+
+    def test_to_dict_structure(self) -> None:
+        """to_dict produces the expected keys."""
+        cs = CoordinateSystemSpec([1, 2, 3], [4, 5, 6], name="A")
+        d = cs.to_dict()
+        assert set(d.keys()) == {"euler_angles", "translation", "name"}
+
+    def test_from_dict_missing_name_defaults_none(self) -> None:
+        """from_dict tolerates a missing 'name' key."""
+        d = {"euler_angles": [0, 0, 0], "translation": [0, 0, 0]}
+        cs = CoordinateSystemSpec.from_dict(d)
+        assert cs.name is None
+
+
+class TestSketchSpec:
+    """Tests for SketchSpec serialisation / deserialisation."""
+
+    @pytest.fixture
+    def minimal_sketch(self) -> SketchSpec:
+        """Minimal valid SketchSpec with inline coordinate_system."""
+        return SketchSpec(
+            sketch={"line_1": {"start": [0, 0], "end": [10, 0]}},
+            constraints={"Horizontal": ["line_1"]},
+            coordinate_system=CoordinateSystemSpec([0, 0, 0], [0, 0, 0]),
+        )
+
+    def test_round_trip_with_inline_cs(self, minimal_sketch: SketchSpec) -> None:
+        """Inline coordinate_system survives to_dict / from_dict."""
+        d = minimal_sketch.to_dict()
+        sk2 = SketchSpec.from_dict(d)
+        assert sk2.coordinate_system is not None
+        assert sk2.coordinate_system.euler_angles == [0, 0, 0]
+        assert sk2.sketch == minimal_sketch.sketch
+        assert sk2.constraints == minimal_sketch.constraints
+
+    def test_round_trip_with_cs_name_ref(self) -> None:
+        """coordinate_system_name reference survives to_dict / from_dict."""
+        sk = SketchSpec(
+            sketch={"circle_1": {"center": [0, 0], "radius": 5}},
+            constraints={"Radius": [["circle_1", "5 mm"]]},
+            coordinate_system_name="TopPlane",
+        )
+        sk2 = SketchSpec.from_dict(sk.to_dict())
+        assert sk2.coordinate_system_name == "TopPlane"
+        assert sk2.coordinate_system is None
+
+    def test_attachment_support_preserved(self) -> None:
+        """attachment_support dict is preserved through serialisation."""
+        sk = SketchSpec(
+            sketch={"line_1": {"start": [0, 0], "end": [1, 0]}},
+            constraints={},
+            coordinate_system_name="XY",
+            attachment_support={"near_point": [0.0, 0.0, 30.0]},
+        )
+        sk2 = SketchSpec.from_dict(sk.to_dict())
+        assert sk2.attachment_support == {"near_point": [0.0, 0.0, 30.0]}
+
+    def test_missing_constraints_defaults_empty_dict(self) -> None:
+        """from_dict tolerates missing 'constraints' key."""
+        d = {
+            "sketch": {"line_1": {"start": [0, 0], "end": [1, 0]}},
+            "coordinate_system": {"euler_angles": [0, 0, 0], "translation": [0, 0, 0]},
+        }
+        sk = SketchSpec.from_dict(d)
+        assert sk.constraints == {}
+
+
+class TestFeatureSpec:
+    """Tests for FeatureSpec serialisation / deserialisation."""
+
+    def test_extrude_round_trip(self) -> None:
+        """Extrude FeatureSpec survives to_dict / from_dict."""
+        feat = FeatureSpec(
+            type="extrude",
+            sketch_name="Sketch001",
+            operation="NewBody",
+            params={"towards": 50.0, "opposite": 0.0},
+            param_aliases={"towards": "arm_length"},
+        )
+        feat2 = FeatureSpec.from_dict(feat.to_dict())
+        assert feat2.type == "extrude"
+        assert feat2.params["towards"] == 50.0
+        assert feat2.param_aliases == {"towards": "arm_length"}
+        assert feat2.feature_name is None
+
+    def test_revolve_round_trip(self) -> None:
+        """Revolve FeatureSpec survives to_dict / from_dict."""
+        feat = FeatureSpec(
+            type="revolve",
+            sketch_name="Sketch002",
+            operation="NewBody",
+            params={"axis": [[0, 0, 0], [0, 0, 1]], "start": 0.0, "end": 360.0},
+        )
+        feat2 = FeatureSpec.from_dict(feat.to_dict())
+        assert feat2.type == "revolve"
+        assert feat2.params["end"] == 360.0
+
+    def test_param_aliases_defaults_empty(self) -> None:
+        """from_dict with missing param_aliases defaults to empty dict."""
+        d = {
+            "type": "extrude",
+            "sketch_name": "Sketch001",
+            "operation": "NewBody",
+            "params": {"towards": 10.0},
+        }
+        feat = FeatureSpec.from_dict(d)
+        assert feat.param_aliases == {}
+
+
+class TestFinishSpec:
+    """Tests for FinishSpec serialisation / deserialisation."""
+
+    def test_fillet_round_trip(self) -> None:
+        """Fillet FinishSpec survives to_dict / from_dict."""
+        fin = FinishSpec(
+            type="fillet",
+            near_points=[[10.0, 0.0, 50.0], [-10.0, 0.0, 50.0]],
+            params={"radius": 2.0},
+        )
+        fin2 = FinishSpec.from_dict(fin.to_dict())
+        assert fin2.type == "fillet"
+        assert fin2.near_points == [[10.0, 0.0, 50.0], [-10.0, 0.0, 50.0]]
+        assert fin2.params["radius"] == 2.0
+
+    def test_chamfer_round_trip(self) -> None:
+        """Chamfer FinishSpec survives to_dict / from_dict."""
+        fin = FinishSpec(
+            type="chamfer",
+            near_points=[[5.0, 5.0, 0.0]],
+            params={"dist": 1.0, "angle": 45.0},
+        )
+        fin2 = FinishSpec.from_dict(fin.to_dict())
+        assert fin2.params["angle"] == 45.0
+
+
+class TestFabricationPlan:
+    """Tests for FabricationPlan (full document round-trip and validation)."""
+
+    @pytest.fixture
+    def simple_plan(self) -> FabricationPlan:
+        """A minimal but complete FabricationPlan for a box."""
+        return FabricationPlan(
+            coordinate_systems=[
+                CoordinateSystemSpec([0, 0, 0], [0, 0, 0], name="XY_Base"),
+            ],
+            sketches=[
+                SketchSpec(
+                    sketch={
+                        "line_1": {"start": [0, 0], "end": [20, 0]},
+                        "line_2": {"start": [20, 0], "end": [20, 10]},
+                        "line_3": {"start": [20, 10], "end": [0, 10]},
+                        "line_4": {"start": [0, 10], "end": [0, 0]},
+                    },
+                    constraints={
+                        "Horizontal": ["line_1", "line_3"],
+                        "Vertical": ["line_2", "line_4"],
+                        "Length": [["line_1", "20 mm"], ["line_2", "10 mm"]],
+                    },
+                    coordinate_system_name="XY_Base",
+                    sketch_name="Sketch001",
+                )
+            ],
+            features=[
+                FeatureSpec(
+                    type="extrude",
+                    sketch_name="Sketch001",
+                    operation="NewBody",
+                    params={"towards": 30.0},
+                    param_aliases={"towards": "box_height"},
+                )
+            ],
+            finishes=[
+                FinishSpec(
+                    type="fillet",
+                    near_points=[[10.0, 5.0, 30.0]],
+                    params={"radius": 1.0},
+                )
+            ],
+            param_aliases={"box_height": "box_height"},
+            metadata={"product_family": "structural_box", "material": "aluminium"},
+        )
+
+    def test_round_trip_full_plan(self, simple_plan: FabricationPlan) -> None:
+        """Full FabricationPlan survives to_dict / from_dict."""
+        d = simple_plan.to_dict()
+        plan2 = FabricationPlan.from_dict(d)
+
+        assert len(plan2.coordinate_systems) == 1
+        assert plan2.coordinate_systems[0].name == "XY_Base"
+
+        assert len(plan2.sketches) == 1
+        assert plan2.sketches[0].sketch_name == "Sketch001"
+        assert "Horizontal" in plan2.sketches[0].constraints
+
+        assert len(plan2.features) == 1
+        assert plan2.features[0].type == "extrude"
+        assert plan2.features[0].param_aliases == {"towards": "box_height"}
+
+        assert len(plan2.finishes) == 1
+        assert plan2.finishes[0].type == "fillet"
+
+        assert plan2.metadata["material"] == "aluminium"
+
+    def test_to_dict_is_json_serialisable(self, simple_plan: FabricationPlan) -> None:
+        """to_dict output can be serialised by the stdlib json module."""
+        import json
+
+        d = simple_plan.to_dict()
+        serialised = json.dumps(d)
+        assert '"box_height"' in serialised
+
+    def test_empty_plan_defaults(self) -> None:
+        """A plan with no finishes / aliases defaults correctly."""
+        plan = FabricationPlan(coordinate_systems=[], sketches=[], features=[])
+        d = plan.to_dict()
+        assert d["finishes"] == []
+        assert d["param_aliases"] == {}
+        assert d["metadata"] == {}
+
+    def test_from_dict_missing_finishes_defaults_empty(self) -> None:
+        """from_dict tolerates missing 'finishes' key."""
+        d: dict[str, list[object]] = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [],
+        }
+        plan = FabricationPlan.from_dict(d)
+        assert plan.finishes == []
+
+    def test_feature_with_helix_type(self) -> None:
+        """Helix FeatureSpec is preserved through a FabricationPlan round-trip."""
+        plan = FabricationPlan(
+            coordinate_systems=[],
+            sketches=[],
+            features=[
+                FeatureSpec(
+                    type="helix",
+                    sketch_name="ProfileSketch",
+                    operation="NewBody",
+                    params={"axis": [[0, 0, 0], [0, 0, 1]], "pitch": 5.0, "turns": 4.0},
+                    param_aliases={"pitch": "thread_pitch"},
+                )
+            ],
+        )
+        plan2 = FabricationPlan.from_dict(plan.to_dict())
+        assert plan2.features[0].type == "helix"
+        assert plan2.features[0].params["pitch"] == 5.0
+        assert plan2.features[0].param_aliases["pitch"] == "thread_pitch"

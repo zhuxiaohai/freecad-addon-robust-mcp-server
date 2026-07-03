@@ -126,6 +126,7 @@ For detailed guidance on specific tasks, use the `freecad-guidance` prompt with:
 - `task_type="debugging"` - Troubleshooting
 - `task_type="validation"` - Checking model health
 - `task_type="assembly"` - Assembly connector workflow (ArtiCAD connector schema)
+- `task_type="fabrication"` - HistCAD-style Layer 1 fabrication primitives workflow
 
 Or read the full `freecad://best-practices` resource for comprehensive documentation.
 """
@@ -152,6 +153,7 @@ Or read the full `freecad://best-practices` resource for comprehensive documenta
                 - "debugging": Troubleshooting issues
                 - "validation": Checking model health
                 - "assembly": Assembly connector workflow (ArtiCAD schema)
+                - "fabrication": HistCAD-style Layer 1 fabrication primitives
 
         Returns:
             Targeted guidance for the task type.
@@ -670,6 +672,130 @@ await create_connector(
 - `include_local=True` in `list_assembly_state` for debugging local frames
 - Requires FreeCAD 1.1+ for `Part::LocalCoordinateSystem`
 - Legacy `Part::Feature` connectors are still readable for backward compatibility""",
+            "fabrication": """# HistCAD-Style Layer 1 Fabrication Primitives
+
+## Two-Layer Architecture
+
+**Layer 2** (domain templates in tools/templates/) converts user intent into a
+FabricationPlan.  **Layer 1** (this module) executes it deterministically.
+The LLM or RL agent works at the Layer 1 level when exploring constraint
+strategies, or calls `execute_fabrication_plan` for batch execution.
+
+## Standard Workflow (step-by-step)
+
+```
+1. create_coordinate_system(euler_angles=[0,0,0], translation=[0,0,z], name="TopPlane")
+   → cs_name
+
+2. create_sketch_geometry(
+       sketch={"line_1": {"start":[0,0], "end":[20,0]}, ...},
+       coordinate_system_name="TopPlane",   # or inline coordinate_system dict
+   )
+   → sketch_name, entity_index_map, dof_remaining
+
+3. check_sketch_constraints(sketch_name, constraints)   # optional dry-run
+   → valid, estimated_dof_after
+
+4. apply_sketch_constraints(sketch_name, {
+       "Coincident": [["line_1.end","line_2.start"], ...],
+       "Horizontal": ["line_1", "line_3"],
+       "Length":     [["line_1","20 mm"]],
+   })
+   → dof_after, sketch_valid   ← key RL reward signal
+
+5. execute_extrude(sketch_name, towards=30.0, param_aliases={"towards": "arm_length"})
+   → feature_name, bounding_box, bound_params
+
+6. get_body_snapshot()   → edge_samples for fillet near_points
+
+7. feature_fillet(near_points=[[10,0,30]], radius=2.0)
+   → feature_name
+
+8. list_tunable_params()   → param slider list for frontend
+```
+
+## HistCAD Entity Format
+
+```python
+sketch = {
+    "line_1":   {"start": [x1,y1], "end": [x2,y2]},
+    "circle_1": {"center": [cx,cy], "radius": r},
+    "arc_1":    {"start": [x1,y1], "middle": [xm,ym], "end": [x2,y2]},
+    "ellipse_1":{"center":[cx,cy], "major": a, "minor": b, "angle": deg},
+    "nurbs_1":  {"degree": 3, "periodic": False,
+                 "controls": [[x,y],...], "weights":[...], "knots":[...]},
+}
+```
+
+## HistCAD Constraint Format (19 types)
+
+```python
+constraints = {
+    "Coincident":    [["entity_A.end", "entity_B.start"]],
+    "Horizontal":    ["line_1"],                       # or point-pair
+    "Vertical":      ["line_2"],
+    "Perpendicular": [["line_1", "line_2"]],
+    "Parallel":      [["line_1", "line_3"]],
+    "Equal":         [["line_1", "line_3"]],
+    "Tangent":       [["arc_1",  "line_1"]],
+    "Concentric":    [["circle_1", "circle_2"]],
+    "Fix":           ["circle_1.center"],              # blocks a point/entity
+    "Midpoint":      [["line_1.start", "line_2"]],     # point on entity midpoint
+    "Angle":         [["line_1", "line_2", "90"]],     # degrees
+    "Length":        [["line_1", "20 mm"]],
+    "Radius":        [["circle_1", "10 mm"]],
+    "Diameter":      [["circle_1", "20 mm"]],
+    "Distance":      [["line_1.end", "line_2.start",
+                       {"length":"5 mm","direction":"HORIZONTAL"}]],
+}
+```
+
+## param_aliases for Frontend Sliders
+
+When calling `execute_extrude`, `execute_revolve`, or `execute_helix`, pass
+`param_aliases` to auto-bind parameters to the `FabricationParams` spreadsheet:
+
+```python
+execute_extrude(sketch_name, towards=150, param_aliases={"towards": "column_height"})
+# → creates FabricationParams.column_height = 150
+# → binds Pad.Length expression to FabricationParams.column_height
+
+set_tunable_param("column_height", 200)   # drag slider → all deps update
+```
+
+## Selective Follow-On (Face-Attached Sketches)
+
+Use `attachment_support` in `create_sketch_geometry` to make a sketch
+physically follow a face when the model recomputes:
+
+```python
+create_sketch_geometry(
+    sketch={"circle_1": {"center":[0,0], "radius":3}},
+    attachment_support={"near_point": [0, 0, 50]},   # resolved to TopFace
+)
+# Sketch follows TopFace — if column_height changes, holes stay on top
+```
+
+## RL Training Tips
+
+- Call primitives individually (not `execute_fabrication_plan`) for per-step rewards.
+- `apply_sketch_constraints` returns `dof_after` (0 = fully constrained = dense reward).
+- `check_sketch_constraints` enables constraint pruning without burning env steps.
+- `parse_freecad_sketch` is the observation for STEP reverse-engineering episodes.
+- `get_body_snapshot` gives geometric observation after each feature step.
+
+## Batch Execution
+
+For production automation, use `execute_fabrication_plan` with a plan
+dict produced by a Layer 2 domain template tool:
+
+```python
+plan = await resolve_connector_params("L型连接件,5cmx8cm,宽3cm")
+result = await execute_fabrication_plan(plan)
+# → result["tunable_params"] for frontend slider panel
+# → result["bounding_box"] for downstream assembly
+```
+""",
         }
 
         return guidance.get(task_type, guidance["general"])

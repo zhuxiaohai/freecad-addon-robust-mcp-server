@@ -1577,6 +1577,195 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         },
                     ],
                 },
+                "fabrication": {
+                    "description": (
+                        "Layer 1 HistCAD-style generic fabrication primitives. "
+                        "The LLM or RL agent specifies geometry and constraints using "
+                        "kernel-independent JSON schemas; the adapter translates them "
+                        "deterministically to FreeCAD API calls. "
+                        "Workflow: create_coordinate_system → create_sketch_geometry → "
+                        "apply_sketch_constraints → execute_extrude/revolve/helix → "
+                        "feature_fillet/chamfer. "
+                        "Use execute_fabrication_plan for batch execution from a "
+                        "FabricationPlan dict produced by a Layer 2 template tool."
+                    ),
+                    "tools": [
+                        {
+                            "name": "create_coordinate_system",
+                            "description": (
+                                "Create a named datum coordinate system (sketch plane) "
+                                "from Euler angles + translation. "
+                                "Returns cs_name for reference in create_sketch_geometry."
+                            ),
+                            "key_params": [
+                                "euler_angles",
+                                "translation",
+                                "name",
+                                "body_name",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "create_sketch_geometry",
+                            "description": (
+                                "Create a 2-D sketch with HistCAD entity dict. "
+                                "Accepts inline coordinate_system or coordinate_system_name "
+                                "reference, and optional attachment_support for face-attached "
+                                "sketches (selective follow-on pattern). "
+                                "Returns entity_index_map and dof_remaining."
+                            ),
+                            "key_params": [
+                                "sketch",
+                                "coordinate_system",
+                                "coordinate_system_name",
+                                "attachment_support",
+                                "sketch_name",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "parse_freecad_sketch",
+                            "description": (
+                                "Reverse-parse an existing FreeCAD sketch into HistCAD "
+                                "entity + constraint JSON. Entry point for STEP reverse "
+                                "engineering workflow."
+                            ),
+                            "key_params": ["sketch_name", "doc_name"],
+                        },
+                        {
+                            "name": "check_sketch_constraints",
+                            "description": (
+                                "Dry-run constraint validation without modifying the sketch. "
+                                "Returns valid, would_over_constrain, and estimated_dof_after. "
+                                "Use before apply_sketch_constraints when exploring strategies."
+                            ),
+                            "key_params": ["sketch_name", "constraints", "doc_name"],
+                        },
+                        {
+                            "name": "apply_sketch_constraints",
+                            "description": (
+                                "Apply HistCAD constraints (19 types: Coincident, Horizontal, "
+                                "Vertical, Perpendicular, Parallel, Equal, Tangent, Normal, "
+                                "Concentric, Fix, Midpoint, Mirror, Angle, Diameter, Radius, "
+                                "MajorRadius, MinorRadius, Length, Distance) to a sketch. "
+                                "Returns dof_after, redundant_constraints, sketch_valid, "
+                                "applied_count — key RL reward signal."
+                            ),
+                            "key_params": ["sketch_name", "constraints", "doc_name"],
+                        },
+                        {
+                            "name": "execute_extrude",
+                            "description": (
+                                "Extrude a sketch into a PartDesign::Pad or Pocket. "
+                                "param_aliases dict auto-creates FabricationParams spreadsheet "
+                                "bindings for frontend slider controls."
+                            ),
+                            "key_params": [
+                                "sketch_name",
+                                "towards",
+                                "opposite",
+                                "operation",
+                                "param_aliases",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "execute_revolve",
+                            "description": (
+                                "Revolve a sketch around an axis (PartDesign::Revolution or Groove)."
+                            ),
+                            "key_params": [
+                                "sketch_name",
+                                "axis",
+                                "start",
+                                "end",
+                                "operation",
+                                "param_aliases",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "execute_helix",
+                            "description": (
+                                "Sweep a sketch along a helix (PartDesign::Helix or fallback "
+                                "Part::Sweep). Supports pitch and turns param_aliases."
+                            ),
+                            "key_params": [
+                                "sketch_name",
+                                "axis",
+                                "pitch",
+                                "turns",
+                                "handedness",
+                                "operation",
+                                "param_aliases",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "feature_fillet",
+                            "description": (
+                                "Add fillets to edges selected by 3-D proximity (near_points). "
+                                "Resolves edges via B-rep distance query — bypasses TNP entirely."
+                            ),
+                            "key_params": [
+                                "near_points",
+                                "radius",
+                                "body_name",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "feature_chamfer",
+                            "description": (
+                                "Add chamfers to edges selected by 3-D proximity (near_points)."
+                            ),
+                            "key_params": [
+                                "near_points",
+                                "dist",
+                                "angle",
+                                "body_name",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "list_tunable_params",
+                            "description": (
+                                "List all named tunable parameters from the FabricationParams "
+                                "spreadsheet. Returns alias, value, cell, and bound_to feature "
+                                "properties. Used by frontend to build a slider panel."
+                            ),
+                            "key_params": ["doc_name"],
+                        },
+                        {
+                            "name": "set_tunable_param",
+                            "description": (
+                                "Update a named parameter and trigger model recompute. "
+                                "Backend callback for a frontend slider drag event."
+                            ),
+                            "key_params": ["alias", "value", "doc_name"],
+                        },
+                        {
+                            "name": "get_body_snapshot",
+                            "description": (
+                                "Get bounding box, volume, feature list, and edge_samples "
+                                "(midpoints of all edges) of a PartDesign Body. "
+                                "Use edge_samples to construct near_points for fillet/chamfer."
+                            ),
+                            "key_params": ["body_name", "doc_name"],
+                        },
+                        {
+                            "name": "execute_fabrication_plan",
+                            "description": (
+                                "Batch-execute a complete FabricationPlan dict produced by a "
+                                "Layer 2 domain template tool. Drives all Layer 1 primitives in "
+                                "order: coordinate_systems → sketches → features → finishes. "
+                                "Returns body_name, feature_names, tunable_params, "
+                                "bounding_box, volume, and steps_completed."
+                            ),
+                            "key_params": ["plan", "doc_name"],
+                        },
+                    ],
+                },
                 "validation": {
                     "description": "Object and document validation for error detection",
                     "tools": [

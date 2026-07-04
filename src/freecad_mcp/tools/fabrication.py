@@ -565,24 +565,23 @@ except Exception as _e:
             Dictionary with:
                 - sketch_name: Name of the created sketch (pass to
                   ``apply_sketch_constraints`` and ``execute_extrude``).
-                - geometry: The raw input geometry dict — pass as
-                  ``execute_extrude(sketch=result["geometry"], ...)`` to build
-                  the extrusion directly from ground-truth coordinates, bypassing
-                  Sketcher solver drift.
                 - geometry_count: ``{total, lines, arcs, circles}``.
-                - dof_remaining: Degrees of freedom before constraints are applied.
+                - arc_geometry: Per-arc ``{"center": [x, y], "radius": r}`` in
+                  the sketch's local 2-D frame.  Centers match the ground-truth
+                  JSON/NLT values and serve as a per-arc placement reward signal.
+                - dof_remaining: Constraint degrees of freedom remaining.
                   Zero means fully constrained; positive means under-constrained.
-                - sketch_normal_world: Sketch Z-axis direction in world space.
-                - sketch_origin_world: Sketch origin in world space.
-                - attachment_info: Face attachment details, or ``None``.
+                - fully_constrained: ``True`` when ``dof_remaining == 0``.
+                - sketch_normal_world: Sketch plane normal in world space.
+                - sketch_origin_world: Sketch plane origin in world space.
                 - success: ``True`` on success.
 
         Note:
-                ``entity_index_map`` (Sketcher internal integer indices) is stored
-                inside the sketch object and consumed directly by
-                ``apply_sketch_constraints``.  It is intentionally not returned
-                here — it is a FreeCAD-specific implementation detail that the LLM
-                should never need to inspect or forward.
+                ``entity_index_map`` (Sketcher internal indices) and the raw input
+                geometry dict are both stored on the sketch object internally.
+                ``apply_sketch_constraints`` reads ``entity_index_map`` directly;
+                ``execute_extrude`` auto-retrieves the geometry when ``sketch=None``.
+                Neither value needs to be forwarded by the caller.
 
         Raises:
             ValueError: If the sketch cannot be created or no plane is specified.
@@ -600,8 +599,8 @@ except Exception as _e:
                     coordinate_system={"euler_angles": [0,0,0],
                                        "translation": [0,0,0]},
                 )
-                # Pass geometry directly to the extrude step:
-                # result["geometry"] → {"line_1": {...}, "line_2": {...}, ...}
+                # The geometry is stored on the sketch object automatically.
+                # execute_extrude retrieves it without any caller pass-through.
         """
         bridge = await get_bridge()
         code = f"""
@@ -686,17 +685,24 @@ try:
 
     doc.recompute()
 
-    # Store entity map on sketch for later constraint resolution.
-    # FreeCAD 1.1 Sketcher objects lack setDocumentData; guard it so the
-    # transaction is not aborted. apply_sketch_constraints rebuilds the map
-    # from geometry order as a fallback when the stored value is unavailable.
+    # Store entity map and original geometry for later retrieval.
+    # Primary: __main__ dict — works for any FreeCAD object in the same session.
+    # Secondary: setDocumentData — only available on App::FeaturePython objects,
+    # NOT on the built-in Sketcher::SketchObject (hasattr returns False there).
+    import __main__ as _main
+    if not hasattr(_main, "_sketch_geometry_cache"):
+        _main._sketch_geometry_cache = {{}}
+    if not hasattr(_main, "_sketch_idx_map_cache"):
+        _main._sketch_idx_map_cache = {{}}
+    _main._sketch_geometry_cache[sk.Name] = sketch_dict
+    _main._sketch_idx_map_cache[sk.Name] = idx_map
     try:
         if hasattr(sk, "setDocumentData"):
             sk.setDocumentData("entity_index_map", str(idx_map))
+            import json as _json_sdc
+            sk.setDocumentData("sketch_geometry_json", _json_sdc.dumps(sketch_dict))
     except Exception:
         pass
-    # NOTE: the raw sketch_dict is returned in _result_["geometry"] so callers
-    # can pass it directly to execute_extrude(sketch=...) — no __main__ cache needed.
 
     # Compute real DOF and sketch normal for alignment verification
     dof_real = getattr(sk, "DoF", -1)
@@ -713,25 +719,30 @@ try:
     _n_total   = len(idx_map)
     _nw = [round(normal_world.x, 4), round(normal_world.y, 4), round(normal_world.z, 4)]
     _ow = [round(origin_world.x, 3), round(origin_world.y, 3), round(origin_world.z, 3)]
+    # Arc/circle geometry in local sketch frame — center and radius match ground-truth
+    # JSON/NLT values directly, enabling per-arc constraint verification as a reward signal.
+    _arc_geo = {{}}
+    for _en, _ei in idx_map.items():
+        if _en.startswith("arc_") or _en.startswith("circle_"):
+            try:
+                _g = sk.Geometry[_ei]
+                _c = _g.Center
+                _arc_geo[_en] = {{"center": [round(_c.x, 4), round(_c.y, 4)], "radius": round(_g.Radius, 4)}}
+            except Exception:
+                pass
     _result_ = {{
         "sketch_name": sk.Name,
-        # geometry: the raw input dict — pass directly to execute_extrude(sketch=...)
-        # to bypass Sketcher solver drift without any __main__ cache dependency.
-        # entity_index_map (Sketcher internal indices) is stored in the sketch object
-        # and read by apply_sketch_constraints internally; not returned to the LLM.
-        "geometry": sketch_dict,
         "geometry_count": {{
             "total":   _n_total,
             "lines":   _n_lines,
             "arcs":    _n_arcs,
             "circles": _n_circles,
         }},
-        "dof_remaining": dof_real,
+        "arc_geometry":      _arc_geo,
+        "dof_remaining":     dof_real,
         "fully_constrained": fully_constrained,
-        "solve_status": solve_status,
         "sketch_normal_world": _nw,
         "sketch_origin_world": _ow,
-        "attachment_info": attachment_info,
         "success": True,
     }}
 except Exception as _e:
@@ -967,13 +978,16 @@ if sk is None:
 
 constraints_in = {constraints!r}
 
-# Retrieve entity index map stored during create_sketch_geometry
-try:
-    stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
-    idx_map = eval(stored) if stored else {{}}
-except Exception:
-    idx_map = {{}}
-# Fallback: rebuild from geometry names if map is empty
+# Retrieve entity index map: __main__ cache → setDocumentData → rebuild from geometry
+import __main__ as _m_idx
+idx_map = getattr(_m_idx, "_sketch_idx_map_cache", {{}}).get(sk.Name)
+if not idx_map:
+    try:
+        stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
+        idx_map = eval(stored) if stored else {{}}
+    except Exception:
+        idx_map = {{}}
+# Last-resort: rebuild from geometry names if map is still empty
 if not idx_map:
     import re
     line_c = circle_c = arc_c = ellipse_c = nurbs_c = 0
@@ -1109,12 +1123,15 @@ if sk is None:
 
 constraints_in = {constraints!r}
 
-# Retrieve entity index map
-try:
-    stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
-    idx_map = eval(stored) if stored else {{}}
-except Exception:
-    idx_map = {{}}
+# Retrieve entity index map: __main__ cache → setDocumentData → rebuild from geometry
+import __main__ as _m_idx
+idx_map = getattr(_m_idx, "_sketch_idx_map_cache", {{}}).get(sk.Name)
+if not idx_map:
+    try:
+        stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
+        idx_map = eval(stored) if stored else {{}}
+    except Exception:
+        idx_map = {{}}
 
 if not idx_map:
     line_c = circle_c = arc_c = ellipse_c = nurbs_c = 0
@@ -1208,13 +1225,11 @@ except Exception as _e:
         ``FabricationParams``) and binds the specified parameters to named
         spreadsheet cells, exposing them as frontend slider controls.
 
-        For ``"NewBody"`` and ``"Intersect"`` operations, the ``sketch``
-        parameter should be supplied with the raw geometry dict returned by
-        ``create_sketch_geometry`` (the ``geometry`` key).  When provided, the
-        extrusion uses these ground-truth coordinates directly via the Part
-        workbench, bypassing Sketcher solver drift entirely.  This removes any
-        dependency on the process-level ``__main__`` cache and is the
-        recommended calling pattern.
+        For ``"NewBody"`` and ``"Intersect"`` operations, the extrusion is
+        built from ground-truth coordinates via the Part workbench, bypassing
+        Sketcher solver drift.  The geometry dict is retrieved automatically
+        from the sketch object (stored by ``create_sketch_geometry``); the
+        caller does **not** need to pass ``sketch=`` explicitly.
 
         Args:
             sketch_name: Name of the Sketcher object to reference.
@@ -1224,13 +1239,11 @@ except Exception as _e:
             operation: Boolean semantics — ``"NewBody"`` (creates a new
                 solid), ``"Join"`` (Pad, adds material),
                 ``"Cut"`` (Pocket, removes material), or ``"Intersect"``.
-            sketch: Raw geometry dict from ``create_sketch_geometry`` return
-                value (``result["geometry"]``).  When provided, geometry is
-                built directly from this data rather than reading from the
-                Sketcher object — avoids solver drift and eliminates the
-                ``__main__`` cache dependency.  Keys are geometry element
-                names (``"line_1"``, ``"arc_1"``, etc.); values are dicts with
-                coordinates matching the ``create_sketch_geometry`` format.
+            sketch: Raw geometry dict (HistCAD format).  Optional — when
+                ``None`` (the default) the adapter auto-retrieves the dict
+                stored on the sketch object by ``create_sketch_geometry``.
+                Pass an explicit value only when you need to override the
+                stored geometry.
             param_aliases: Maps parameter keys to spreadsheet alias names for
                 frontend sliders.  E.g. ``{"towards": "column_height"}`` binds
                 the ``towards`` value to a cell aliased ``column_height``.
@@ -1241,13 +1254,22 @@ except Exception as _e:
 
         Returns:
             Dictionary with:
-                - feature_name: FreeCAD object name of the created feature.
-                - body_name: Name of the containing PartDesign Body.
-                - bounding_box: ``{x_min, x_max, y_min, y_max, z_min, z_max}``.
-                - volume: Body volume in cubic millimetres.
-                - bound_params: List of ``{alias, cell, value}`` dicts for
-                  each parameter bound to the spreadsheet.
-                - success: ``True`` on success.
+                - feature_name: Name of the created feature (pass to subsequent
+                  steps).
+                - operation: The operation that was performed.
+                - bounding_box: ``{x_min, x_max, y_min, y_max, z_min, z_max}``
+                  in world space — use for extents and size verification.
+                - center: Geometric centroid ``[x, y, z]`` in world space.
+                  For symmetric, axis-aligned features this matches the
+                  ``global center`` in NLT prompts; for asymmetric/rotated
+                  features it approximates it (centroid vs OBB center).
+                - volume_mm3: Resulting solid volume in cubic millimetres.
+                - inter_extrusion_distance: Euclidean distance between the two
+                  extrusion bodies' centroids before the boolean.  Approximates
+                  the ``center distance`` field in NLT prompts.
+                  ``None`` for non-Intersect operations.
+                - sketch_normal_world: Extrusion direction in world space.
+                - success: ``True`` when a non-zero solid was produced.
 
         Raises:
             ValueError: If the sketch is not found or the extrusion fails.
@@ -1280,26 +1302,39 @@ operation      = {operation!r}
 aliases        = {param_aliases!r} or {{}}
 feat_nm        = {feature_name!r}
 body_nm        = {body_name!r}
-# sketch geometry passed directly by the caller — eliminates __main__ cache dependency
+# Geometry dict: use caller-supplied value; fall back to cached value on sketch object.
 _sketch_direct = {sketch!r}
 
 doc.openTransaction("Execute Extrude")
 try:
-    # Helper: build Part edges from the caller-supplied geometry dict.
-    # _sketch_direct is the raw HistCAD geometry dict passed as execute_extrude(sketch=...).
-    # Using explicit Y-negation (HistCAD Y-down → FreeCAD Y-up) avoids Sketcher
-    # solver drift that corrupts sk.Geometry positions when DoF > 0.
-    # Raises ValueError when sketch was not provided (required for NewBody/Intersect).
-    # Track edge-build failures so the caller can surface them in the result.
+    # Helper: build Part edges from the HistCAD geometry dict.
+    # Prefers _sketch_direct when supplied; otherwise loads the JSON stored on the
+    # sketch object by create_sketch_geometry (auto-retrieval, no LLM pass-through).
+    # Explicit Y-negation (HistCAD Y-down → FreeCAD Y-up) avoids Sketcher solver
+    # drift that corrupts sk.Geometry positions when DoF > 0.
     _edge_build_errors: list[str] = []
 
     def _edges_from_raw_json(_sk, _PM):
-        if _sketch_direct is None:
-            raise ValueError(
-                f"sketch geometry dict is required for '{operation}' but was not supplied. "
-                "Pass create_sketch_geometry result['geometry'] as the sketch parameter."
-            )
         _d = _sketch_direct
+        if _d is None:
+            # 1st fallback: __main__ dict stored by create_sketch_geometry.
+            import __main__ as _m
+            _d = getattr(_m, "_sketch_geometry_cache", {{}}).get(_sk.Name)
+        if _d is None:
+            # 2nd fallback: setDocumentData (App::FeaturePython objects only).
+            try:
+                if hasattr(_sk, "getDocumentData"):
+                    import json as _json
+                    _stored = _sk.getDocumentData("sketch_geometry_json")
+                    if _stored:
+                        _d = _json.loads(_stored)
+            except Exception:
+                pass
+        if _d is None:
+            raise ValueError(
+                f"Sketch '{{_sk.Name}}' has no cached geometry. "
+                "Use create_sketch_geometry first, or pass sketch= explicitly."
+            )
         _ee = []
         for _nm, _sp in _d.items():
             try:
@@ -1476,19 +1511,6 @@ try:
                 except Exception:
                     pass
 
-        # Record diagnostic volumes BEFORE boolean (same info as ToolCAD's
-        # intermediate object approach, without polluting the document tree).
-        _slab_vol = 0.0
-        _base_vol = 0.0
-        try:
-            _slab_vol = round(extr2_shape.Volume, 4)
-        except Exception:
-            pass
-        try:
-            _base_vol = round(base_shape.Volume, 4) if base_shape is not None else 0.0
-        except Exception:
-            pass
-
         if base_shape is not None:
             common_shape = base_shape.common(extr2_shape)
         else:
@@ -1527,6 +1549,48 @@ try:
         sketch_normal_world = [round(sk_normal.x, 6), round(sk_normal.y, 6), round(sk_normal.z, 6)]
     except Exception:
         sketch_normal_world = [0.0, 0.0, 1.0]
+
+    # True geometric center in world space — matches "global center" in NLT prompts.
+    # More accurate than AABB center for rotated or asymmetric features.
+    # Part.Compound (returned by boolean ops) may not expose CenterOfMass directly
+    # in FreeCAD 1.1; fall back to the first solid's centroid, then AABB center.
+    center_of_mass = [round(v, 4) for v in aabb_center]
+    try:
+        _com = shape_for_bbox.CenterOfMass
+        center_of_mass = [round(_com.x, 4), round(_com.y, 4), round(_com.z, 4)]
+    except AttributeError:
+        try:
+            _solids = shape_for_bbox.Solids
+            if _solids:
+                _com = _solids[0].CenterOfMass
+                center_of_mass = [round(_com.x, 4), round(_com.y, 4), round(_com.z, 4)]
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Intersect-only: slab center of mass and inter-extrusion distance.
+    # inter_extrusion_distance matches the prompt's "center distance" between the two
+    # extrusion bodies (before boolean), giving the RL agent a spatial alignment reward.
+    _slab_center = None
+    _inter_dist = None
+    try:
+        # extr2_shape and base_shape only exist in the Intersect branch
+        def _get_com(_sh):
+            try:
+                return _sh.CenterOfMass
+            except AttributeError:
+                _ss = _sh.Solids
+                return _ss[0].CenterOfMass if _ss else None
+        _sc = _get_com(extr2_shape)
+        if _sc is not None:
+            _slab_center = [round(_sc.x, 4), round(_sc.y, 4), round(_sc.z, 4)]
+            _bc = _get_com(base_shape)
+            if _bc is not None:
+                _dx, _dy, _dz = _sc.x - _bc.x, _sc.y - _bc.y, _sc.z - _bc.z
+                _inter_dist = round((_dx ** 2 + _dy ** 2 + _dz ** 2) ** 0.5, 4)
+    except Exception:
+        pass
 
     # Bind param_aliases to spreadsheet
     bound_params = []
@@ -1570,21 +1634,14 @@ try:
 
 
     _result_ = {{
-        "feature_name":        feat.Name,
-        "body_name":           body.Name if body else None,
-        "operation":           operation,
-        "bounding_box":        bbox,
-        "aabb_center":         [round(v, 4) for v in aabb_center],
-        "volume_mm3":          round(volume, 4),
-        # Intersect-only diagnostic: volumes BEFORE boolean (lets agent
-        # distinguish "slab build failed" from "no spatial overlap").
-        "slab_volume_mm3":     _slab_vol if operation == "Intersect" else None,
-        "base_volume_mm3":     _base_vol if operation == "Intersect" else None,
-        "sketch_normal_world": sketch_normal_world,
-        "bound_params":        bound_params,
-        # failed_entities: HistCAD entity names that could not be converted.
-        "failed_entities":     [e.split(":")[0].strip() for e in _edge_build_errors],
-        "success":             volume > 0,
+        "feature_name":             feat.Name,
+        "operation":                operation,
+        "bounding_box":             bbox,
+        "center":                   center_of_mass,
+        "volume_mm3":               round(volume, 4),
+        "inter_extrusion_distance": _inter_dist,
+        "sketch_normal_world":      sketch_normal_world,
+        "success":                  volume > 0,
     }}
 except Exception as _e:
     doc.abortTransaction()

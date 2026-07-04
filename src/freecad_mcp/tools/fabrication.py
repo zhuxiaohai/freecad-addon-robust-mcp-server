@@ -323,12 +323,31 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                             "Symmetric", i_ln, START, i_ln, END, i_pt, p_pt,
                         )
                 elif ctype == "Mirror":
-                    # HistCAD: [entity, axis_line, entity]
-                    i_src, _ = _resolve_entity(entry[0])
+                    # HistCAD Mirror: [source, axis_line, target]
+                    # axis (entry[1]) is always a line entity ref (no ".").
+                    # source/target can be either:
+                    #   • point-pair format: "line_14.end"  (contains ".")
+                    #     → one Symmetric constraint, same as Fusion addSymmetry(pt, pt, ax)
+                    #   • entity format:     "line_10"      (no ".")
+                    #     → two Symmetric constraints (START-START + END-END),
+                    #       exactly how FreeCAD implements entity-entity symmetry
+                    #       internally (see FreeCAD PR #25525).
                     i_ax, _ = _resolve_entity(entry[1])
-                    i_dst, _ = _resolve_entity(entry[2])
-                    c = Sketcher.Constraint("Symmetric", i_src, START,
-                                            i_dst, END, i_ax)
+                    if "." in str(entry[0]) and "." in str(entry[2]):
+                        i_src, p_src = _resolve_point(entry[0])
+                        i_dst, p_dst = _resolve_point(entry[2])
+                        c = Sketcher.Constraint(
+                            "Symmetric", i_src, p_src, i_dst, p_dst, i_ax,
+                        )
+                    else:
+                        i_src, _ = _resolve_entity(entry[0])
+                        i_dst, _ = _resolve_entity(entry[2])
+                        sk.addConstraint([Sketcher.Constraint(
+                            "Symmetric", i_src, START, i_dst, START, i_ax,
+                        )])
+                        c = Sketcher.Constraint(
+                            "Symmetric", i_src, END, i_dst, END, i_ax,
+                        )
                 elif ctype == "Angle":
                     i1, _ = _resolve_entity(entry[0])
                     i2, _ = _resolve_entity(entry[1])
@@ -685,8 +704,11 @@ try:
     _auto_lcs_name = None
     _pending_lcs = None
     if cs_inline is not None and attach_spec is None and cs_name_ref is None:
-        euler = cs_inline.get("euler_angles", [0, 0, 0])
-        trans = cs_inline.get("translation", [0, 0, 0])
+        # Accept both the original Fusion-360-adapter key style
+        # ("Euler Angles" / "Translation Vector") and the lowercase-underscore
+        # style ("euler_angles" / "translation") used in most HistCAD examples.
+        euler = cs_inline.get("Euler Angles", cs_inline.get("euler_angles", [0, 0, 0]))
+        trans = cs_inline.get("Translation Vector", cs_inline.get("translation", [0, 0, 0]))
         # Active rotation R = Rx(a)*Ry(b)*Rz(g), angles as-is (matches the
         # HistCAD / Fusion 360 adapter convention).
         rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), euler[2])

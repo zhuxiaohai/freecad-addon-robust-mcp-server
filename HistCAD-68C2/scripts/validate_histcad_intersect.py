@@ -1,9 +1,16 @@
-r"""Validate HistCAD intersect examples against Fusion 360 adapter semantics.
+r"""Validate HistCAD examples against Fusion 360 adapter semantics.
 
-Each example JSON defines two extrude steps whose boolean Intersect should
-produce a non-zero solid.  The script also checks that the 01002396 step-1
-profile (which has inner holes) produces a smaller solid than a hole-free
-rebuild, confirming that FaceMakerBullseye handles multi-loop profiles.
+Two-step examples (01008879, 01000571, 01002396):
+    Each defines two extrude steps whose boolean Intersect must produce a
+    non-zero solid.  01002396 also checks that inner holes reduce the volume
+    compared to a hole-free rebuild (FaceMakerBullseye).
+
+Single-step examples (00082010):
+    One extrude step only; validates:
+    - extrusion volume > 0
+    - inner holes exist: volume with holes < volume of outer-loop-only extrusion
+    00082010 also exercises the Mirror point-pair constraint format and the
+    "Euler Angles"/"Translation Vector" key names used in some HistCAD releases.
 
 Usage (from the HistCAD-68C2 directory or any FreeCADCmd launch path)::
 
@@ -45,6 +52,10 @@ EXAMPLES = (
     "01000571",
     "01002396",
 )
+
+# Single-step examples: only one extrude operation (NewBody).
+# Validated for non-zero volume and inner-hole presence.
+SINGLE_STEP_EXAMPLES = ("00082010",)
 
 
 def _placement_from_cs(cs: dict) -> FreeCAD.Placement:
@@ -170,14 +181,69 @@ def _run_example(uid: str) -> dict:
     return out
 
 
+def _run_single_step_example(uid: str) -> dict:
+    """Run a single-step HistCAD example; verify volume and holes.
+
+    Checks:
+    - extrusion volume > 0 (basic geometry succeeds)
+    - volume with holes < volume of outer-loop-only extrusion (holes exist)
+
+    The outer loop is identified as the edge group with the most edges after
+    ``Part.sortEdges``, which is the same heuristic used by the validate
+    script for 01002396.
+    """
+    path = EXAMPLES_DIR / f"{uid}.json"
+    steps = json.loads(path.read_text(encoding="utf-8"))
+    step = steps[0]
+
+    solid, vol = _extrude_step(step, f"{uid}/step1")
+
+    # Rebuild using only the outer loop (no holes) to verify holes reduce volume.
+    pl = _placement_from_cs(step["coordinate_system"])
+    groups = Part.sortEdges(_edges_from_sketch(step["sketch"]))
+    outer_wire = Part.Wire(max(groups, key=len))
+    solid_no_hole = (
+        Part.Face(outer_wire)
+        .transformGeometry(pl.toMatrix())
+        .extrude(
+            pl.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+            * float(step["towards"])
+        )
+    )
+    if vol >= solid_no_hole.Volume * 0.99:
+        raise RuntimeError(
+            f"{uid}: step1 volume {vol:.4f} not smaller than "
+            f"outer-loop-only {solid_no_hole.Volume:.4f} — holes missing"
+        )
+
+    return {
+        "uid": uid,
+        "vol_step1": round(vol, 4),
+        "vol_step1_no_hole": round(solid_no_hole.Volume, 4),
+    }
+
+
 def main() -> int:
-    """Run all HistCAD intersect examples; return 0 on success."""
+    """Run all HistCAD examples; return 0 on success."""
     results = []
     failures = []
     log_lines = []
+
     for uid in EXAMPLES:
         try:
             results.append(_run_example(uid))
+            line = f"PASS {uid}: {results[-1]}"
+            log_lines.append(line)
+            print(line)
+        except Exception as exc:
+            failures.append((uid, str(exc)))
+            line = f"FAIL {uid}: {exc}"
+            log_lines.append(line)
+            print(line)
+
+    for uid in SINGLE_STEP_EXAMPLES:
+        try:
+            results.append(_run_single_step_example(uid))
             line = f"PASS {uid}: {results[-1]}"
             log_lines.append(line)
             print(line)

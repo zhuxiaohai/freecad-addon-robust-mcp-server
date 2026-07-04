@@ -568,6 +568,33 @@ class TestFabricationSourceConventions:
         assert "i_ax, _ = _resolve_entity(entry[1])" in source
         assert "i_dst, _ = _resolve_entity(entry[2])" in source
 
+    def test_mirror_handles_point_pair_format(self) -> None:
+        """Mirror with point refs ('line_14.end') uses _resolve_point not _resolve_entity."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        # Point-pair branch detects "." in entry[0] and entry[2]
+        assert '"." in str(entry[0]) and "." in str(entry[2])' in source
+        # Point-pair branch calls _resolve_point for source and target
+        assert "i_src, p_src = _resolve_point(entry[0])" in source
+        assert "i_dst, p_dst = _resolve_point(entry[2])" in source
+
+    def test_coordinate_system_key_normalization(self) -> None:
+        """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        # Both capitalised (Fusion-360-adapter style) and lowercase keys must be tried
+        assert '"Euler Angles"' in source
+        assert '"Translation Vector"' in source
+        # Fallback to lowercase-underscore style
+        assert '"euler_angles"' in source
+        assert '"translation"' in source
+
 
 class TestTemplatePlaceholder:
     """Tests for the Layer 2 template placeholder."""

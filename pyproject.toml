@@ -131,7 +131,8 @@ line-length = 88
 src = ["src", "tests", "macros"]
 extend-include = ["*.FCMacro"]
 # Exclude auto-generated files (hatch-vcs version file)
-exclude = ["src/freecad_mcp/_version.py"]
+# HistCAD-68C2 is reference-only Fusion 360 tooling — excluded from MCP checks
+exclude = ["src/freecad_mcp/_version.py", "HistCAD-68C2"]
 
 [tool.ruff.lint]
 select = [
@@ -209,6 +210,7 @@ convention = "google"
 
 [tool.mypy]
 python_version = "3.11"
+exclude = ["HistCAD-68C2/"]
 # Not using strict mode due to FastMCP lacking type stubs
 warn_return_any = false
 warn_unused_configs = true
@@ -326,7 +328,7 @@ show_missing = true
 fail_under = 80
 
 [tool.bandit]
-exclude_dirs = ["tests", "docs"]
+exclude_dirs = ["tests", "docs", "HistCAD-68C2"]
 skips = [
     "B101",  # Allow asserts
     "B102",  # exec is required for FreeCAD Python execution
@@ -337,7 +339,7 @@ skips = [
 ]
 
 [tool.codespell]
-skip = ".git,*.lock,*.toml"
+skip = ".git,*.lock,*.toml,HistCAD-68C2"
 ignore-words-list = "crate"
 
 [tool.commitizen]

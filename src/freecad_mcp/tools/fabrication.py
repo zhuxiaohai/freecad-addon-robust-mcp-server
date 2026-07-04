@@ -18,11 +18,21 @@ Tool groups
 A — Coordinate System:  ``create_coordinate_system``
 B — Sketch Geometry:    ``create_sketch_geometry``, ``parse_freecad_sketch``
 C — Sketch Constraints: ``check_sketch_constraints``, ``apply_sketch_constraints``
-D — Feature Execution:  ``execute_extrude``, ``execute_revolve``, ``execute_helix``
+D — Feature Execution:  ``execute_extrude``, ``execute_boolean``,
+                        ``execute_revolve``, ``execute_helix``
 E — Finishing:          ``feature_fillet``, ``feature_chamfer``
 F — Parametric Control: ``list_tunable_params``, ``set_tunable_param``
 G — Observation:        ``get_body_snapshot``
 Batch:                  ``execute_fabrication_plan``
+
+Coordinate system convention
+----------------------------
+
+``coordinate_system`` Euler angles ``[a, b, g]`` (degrees) are the ACTIVE
+local-to-world rotation ``R = Rx(a) * Ry(b) * Rz(g)``, applied as-is (no
+negation) — identical to the HistCAD Fusion 360 adapter
+(``scipy R.from_euler("XYZ")`` / ``cad_base._coordinate_system_rotation_matrix``).
+World point = ``R * (x, y, 0) + translation``; sketch normal = ``R * Z``.
 
 HistCAD entity name convention
 -------------------------------
@@ -73,32 +83,31 @@ def _build_sketch_entities(sketch_obj, entity_dict):
     # Add HistCAD geometry entities to a Sketcher object.
     # Returns entity_index_map: {name -> geom_idx}.
     #
-    # Y-axis convention: HistCAD uses Y-down (positive Y = into material = world -Y).
-    # FreeCAD sketch local Y maps to world +Y via the placement rotation.
-    # To reconcile, negate all sketch Y coordinates so that positive HistCAD Y
-    # (depth into material) becomes negative FreeCAD sketch Y (world -Y direction).
+    # Y-axis convention: coordinates are used exactly as written in the
+    # HistCAD JSON coordinates (no sign change).  Arc centers and downstream
+    # observations use the same sketch-local frame as the Fusion 360 adapter.
     idx_map = {}
     for name, spec in entity_dict.items():
         if name.startswith("line_"):
             geo = Part.LineSegment(
-                FreeCAD.Vector(spec["start"][0], -spec["start"][1], 0),
-                FreeCAD.Vector(spec["end"][0],   -spec["end"][1],   0),
+                FreeCAD.Vector(spec["start"][0], spec["start"][1], 0),
+                FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0),
             )
         elif name.startswith("circle_"):
             geo = Part.Circle(
-                FreeCAD.Vector(spec["center"][0], -spec["center"][1], 0),
+                FreeCAD.Vector(spec["center"][0], spec["center"][1], 0),
                 FreeCAD.Vector(0, 0, 1),
                 spec["radius"],
             )
         elif name.startswith("arc_"):
-            s = FreeCAD.Vector(spec["start"][0],  -spec["start"][1],  0)
-            m = FreeCAD.Vector(spec["middle"][0], -spec["middle"][1], 0)
-            e = FreeCAD.Vector(spec["end"][0],    -spec["end"][1],    0)
+            s = FreeCAD.Vector(spec["start"][0],  spec["start"][1],  0)
+            m = FreeCAD.Vector(spec["middle"][0], spec["middle"][1], 0)
+            e = FreeCAD.Vector(spec["end"][0],    spec["end"][1],    0)
             geo = Part.ArcOfCircle(s, m, e)
         elif name.startswith("ellipse_"):
             cx, cy = spec["center"]
             geo = Part.Ellipse(
-                FreeCAD.Vector(cx, -cy, 0),
+                FreeCAD.Vector(cx, cy, 0),
                 spec["major"],
                 spec["minor"],
             )
@@ -106,8 +115,8 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             angle_rad = math.radians(spec.get("angle", 0.0))
             geo.AngleXU = angle_rad
         elif name.startswith("elliptical_arc_"):
-            s = FreeCAD.Vector(spec["start"][0], -spec["start"][1], 0)
-            e = FreeCAD.Vector(spec["end"][0],   -spec["end"][1],   0)
+            s = FreeCAD.Vector(spec["start"][0], spec["start"][1], 0)
+            e = FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0)
             cx = (s.x + e.x) / 2
             cy = (s.y + e.y) / 2
             base_ellipse = Part.Ellipse(
@@ -121,7 +130,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             geo = Part.ArcOfEllipse(base_ellipse, 0, math.pi)
         elif name.startswith("nurbs_"):
             geo = Part.BSplineCurve()
-            poles = [FreeCAD.Vector(p[0], -p[1], 0) for p in spec["controls"]]
+            poles = [FreeCAD.Vector(p[0], p[1], 0) for p in spec["controls"]]
             weights = spec.get("weights", [1.0] * len(poles))
             knots_raw = spec.get("knots", [])
             degree = spec.get("degree", 3)
@@ -298,13 +307,26 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                         p = MID
                     c = Sketcher.Constraint("Block", i, p)
                 elif ctype == "Midpoint":
-                    i_pt, p_pt = _resolve_point(entry[0])
-                    i_ln, _    = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("PointOnObject", i_pt, p_pt, i_ln)
+                    if isinstance(entry[1], list):
+                        # Format A: [mid_point_ref, [point_ref_a, point_ref_b]]
+                        i_mid, p_mid = _resolve_point(entry[0])
+                        i_a, p_a = _resolve_point(entry[1][0])
+                        i_b, p_b = _resolve_point(entry[1][1])
+                        c = Sketcher.Constraint(
+                            "Symmetric", i_a, p_a, i_b, p_b, i_mid, p_mid,
+                        )
+                    else:
+                        # Format B: [point_ref, entity_ref] — point at line midpoint
+                        i_pt, p_pt = _resolve_point(entry[0])
+                        i_ln, _ = _resolve_entity(entry[1])
+                        c = Sketcher.Constraint(
+                            "Symmetric", i_ln, START, i_ln, END, i_pt, p_pt,
+                        )
                 elif ctype == "Mirror":
+                    # HistCAD: [entity, axis_line, entity]
                     i_src, _ = _resolve_entity(entry[0])
-                    i_dst, _ = _resolve_entity(entry[1])
-                    i_ax,  _ = _resolve_entity(entry[2])
+                    i_ax, _ = _resolve_entity(entry[1])
+                    i_dst, _ = _resolve_entity(entry[2])
                     c = Sketcher.Constraint("Symmetric", i_src, START,
                                             i_dst, END, i_ax)
                 elif ctype == "Angle":
@@ -376,15 +398,15 @@ def register_fabrication_tools(
 ) -> None:
     """Register Layer 1 generic fabrication primitives with the MCP server.
 
-    Registers 15 tools across 7 groups:
+    Registers 16 tools across 7 groups:
 
     - Group A — Coordinate System: ``create_coordinate_system``
     - Group B — Sketch Geometry: ``create_sketch_geometry``,
       ``parse_freecad_sketch``
     - Group C — Sketch Constraints: ``check_sketch_constraints``,
       ``apply_sketch_constraints``
-    - Group D — Feature Execution: ``execute_extrude``, ``execute_revolve``,
-      ``execute_helix``
+    - Group D — Feature Execution: ``execute_extrude``, ``execute_boolean``,
+      ``execute_revolve``, ``execute_helix``
     - Group E — Finishing: ``feature_fillet``, ``feature_chamfer``
     - Group F — Parametric Control: ``list_tunable_params``,
       ``set_tunable_param``
@@ -421,18 +443,26 @@ def register_fabrication_tools(
 
         Args:
             euler_angles: Rotation ``[a, b, g]`` in degrees around the X, Y, Z
-                axes respectively (intrinsic Tait-Bryan ZYX convention).
+                axes respectively.  Applied as the active local-to-world
+                rotation ``R = Rx(a) * Ry(b) * Rz(g)`` (HistCAD / Fusion 360
+                adapter convention, angles used as-is).
             translation: Origin ``[x, y, z]`` in millimetres in the world frame.
-            name: Human-readable label for the coordinate system. If None, a
-                label is auto-generated (e.g. ``"LocalCSYS_001"``).
+            name: Human-readable label for the coordinate system. If None,
+                defaults to ``"CoordinateSystem"`` (matching the HistCAD JSON
+                field name).
             body_name: PartDesign Body to attach the LCS to. Uses the active
                 body if None.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
             Dictionary with:
-                - cs_name: FreeCAD object name of the created LCS.
-                - label: Human-readable label.
+                - cs_name: Human-readable label of the LCS (equals the
+                  ``name`` argument).  Pass this directly as
+                  ``coordinate_system_name`` to ``create_sketch_geometry``.
+                - cs_internal_name: FreeCAD's internal unique object name
+                  (may differ from ``cs_name`` when FreeCAD appends a
+                  de-duplication suffix, e.g. ``"MyPlane001"``).
+                - label: Same as ``cs_name`` (retained for compatibility).
                 - placement: ``{"euler_angles": [...], "translation": [...]}``.
                 - success: ``True`` on success.
 
@@ -447,7 +477,7 @@ def register_fabrication_tools(
                     translation=[0.0, 0.0, 50.0],
                     name="TopPlane",
                 )
-                # result["cs_name"] → "LocalCSYS_001"
+                # result["cs_name"] → "TopPlane"  (the label you provided)
         """
         bridge = await get_bridge()
         code = f"""
@@ -459,17 +489,18 @@ if doc is None:
 
 euler = {euler_angles!r}
 trans = {translation!r}
-label = {name!r} or "LocalCSYS"
+label = {name!r} or "CoordinateSystem"
 
-# Build the placement from Euler angles (degrees, ZYX intrinsic).
-# Convention: euler_angles are the PASSIVE rotation (world-to-local), so the
-# FreeCAD active rotation (local-to-world) is the negated inverse.
-# e.g. euler=[-90,0,0] → Rx(+90°) so sketch normal → world -Y.
+# Build the placement from Euler angles (degrees, XYZ intrinsic).
+# Convention (matches the HistCAD Fusion 360 adapter): euler_angles are the
+# ACTIVE local-to-world rotation R = Rx(a) * Ry(b) * Rz(g), angles used
+# as-is (no negation).  World point = R * (x, y, 0) + translation, sketch
+# normal = R * Z.  e.g. euler=[-90,0,0] → Rx(-90°) so sketch normal → +Y.
 rot = FreeCAD.Rotation(
-    FreeCAD.Vector(0, 0, 1), -euler[2],
+    FreeCAD.Vector(0, 0, 1), euler[2],
 )
-rot = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -euler[1]) * rot
-rot = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -euler[0]) * rot
+rot = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), euler[1]) * rot
+rot = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), euler[0]) * rot
 placement = FreeCAD.Placement(FreeCAD.Vector(*trans), rot)
 
 doc.openTransaction("Create Coordinate System")
@@ -493,7 +524,8 @@ try:
     doc.recompute()
     doc.commitTransaction()
     _result_ = {{
-        "cs_name": lcs.Name,
+        "cs_name": lcs.Label,
+        "cs_internal_name": lcs.Name,
         "label": lcs.Label,
         "placement": {{"euler_angles": {euler_angles!r}, "translation": {translation!r}}},
         "success": True,
@@ -545,6 +577,13 @@ except Exception as _e:
 
             coordinate_system: Inline plane spec
                 ``{"euler_angles": [a, b, g], "translation": [x, y, z]}``.
+                When provided, a ``PartDesign::CoordinateSystem`` datum is
+                created automatically and the sketch is *attached* to it (via
+                ``MapMode = "ObjectXY"``) rather than having its Placement set
+                directly.  This makes the sketch robust for parametric editing:
+                the datum survives undo/redo, can be driven by spreadsheet
+                expressions, and allows faces to propagate changes to dependent
+                features.  The created datum name is returned as ``cs_name``.
                 Mutually exclusive with ``coordinate_system_name``.
             coordinate_system_name: Name of a datum LCS created by
                 ``create_coordinate_system``.  Takes precedence over
@@ -565,10 +604,15 @@ except Exception as _e:
             Dictionary with:
                 - sketch_name: Name of the created sketch (pass to
                   ``apply_sketch_constraints`` and ``execute_extrude``).
-                - geometry_count: ``{total, lines, arcs, circles}``.
-                - arc_geometry: Per-arc ``{"center": [x, y], "radius": r}`` in
-                  the sketch's local 2-D frame.  Centers match the ground-truth
-                  JSON/NLT values and serve as a per-arc placement reward signal.
+                - cs_name: Name of the auto-created
+                  ``PartDesign::CoordinateSystem`` datum, or ``None`` when the
+                  sketch is attached to a named LCS or a face instead.
+                - geometry_count: ``{total, lines, arcs, circles}`` — compare
+                  against expected entity counts from the HistCAD JSON input.
+                - profile: ``{loops, closed_loops, open_loops, closed}`` —
+                  whether the entities chain into closed loops.  ``closed``
+                  must be ``True`` for the sketch to extrude into a solid;
+                  ``open_loops > 0`` means endpoint gaps in the input.
                 - dof_remaining: Constraint degrees of freedom remaining.
                   Zero means fully constrained; positive means under-constrained.
                 - fully_constrained: ``True`` when ``dof_remaining == 0``.
@@ -631,11 +675,38 @@ try:
                 body = obj
                 break
 
-    # Create sketch object
+    # --- Step 1: create the coordinate system datum (before the sketch) ---
+    # Correct mechanical-design order: coordinate_system first, sketch on top.
+    # When cs_inline is provided (HistCAD "coordinate_system" dict), we build a
+    # PartDesign::CoordinateSystem datum here so the sketch can be immediately
+    # attached to it in step 3.  Face-attachment and named-LCS references skip
+    # this step (the reference already exists).
+    attachment_info = None
+    _auto_lcs_name = None
+    _pending_lcs = None
+    if cs_inline is not None and attach_spec is None and cs_name_ref is None:
+        euler = cs_inline.get("euler_angles", [0, 0, 0])
+        trans = cs_inline.get("translation", [0, 0, 0])
+        # Active rotation R = Rx(a)*Ry(b)*Rz(g), angles as-is (matches the
+        # HistCAD / Fusion 360 adapter convention).
+        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), euler[2])
+        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), euler[1]) * rot
+        rot = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), euler[0]) * rot
+        # Label mirrors the HistCAD field name "coordinate_system" so the
+        # FreeCAD model tree reads naturally alongside the source JSON.
+        _cs_label = (sketch_nm + "_coordinate_system") if sketch_nm else "coordinate_system"
+        _pending_lcs = doc.addObject("PartDesign::CoordinateSystem", _cs_label)
+        _pending_lcs.Label = _cs_label
+        _pending_lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(*trans), rot)
+        if body is not None:
+            body.addObject(_pending_lcs)
+        doc.recompute()
+        _auto_lcs_name = _pending_lcs.Name
+
+    # --- Step 2: create the sketch object ---
     sk = doc.addObject("Sketcher::SketchObject", sketch_nm or "Sketch")
 
-    # Resolve attachment support (face-attached sketch for selective follow-on)
-    attachment_info = None
+    # --- Step 3: attach the sketch to its plane ---
     if attach_spec is not None:
         near_pt = attach_spec.get("near_point")
         face_nm = attach_spec.get("face_name")
@@ -661,19 +732,24 @@ try:
             sk.MapMode = "FlatFace"
             attachment_info = {{"face_name": face_nm, "attachment_offset": 0.0}}
     elif cs_name_ref is not None:
-        # Reference an existing LCS datum plane
-        lcs = doc.getObject(cs_name_ref)
+        # Look up by Label first (the user-visible name returned by
+        # create_coordinate_system as cs_name), then fall back to the
+        # internal FreeCAD Name so both "MyPlane" and "CoordinateSystem001"
+        # work as coordinate_system_name values.
+        lcs = None
+        for _obj in doc.Objects:
+            if _obj.Label == cs_name_ref:
+                lcs = _obj
+                break
+        if lcs is None:
+            lcs = doc.getObject(cs_name_ref)
         if lcs is not None:
             sk.AttachmentSupport = [(lcs, "")]
             sk.MapMode = "ObjectXY"
-    elif cs_inline is not None:
-        euler = cs_inline.get("euler_angles", [0, 0, 0])
-        trans = cs_inline.get("translation", [0, 0, 0])
-        # Passive-rotation convention: negate angles for FreeCAD active rotation.
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), -euler[2])
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -euler[1]) * rot
-        rot = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -euler[0]) * rot
-        sk.Placement = FreeCAD.Placement(FreeCAD.Vector(*trans), rot)
+    elif _pending_lcs is not None:
+        # Attach to the datum created in step 1 from cs_inline
+        sk.AttachmentSupport = [(_pending_lcs, "")]
+        sk.MapMode = "ObjectXY"
 
     if body is not None:
         body.addObject(sk)
@@ -719,26 +795,38 @@ try:
     _n_total   = len(idx_map)
     _nw = [round(normal_world.x, 4), round(normal_world.y, 4), round(normal_world.z, 4)]
     _ow = [round(origin_world.x, 3), round(origin_world.y, 3), round(origin_world.z, 3)]
-    # Arc/circle geometry in local sketch frame — center and radius match ground-truth
-    # JSON/NLT values directly, enabling per-arc constraint verification as a reward signal.
-    _arc_geo = {{}}
-    for _en, _ei in idx_map.items():
-        if _en.startswith("arc_") or _en.startswith("circle_"):
+    # Profile closure check — the one sketch property that is non-trivial to
+    # verify from the input: do the entities chain into closed loops?  Gaps
+    # from endpoint mismatches surface here instead of at extrude time.
+    _profile = {{}}
+    try:
+        _chk_edges = sk.Shape.Edges
+        _chk_groups = Part.sortEdges(_chk_edges) if _chk_edges else []
+        _closed_cnt = 0
+        for _grp in _chk_groups:
             try:
-                _g = sk.Geometry[_ei]
-                _c = _g.Center
-                _arc_geo[_en] = {{"center": [round(_c.x, 4), round(_c.y, 4)], "radius": round(_g.Radius, 4)}}
+                if Part.Wire(_grp).isClosed():
+                    _closed_cnt += 1
             except Exception:
                 pass
+        _profile = {{
+            "loops":        len(_chk_groups),
+            "closed_loops": _closed_cnt,
+            "open_loops":   len(_chk_groups) - _closed_cnt,
+            "closed":       len(_chk_groups) > 0 and _closed_cnt == len(_chk_groups),
+        }}
+    except Exception:
+        pass
     _result_ = {{
         "sketch_name": sk.Name,
+        "cs_name": _auto_lcs_name,
         "geometry_count": {{
             "total":   _n_total,
             "lines":   _n_lines,
             "arcs":    _n_arcs,
             "circles": _n_circles,
         }},
-        "arc_geometry":      _arc_geo,
+        "profile":           _profile,
         "dof_remaining":     dof_real,
         "fully_constrained": fully_constrained,
         "sketch_normal_world": _nw,
@@ -807,13 +895,32 @@ sk = doc.getObject({sketch_name!r})
 if sk is None:
     raise ValueError(f"Sketch not found: {sketch_name!r}")
 
-# Extract placement as Euler angles + translation
+# Extract placement as HistCAD Euler angles + translation.
+# HistCAD convention (matches the Fusion 360 adapter): active rotation
+# R = Rx(a)*Ry(b)*Rz(g).  Decompose the placement rotation matrix
+# accordingly so parse output round-trips with create_sketch_geometry.
 pl = sk.Placement
 rot = pl.Rotation
 trans = pl.Base
-yaw   = math.degrees(rot.toEuler()[0])
-pitch = math.degrees(rot.toEuler()[1])
-roll  = math.degrees(rot.toEuler()[2])
+_col_x = rot.multVec(FreeCAD.Vector(1, 0, 0))
+_col_y = rot.multVec(FreeCAD.Vector(0, 1, 0))
+_col_z = rot.multVec(FreeCAD.Vector(0, 0, 1))
+# R = Rx(a)*Ry(b)*Rz(g) → m02 = sin(b), m12 = -sin(a)cos(b), m22 = cos(a)cos(b),
+# m01 = -cos(b)sin(g), m00 = cos(b)cos(g)
+_m02, _m12, _m22 = _col_z.x, _col_z.y, _col_z.z
+_m00, _m01 = _col_x.x, _col_y.x
+_m10, _m11 = _col_x.y, _col_y.y
+if abs(_m02) < 1.0 - 1e-9:
+    beta_deg  = math.degrees(math.asin(max(-1.0, min(1.0, _m02))))
+    alpha_deg = math.degrees(math.atan2(-_m12, _m22))
+    gamma_deg = math.degrees(math.atan2(-_m01, _m00))
+else:
+    # Gimbal lock: b = ±90°; conventionally set g = 0.
+    beta_deg  = 90.0 if _m02 > 0 else -90.0
+    gamma_deg = 0.0
+    _sign = 1.0 if _m02 > 0 else -1.0
+    alpha_deg = _sign * math.degrees(math.atan2(_m10, _m11))
+euler_out = [round(alpha_deg, 6), round(beta_deg, 6), round(gamma_deg, 6)]
 
 sketch_dict = {{}}
 idx_map = {{}}
@@ -884,7 +991,7 @@ sk_normal = sk.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
 
 _result_ = {{
     "sketch_name":          {sketch_name!r},
-    "coordinate_system":    {{"euler_angles": [yaw, pitch, roll],
+    "coordinate_system":    {{"euler_angles": euler_out,
                               "translation":  [trans.x, trans.y, trans.z]}},
     "sketch":               sketch_dict,
     # entity_index_map (Sketcher internal integer indices) intentionally omitted:
@@ -1081,11 +1188,24 @@ _result_ = {{
                 - dof_after: Degrees of freedom after applying constraints.
                   Zero means fully constrained; positive means under-constrained;
                   negative means over-constrained.
-                - redundant_constraints: List of constraint type names that are
-                  redundant (over-constraining).
-                - sketch_valid: ``True`` if the sketch geometry is still valid
-                  after constraint solving.
+                - fully_constrained: ``True`` when ``dof_after == 0``.
+                - solve_status: Sketcher solver return code (0 = solved).
                 - applied_count: Number of constraints successfully applied.
+                - redundant_constraints: Constraint type names reported
+                  redundant (by the adapter or the solver).
+                - conflicting_constraints: Constraint type names the solver
+                  reports as conflicting (unsatisfiable together).
+                - profile: ``{loops, closed_loops, open_loops, closed}`` after
+                  solving — the solver can open a previously closed loop when
+                  it moves geometry.
+                - geometry_drift: ``{"max_mm": d, "drifted_entities": [...]}``
+                  — maximum distance any entity moved away from the
+                  ground-truth coordinates cached at creation time.  Non-zero
+                  drift means a constraint contradicts the stated coordinates
+                  (e.g. a Distance value that disagrees with the endpoints)
+                  even though the solver reports success.  The final solid is
+                  unaffected (extrusion uses the raw coordinates), so drift is
+                  a pure NLT-consistency signal.
                 - success: ``True`` on success.
 
         Raises:
@@ -1149,7 +1269,6 @@ if not idx_map:
             nurbs_c += 1; idx_map[f"nurbs_{{nurbs_c}}"] = i
 
 dof_before = getattr(sk, "DoF", -1)
-constraint_count_before = getattr(sk, "ConstraintCount", 0)
 
 doc.openTransaction("Apply Sketch Constraints")
 try:
@@ -1162,35 +1281,98 @@ try:
     dof_after = getattr(sk, "DoF", -1)
     solve_status = sk.solve() if hasattr(sk, "solve") else -1
     fully_constrained = getattr(sk, "FullyConstrained", False)
-    redundant_idxs = list(getattr(sk, "RedundantConstraints", ()))
-    conflicting_idxs = list(getattr(sk, "ConflictingConstraints", ()))
 
-    # Wire validity: check sketch shape is computed (requires solve_status != -2)
-    wire_closed = False
-    wire_edge_count = 0
+    def _constraint_names(_idxs):
+        # Sketcher reports RedundantConstraints/ConflictingConstraints 1-based.
+        _out = []
+        for _ci in _idxs:
+            try:
+                _out.append(sk.Constraints[_ci - 1].Type)
+            except Exception:
+                _out.append("#" + str(_ci))
+        return _out
+
+    conflicting = _constraint_names(getattr(sk, "ConflictingConstraints", ()))
+    solver_redundant = _constraint_names(getattr(sk, "RedundantConstraints", ()))
+
+    # Profile closure after solving (the solver can open a previously closed
+    # loop when it moves geometry).
+    _profile = {{}}
     try:
-        wires = sk.Shape.Wires
-        if wires:
-            wire_closed = wires[0].isClosed()
-            wire_edge_count = len(wires[0].Edges)
+        _chk_edges = sk.Shape.Edges
+        _chk_groups = Part.sortEdges(_chk_edges) if _chk_edges else []
+        _closed_cnt = 0
+        for _grp in _chk_groups:
+            try:
+                if Part.Wire(_grp).isClosed():
+                    _closed_cnt += 1
+            except Exception:
+                pass
+        _profile = {{
+            "loops":        len(_chk_groups),
+            "closed_loops": _closed_cnt,
+            "open_loops":   len(_chk_groups) - _closed_cnt,
+            "closed":       len(_chk_groups) > 0 and _closed_cnt == len(_chk_groups),
+        }}
+    except Exception:
+        pass
+
+    # Geometry drift vs the ground-truth coordinates cached at creation time.
+    # A contradictory-but-solvable constraint (e.g. Distance 25 on a 20 mm
+    # line) makes the solver move geometry silently: solve_status stays 0 and
+    # nothing is reported as conflicting.  Drift is the only observation that
+    # catches constraints inconsistent with the stated coordinates.
+    _drift = None
+    try:
+        import __main__ as _m_gt
+        _gt = getattr(_m_gt, "_sketch_geometry_cache", {{}}).get(sk.Name)
+        if _gt:
+            def _dist2d(_p, _q):
+                return ((_p.x - _q[0]) ** 2 + (_p.y - _q[1]) ** 2) ** 0.5
+            _max_d = 0.0
+            _drifted = []
+            for _nm, _sp in _gt.items():
+                _gi = idx_map.get(_nm)
+                if _gi is None or _gi >= len(sk.Geometry):
+                    continue
+                _g = sk.Geometry[_gi]
+                _d = None
+                if _nm.startswith("line_"):
+                    _d = max(_dist2d(_g.StartPoint, _sp["start"]),
+                             _dist2d(_g.EndPoint,   _sp["end"]))
+                elif _nm.startswith("arc_"):
+                    # Sketcher may normalise arc direction; accept either
+                    # endpoint order.
+                    _d = min(
+                        max(_dist2d(_g.StartPoint, _sp["start"]),
+                            _dist2d(_g.EndPoint,   _sp["end"])),
+                        max(_dist2d(_g.StartPoint, _sp["end"]),
+                            _dist2d(_g.EndPoint,   _sp["start"])),
+                    )
+                elif _nm.startswith("circle_"):
+                    _d = max(_dist2d(_g.Center, _sp["center"]),
+                             abs(_g.Radius - _sp["radius"]))
+                if _d is None:
+                    continue
+                _max_d = max(_max_d, _d)
+                if _d > 0.001:
+                    _drifted.append(_nm)
+            _drift = {{"max_mm": round(_max_d, 4), "drifted_entities": _drifted}}
     except Exception:
         pass
 
     doc.commitTransaction()
     _result_ = {{
-        "dof_before":               dof_before,
-        "dof_after":                dof_after,
-        "constraint_count_before":  constraint_count_before,
-        "constraint_count_after":   applied_after,
-        "fully_constrained":        fully_constrained,
-        "solve_status":             solve_status,
-        "redundant_constraint_indices":   redundant_idxs,
-        "conflicting_constraint_indices": conflicting_idxs,
-        "wire_closed":              wire_closed,
-        "wire_edge_count":          wire_edge_count,
-        "redundant_constraints":    redundant,
-        "applied_count":            applied_count,
-        "success":                  True,
+        "dof_before":              dof_before,
+        "dof_after":               dof_after,
+        "fully_constrained":       fully_constrained,
+        "solve_status":            solve_status,
+        "applied_count":           applied_count,
+        "redundant_constraints":   redundant + solver_redundant,
+        "conflicting_constraints": conflicting,
+        "profile":                 _profile,
+        "geometry_drift":          _drift,
+        "success":                 True,
     }}
 except Exception as _e:
     doc.abortTransaction()
@@ -1210,35 +1392,33 @@ except Exception as _e:
         sketch_name: str,
         towards: float,
         opposite: float = 0.0,
-        operation: str = "NewBody",
         sketch: dict[str, Any] | None = None,
         param_aliases: dict[str, str] | None = None,
-        body_name: str | None = None,
         feature_name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Extrude a sketch into a 3-D feature.
+        """Extrude a sketch into a standalone solid (``Part::Feature``).
 
-        Creates a ``PartDesign::Pad`` or ``PartDesign::Pocket`` depending on
-        the ``operation`` parameter.  When ``param_aliases`` is provided, the
-        adapter automatically creates a FreeCAD Spreadsheet (named
-        ``FabricationParams``) and binds the specified parameters to named
-        spreadsheet cells, exposing them as frontend slider controls.
-
-        For ``"NewBody"`` and ``"Intersect"`` operations, the extrusion is
-        built from ground-truth coordinates via the Part workbench, bypassing
+        The solid is built from ground-truth coordinates via the Part
+        workbench (wire → face → placement transform → extrude), bypassing
         Sketcher solver drift.  The geometry dict is retrieved automatically
         from the sketch object (stored by ``create_sketch_geometry``); the
         caller does **not** need to pass ``sketch=`` explicitly.
+
+        This tool only creates geometry.  Boolean combination with existing
+        solids (HistCAD ``Join`` / ``Cut`` / ``Intersect`` semantics) is a
+        separate step: call ``execute_boolean`` with explicit base and tool
+        object names.
+
+        When ``param_aliases`` is provided, the adapter creates a FreeCAD
+        Spreadsheet (named ``FabricationParams``) and binds the specified
+        parameters to named spreadsheet cells for frontend slider controls.
 
         Args:
             sketch_name: Name of the Sketcher object to reference.
             towards: Extrusion distance along the positive sketch normal (mm).
             opposite: Extrusion distance along the negative sketch normal (mm).
                 Defaults to ``0.0`` (one-direction extrusion).
-            operation: Boolean semantics — ``"NewBody"`` (creates a new
-                solid), ``"Join"`` (Pad, adds material),
-                ``"Cut"`` (Pocket, removes material), or ``"Intersect"``.
             sketch: Raw geometry dict (HistCAD format).  Optional — when
                 ``None`` (the default) the adapter auto-retrieves the dict
                 stored on the sketch object by ``create_sketch_geometry``.
@@ -1247,27 +1427,23 @@ except Exception as _e:
             param_aliases: Maps parameter keys to spreadsheet alias names for
                 frontend sliders.  E.g. ``{"towards": "column_height"}`` binds
                 the ``towards`` value to a cell aliased ``column_height``.
-            body_name: PartDesign Body to add the feature to.  Required for
-                ``"Join"`` and ``"Cut"`` operations.  Auto-detected if None.
             feature_name: Explicit FreeCAD object name. Auto-generated if None.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
             Dictionary with:
-                - feature_name: Name of the created feature (pass to subsequent
-                  steps).
-                - operation: The operation that was performed.
+                - feature_name: Name of the created solid (pass to
+                  ``execute_boolean`` or subsequent steps).
+                - local_obb: ``{"center": [x, y, z], "semi_extents":
+                  [sx, sy, sz]}`` in the sketch-local frame (axis-aligned
+                  box of the extruded solid mapped back through the inverse
+                  placement).  NLT annotation values for OBB are unreliable
+                  and should not be hard-verified against this field.
+                - global_center: ``placement * local_obb.center`` in world
+                  space.  NLT ``global center`` text is reference-only.
                 - bounding_box: ``{x_min, x_max, y_min, y_max, z_min, z_max}``
-                  in world space — use for extents and size verification.
-                - center: Geometric centroid ``[x, y, z]`` in world space.
-                  For symmetric, axis-aligned features this matches the
-                  ``global center`` in NLT prompts; for asymmetric/rotated
-                  features it approximates it (centroid vs OBB center).
-                - volume_mm3: Resulting solid volume in cubic millimetres.
-                - inter_extrusion_distance: Euclidean distance between the two
-                  extrusion bodies' centroids before the boolean.  Approximates
-                  the ``center distance`` field in NLT prompts.
-                  ``None`` for non-Intersect operations.
+                  in world space.
+                - volume_mm3: Solid volume in cubic millimetres.
                 - sketch_normal_world: Extrusion direction in world space.
                 - success: ``True`` when a non-zero solid was produced.
 
@@ -1280,11 +1456,9 @@ except Exception as _e:
                 result = await execute_extrude(
                     "Sketch001",
                     towards=150.0,
-                    operation="NewBody",
                     param_aliases={"towards": "column_height"},
                 )
-                # result["bound_params"] →
-                #   [{"alias":"column_height","cell":"A1","value":150.0}]
+                # result["global_center"] → world-space step observation
         """
         bridge = await get_bridge()
         code = f"""
@@ -1298,10 +1472,8 @@ if sk is None:
 
 towards        = {towards!r}
 opposite       = {opposite!r}
-operation      = {operation!r}
 aliases        = {param_aliases!r} or {{}}
 feat_nm        = {feature_name!r}
-body_nm        = {body_name!r}
 # Geometry dict: use caller-supplied value; fall back to cached value on sketch object.
 _sketch_direct = {sketch!r}
 
@@ -1310,8 +1482,8 @@ try:
     # Helper: build Part edges from the HistCAD geometry dict.
     # Prefers _sketch_direct when supplied; otherwise loads the JSON stored on the
     # sketch object by create_sketch_geometry (auto-retrieval, no LLM pass-through).
-    # Explicit Y-negation (HistCAD Y-down → FreeCAD Y-up) avoids Sketcher solver
-    # drift that corrupts sk.Geometry positions when DoF > 0.
+    # Coordinates are used exactly as written in the HistCAD JSON.
+    # Building from raw JSON avoids Sketcher solver drift when DoF > 0.
     _edge_build_errors: list[str] = []
 
     def _edges_from_raw_json(_sk, _PM):
@@ -1340,20 +1512,20 @@ try:
             try:
                 if _nm.startswith("line_"):
                     _ee.append(_PM.makeLine(
-                        FreeCAD.Vector(_sp["start"][0], -_sp["start"][1], 0),
-                        FreeCAD.Vector(_sp["end"][0],   -_sp["end"][1],   0)))
+                        FreeCAD.Vector(_sp["start"][0], _sp["start"][1], 0),
+                        FreeCAD.Vector(_sp["end"][0],   _sp["end"][1],   0)))
                 elif _nm.startswith("arc_"):
-                    _s2 = FreeCAD.Vector(_sp["start"][0],  -_sp["start"][1],  0)
-                    _m2 = FreeCAD.Vector(_sp["middle"][0], -_sp["middle"][1], 0)
-                    _e2 = FreeCAD.Vector(_sp["end"][0],    -_sp["end"][1],    0)
+                    _s2 = FreeCAD.Vector(_sp["start"][0],  _sp["start"][1],  0)
+                    _m2 = FreeCAD.Vector(_sp["middle"][0], _sp["middle"][1], 0)
+                    _e2 = FreeCAD.Vector(_sp["end"][0],    _sp["end"][1],    0)
                     _ee.append(_PM.Edge(_PM.ArcOfCircle(_s2, _m2, _e2)))
                 elif _nm.startswith("circle_"):
-                    _c2 = FreeCAD.Vector(_sp["center"][0], -_sp["center"][1], 0)
+                    _c2 = FreeCAD.Vector(_sp["center"][0], _sp["center"][1], 0)
                     _ee.append(_PM.Edge(
                         _PM.Circle(_c2, FreeCAD.Vector(0, 0, 1), _sp["radius"])))
                 elif _nm.startswith("ellipse_"):
                     _cx = _sp.get("center", [0, 0])[0]
-                    _cy = -_sp.get("center", [0, 0])[1]
+                    _cy = _sp.get("center", [0, 0])[1]
                     _a  = _sp.get("major_radius", 1.0)
                     _b  = _sp.get("minor_radius", 0.5)
                     _el = _PM.Ellipse(FreeCAD.Vector(_cx, _cy, 0), _a, _b)
@@ -1362,235 +1534,105 @@ try:
                 _edge_build_errors.append(str(_nm) + ": " + str(_build_err))
         return _ee
 
-    def _make_wire(_PM, _edges):
-        # Sort edges topologically before building the Wire so that dict-order
-        # differences do not produce open/invalid profiles.
-        # Part.sortEdges returns connected-edge groups; we pick the largest.
-        # Falls back to raw order on older FreeCAD builds without sortEdges.
+    def _make_face(_PM, _edges):
+        # Build a face from all closed edge loops (outer + holes).  Matches the
+        # Fusion 360 adapter profile nesting: odd/even depth via Bullseye.
         if not _edges:
-            return _PM.Wire(_edges)
+            return _PM.Face(_PM.Wire(_edges))
         try:
             _sorted_groups = _PM.sortEdges(_edges)
-            _best = max(_sorted_groups, key=len)
-            return _PM.Wire(_best)
         except Exception:
-            return _PM.Wire(_edges)
-
-    # Resolve body
-    body = None
-    if body_nm is not None:
-        body = doc.getObject(body_nm)
-    else:
-        for obj in doc.Objects:
-            if obj.TypeId == "PartDesign::Body":
-                body = obj
-                break
-
-    if operation == "NewBody":
-        # Use Part workbench directly to respect the sketch Placement (world
-        # transform from Euler angles).  PartDesign::Pad ignores Placement and
-        # always extrudes along the Body's Z axis, giving the wrong orientation
-        # when the sketch has a non-default rotation.
-        import Part as _PartNB
-        _edges_nb = _edges_from_raw_json(sk, _PartNB)
-        if not _edges_nb:
-            # Fallback: use Sketcher geometry (may be solver-drift distorted)
-            for _geo_nb in sk.Geometry:
-                _t_nb = type(_geo_nb).__name__
-                if "LineSegment" in _t_nb or ("Line" in _t_nb
-                        and "ArcOf" not in _t_nb and "Segment" not in _t_nb):
-                    _edges_nb.append(_PartNB.makeLine(
-                        _geo_nb.StartPoint, _geo_nb.EndPoint))
-                elif "ArcOfCircle" in _t_nb:
-                    _edges_nb.append(_PartNB.Edge(_geo_nb))
-                elif "Circle" in _t_nb and "ArcOf" not in _t_nb:
-                    _edges_nb.append(_PartNB.Edge(_geo_nb))
-        _wire_nb = _make_wire(_PartNB, _edges_nb)
-        _face_nb = _PartNB.Face(_wire_nb)
-        _mat_nb  = sk.Placement.toMatrix()
-        _fw_nb   = _face_nb.transformGeometry(_mat_nb)
-        _nrm_nb  = sk.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-        if opposite > 0:
-            _s1_nb  = _fw_nb.extrude(_nrm_nb * towards)
-            _s2_nb  = _fw_nb.extrude(-_nrm_nb * opposite)
-            _solid_nb = _s1_nb.fuse(_s2_nb)
-        else:
-            _solid_nb = _fw_nb.extrude(_nrm_nb * towards)
-        feat = doc.addObject("Part::Feature", feat_nm or "Solid")
-        feat.Shape = _solid_nb
-    elif operation == "Join":
-        feat = doc.addObject("PartDesign::Pad", feat_nm or "Pad")
-        feat.Profile = sk
-        feat.Length  = towards
-        if body is not None:
-            body.addObject(feat)
-    elif operation == "Cut":
-        feat = doc.addObject("PartDesign::Pocket", feat_nm or "Pocket")
-        feat.Profile = sk
-        feat.Length  = abs(towards)
-        if opposite > 0:
-            feat.Length2 = opposite
-        if body is not None:
-            body.addObject(feat)
-    else:  # Intersect — keep only the volume shared with the existing body
-        # Use Part workbench approach (Part.Wire → face → extrude) for the
-        # intersecting slab.  This bypasses the Sketcher solver entirely,
-        # avoiding geometry drift caused by under-constrained sketches (DoF > 0).
-        # The geometry is already Y-negated by _build_sketch_entities, so we
-        # only need to apply the sketch placement (world transform) and extrude.
-        import Part as _Part
-
-        # Build Part.Wire from raw stored JSON (solver-drift free).
-        _edges = _edges_from_raw_json(sk, _Part)
-        if not _edges:
-            # Fallback: use Sketcher geometry directly (may be distorted)
-            for _geo in sk.Geometry:
-                _tid = type(_geo).__name__
-                if "LineSegment" in _tid or ("Line" in _tid and "Segment" not in _tid
-                                              and "ArcOf" not in _tid):
-                    _edges.append(_Part.makeLine(_geo.StartPoint, _geo.EndPoint))
-                elif "ArcOfCircle" in _tid:
-                    _edges.append(_Part.Edge(_geo))
-                elif "Circle" in _tid and "ArcOf" not in _tid:
-                    _edges.append(_Part.Edge(_geo))
-        _wire = _make_wire(_Part, _edges)
-        _face = _Part.Face(_wire)
-
-        # Transform face to world space using the sketch placement
-        _mat = sk.Placement.toMatrix()
-        _face_world = _face.transformGeometry(_mat)
-        _normal = sk.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-
-        # Build extrusion slab (midplane when towards ≈ opposite, one-dir otherwise)
-        if opposite > 0:
-            _h1 = _face_world.extrude(_normal * towards)
-            _h2 = _face_world.extrude(-_normal * opposite)
-            extr2_shape = _h1.fuse(_h2)
-        else:
-            extr2_shape = _face_world.extrude(_normal * towards)
-
-        # Find base shape.
-        # Priority: PartDesign Body (if valid solid) → largest standalone
-        # Part::Feature → give up and return the slab alone.
-        # Guard: body.Shape.copy() raises "Null input shape" when the Body
-        # contains no committed features (e.g. after a NewBody that created a
-        # standalone Part::Feature outside the Body tree).  Always validate
-        # volume > 0 before trusting the Body shape.
-        _SKIP_TYPES = {{
-            "PartDesign::Body",
-            "Sketcher::SketchObject",
-            "App::Origin",
-            "App::Plane",
-            "App::Line",
-            "App::Point",
-            "PartDesign::CoordinateSystem",
-        }}
-        base_shape = None
-        if body is not None:
+            _sorted_groups = [_edges]
+        _wires = []
+        for _grp in _sorted_groups:
             try:
-                _bvol = body.Shape.Volume
-                if _bvol > 1e-6:
-                    base_shape = body.Shape.copy()
+                _w = _PM.Wire(_grp)
+                if _w.isClosed():
+                    _wires.append(_w)
             except Exception:
-                pass  # Body has no valid shape — fall through to doc scan
-        if base_shape is None:
-            # Scan for the largest solid that is not the current sketch or
-            # the feature we are about to create.
-            _best_vol = 0.0
-            _feat_nm_skip = feat_nm or ""
-            for _obj in doc.Objects:
-                if _obj.TypeId in _SKIP_TYPES:
-                    continue
-                if _obj.Name in (sk.Name, _feat_nm_skip):
-                    continue
-                try:
-                    _v = _obj.Shape.Volume
-                    if _v > _best_vol:
-                        _best_vol = _v
-                        base_shape = _obj.Shape.copy()
-                except Exception:
-                    pass
+                continue
+        if not _wires:
+            try:
+                _best = max(_sorted_groups, key=len)
+                return _PM.Face(_PM.Wire(_best))
+            except Exception:
+                return _PM.Face(_PM.Wire(_edges))
+        if len(_wires) == 1:
+            return _PM.Face(_wires[0])
+        try:
+            return _PM.makeFace(_wires, "Part::FaceMakerBullseye")
+        except Exception:
+            return _PM.Face(_wires[0])
 
-        if base_shape is not None:
-            common_shape = base_shape.common(extr2_shape)
-        else:
-            common_shape = extr2_shape
+    # Build the solid via the Part workbench so the sketch Placement (world
+    # transform from Euler angles) is respected.  PartDesign::Pad ignores
+    # Placement and always extrudes along the Body's Z axis, giving the wrong
+    # orientation when the sketch has a non-default rotation.
+    import Part as _Part
+    _edges = _edges_from_raw_json(sk, _Part)
+    if not _edges:
+        # Fallback: use Sketcher geometry directly (may be solver-drift distorted)
+        for _geo in sk.Geometry:
+            _tid = type(_geo).__name__
+            if "LineSegment" in _tid or ("Line" in _tid and "Segment" not in _tid
+                                          and "ArcOf" not in _tid):
+                _edges.append(_Part.makeLine(_geo.StartPoint, _geo.EndPoint))
+            elif "ArcOfCircle" in _tid:
+                _edges.append(_Part.Edge(_geo))
+            elif "Circle" in _tid and "ArcOf" not in _tid:
+                _edges.append(_Part.Edge(_geo))
+    _face = _make_face(_Part, _edges)
 
-        result_feat = doc.addObject("Part::Feature", feat_nm or "Intersect")
-        result_feat.Shape = common_shape
-        feat = result_feat
+    # Transform face to world space using the sketch placement, then extrude
+    # along the world-space sketch normal (both directions when opposite > 0).
+    _pl = sk.Placement
+    _face_world = _face.transformGeometry(_pl.toMatrix())
+    _normal = _pl.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+    if opposite > 0:
+        _solid = _face_world.extrude(_normal * towards).fuse(
+            _face_world.extrude(-_normal * opposite))
+    else:
+        _solid = _face_world.extrude(_normal * towards)
 
+    feat = doc.addObject("Part::Feature", feat_nm or "Solid")
+    feat.Shape = _solid
     doc.recompute()
 
-    # Bounding box + volume.
-    # NewBody and Intersect: use feat.Shape (the result Part::Feature).
-    # Join/Cut: body.Shape accumulates all features; fall back to feat.Shape if no body.
+    # World-space AABB + volume.
     try:
-        if operation in ("NewBody", "Intersect") or body is None:
-            shape_for_bbox = feat.Shape
-        else:
-            shape_for_bbox = body.Shape
-        bb = shape_for_bbox.BoundBox
-        bbox = {{"x_min": bb.XMin, "x_max": bb.XMax,
-                 "y_min": bb.YMin, "y_max": bb.YMax,
-                 "z_min": bb.ZMin, "z_max": bb.ZMax}}
-        aabb_center = [(bb.XMin + bb.XMax) / 2,
-                       (bb.YMin + bb.YMax) / 2,
-                       (bb.ZMin + bb.ZMax) / 2]
-        volume = shape_for_bbox.Volume
+        bb = feat.Shape.BoundBox
+        bbox = {{"x_min": round(bb.XMin, 4), "x_max": round(bb.XMax, 4),
+                 "y_min": round(bb.YMin, 4), "y_max": round(bb.YMax, 4),
+                 "z_min": round(bb.ZMin, 4), "z_max": round(bb.ZMax, 4)}}
+        volume = feat.Shape.Volume
     except Exception:
         bbox = {{}}
-        aabb_center = [0.0, 0.0, 0.0]
         volume = 0.0
 
     # Sketch normal in world space (for extrusion direction verification)
-    try:
-        sk_normal = sk.Placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-        sketch_normal_world = [round(sk_normal.x, 6), round(sk_normal.y, 6), round(sk_normal.z, 6)]
-    except Exception:
-        sketch_normal_world = [0.0, 0.0, 1.0]
+    sketch_normal_world = [round(_normal.x, 6), round(_normal.y, 6), round(_normal.z, 6)]
 
-    # True geometric center in world space — matches "global center" in NLT prompts.
-    # More accurate than AABB center for rotated or asymmetric features.
-    # Part.Compound (returned by boolean ops) may not expose CenterOfMass directly
-    # in FreeCAD 1.1; fall back to the first solid's centroid, then AABB center.
-    center_of_mass = [round(v, 4) for v in aabb_center]
+    # Step-local observation: OBB in sketch frame + global center.
+    # The solid is mapped back to the sketch-local frame with the inverse
+    # placement; its axis-aligned box there is reported as local_obb.
     try:
-        _com = shape_for_bbox.CenterOfMass
-        center_of_mass = [round(_com.x, 4), round(_com.y, 4), round(_com.z, 4)]
-    except AttributeError:
-        try:
-            _solids = shape_for_bbox.Solids
-            if _solids:
-                _com = _solids[0].CenterOfMass
-                center_of_mass = [round(_com.x, 4), round(_com.y, 4), round(_com.z, 4)]
-        except Exception:
-            pass
+        _local_sh = feat.Shape.copy()
+        _local_sh.transformShape(_pl.inverse().toMatrix())
+        _lb = _local_sh.BoundBox
+        _lc = [(_lb.XMin + _lb.XMax) / 2,
+               (_lb.YMin + _lb.YMax) / 2,
+               (_lb.ZMin + _lb.ZMax) / 2]
+        local_obb = {{
+            "center": [round(_v, 4) for _v in _lc],
+            "semi_extents": [round(_lb.XLength / 2, 4),
+                             round(_lb.YLength / 2, 4),
+                             round(_lb.ZLength / 2, 4)],
+        }}
+        _gc = _pl.Rotation.multVec(FreeCAD.Vector(*_lc)) + _pl.Base
+        global_center = [round(_gc.x, 4), round(_gc.y, 4), round(_gc.z, 4)]
     except Exception:
-        pass
-
-    # Intersect-only: slab center of mass and inter-extrusion distance.
-    # inter_extrusion_distance matches the prompt's "center distance" between the two
-    # extrusion bodies (before boolean), giving the RL agent a spatial alignment reward.
-    _slab_center = None
-    _inter_dist = None
-    try:
-        # extr2_shape and base_shape only exist in the Intersect branch
-        def _get_com(_sh):
-            try:
-                return _sh.CenterOfMass
-            except AttributeError:
-                _ss = _sh.Solids
-                return _ss[0].CenterOfMass if _ss else None
-        _sc = _get_com(extr2_shape)
-        if _sc is not None:
-            _slab_center = [round(_sc.x, 4), round(_sc.y, 4), round(_sc.z, 4)]
-            _bc = _get_com(base_shape)
-            if _bc is not None:
-                _dx, _dy, _dz = _sc.x - _bc.x, _sc.y - _bc.y, _sc.z - _bc.z
-                _inter_dist = round((_dx ** 2 + _dy ** 2 + _dz ** 2) ** 0.5, 4)
-    except Exception:
-        pass
+        local_obb = {{}}
+        global_center = None
 
     # Bind param_aliases to spreadsheet
     bound_params = []
@@ -1634,14 +1676,13 @@ try:
 
 
     _result_ = {{
-        "feature_name":             feat.Name,
-        "operation":                operation,
-        "bounding_box":             bbox,
-        "center":                   center_of_mass,
-        "volume_mm3":               round(volume, 4),
-        "inter_extrusion_distance": _inter_dist,
-        "sketch_normal_world":      sketch_normal_world,
-        "success":                  volume > 0,
+        "feature_name":        feat.Name,
+        "local_obb":           local_obb,
+        "global_center":       global_center,
+        "bounding_box":        bbox,
+        "volume_mm3":          round(volume, 4),
+        "sketch_normal_world": sketch_normal_world,
+        "success":             volume > 0,
     }}
 except Exception as _e:
     doc.abortTransaction()
@@ -1651,6 +1692,148 @@ except Exception as _e:
         if result.success and result.result:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute extrude")
+
+    @mcp.tool()
+    async def execute_boolean(
+        base_object_name: str,
+        tool_object_name: str,
+        operation: str,
+        result_name: str | None = None,
+        keep_originals: bool = False,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Combine two solids with a boolean operation (HistCAD semantics).
+
+        Takes explicit base and tool objects — no auto-detection.  Use this
+        after ``execute_extrude`` / ``execute_revolve`` to realise the HistCAD
+        ``Join`` / ``Cut`` / ``Intersect`` feature operations:
+
+        - ``"Join"``: union of base and tool (fuse).
+        - ``"Cut"``: base minus tool.
+        - ``"Intersect"``: shared volume only (common).
+
+        Args:
+            base_object_name: Name of the existing solid (e.g. the feature
+                returned by a previous ``execute_extrude``).
+            tool_object_name: Name of the solid to combine with the base
+                (typically the feature just created by ``execute_extrude``).
+            operation: ``"Join"``, ``"Cut"``, or ``"Intersect"``.
+            result_name: Explicit FreeCAD object name for the result.
+                Auto-generated from the operation if None.
+            keep_originals: When ``False`` (default) the base and tool objects
+                are removed from the document after the boolean, leaving only
+                the result.  Set ``True`` to keep them (hidden state useful
+                for debugging).
+            doc_name: Target document. Uses the active document if None.
+
+        Returns:
+            Dictionary with:
+                - feature_name: Name of the result solid.
+                - operation: The operation performed.
+                - base: ``{"name", "global_center", "volume_mm3"}`` of the
+                  base solid before the boolean (``global_center`` is the
+                  world-space AABB center).
+                - tool: Same observation for the tool solid.
+                - result: ``{"global_center", "bounding_box", "volume_mm3"}``
+                  of the boolean result.
+                - center_distance: Euclidean distance between base and tool
+                  ``global_center`` values.
+                - success: ``True`` when the result has non-zero volume.
+
+        Raises:
+            ValueError: If either object is missing or the operation is
+                invalid.
+        """
+        bridge = await get_bridge()
+        code = f"""
+import math as _math
+
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No active document")
+
+base_obj = doc.getObject({base_object_name!r})
+tool_obj = doc.getObject({tool_object_name!r})
+if base_obj is None:
+    raise ValueError(f"Base object not found: {base_object_name!r}")
+if tool_obj is None:
+    raise ValueError(f"Tool object not found: {tool_object_name!r}")
+
+operation   = {operation!r}
+result_nm   = {result_name!r}
+keep_orig   = {keep_originals!r}
+
+if operation not in ("Join", "Cut", "Intersect"):
+    raise ValueError(
+        f"Invalid operation: {{operation}}. Use 'Join', 'Cut', or 'Intersect'.")
+
+def _aabb_center(_sh):
+    _b = _sh.BoundBox
+    return [round((_b.XMin + _b.XMax) / 2, 4),
+            round((_b.YMin + _b.YMax) / 2, 4),
+            round((_b.ZMin + _b.ZMax) / 2, 4)]
+
+doc.openTransaction("Execute Boolean")
+try:
+    base_shape = base_obj.Shape.copy()
+    tool_shape = tool_obj.Shape.copy()
+
+    if operation == "Join":
+        result_shape = base_shape.fuse(tool_shape)
+    elif operation == "Cut":
+        result_shape = base_shape.cut(tool_shape)
+    else:
+        result_shape = base_shape.common(tool_shape)
+
+    base_center = _aabb_center(base_shape)
+    tool_center = _aabb_center(tool_shape)
+    center_distance = round(_math.sqrt(sum(
+        (base_center[_i] - tool_center[_i]) ** 2 for _i in range(3))), 4)
+
+    feat = doc.addObject("Part::Feature", result_nm or operation)
+    feat.Shape = result_shape
+
+    if not keep_orig:
+        _base_nm, _tool_nm = base_obj.Name, tool_obj.Name
+        doc.removeObject(_base_nm)
+        if _tool_nm != _base_nm:
+            doc.removeObject(_tool_nm)
+
+    doc.recompute()
+
+    _rb = result_shape.BoundBox
+    _result_ = {{
+        "feature_name": feat.Name,
+        "operation":    operation,
+        "base": {{
+            "name":          {base_object_name!r},
+            "global_center": base_center,
+            "volume_mm3":    round(base_shape.Volume, 4),
+        }},
+        "tool": {{
+            "name":          {tool_object_name!r},
+            "global_center": tool_center,
+            "volume_mm3":    round(tool_shape.Volume, 4),
+        }},
+        "result": {{
+            "global_center": _aabb_center(result_shape),
+            "bounding_box":  {{"x_min": round(_rb.XMin, 4), "x_max": round(_rb.XMax, 4),
+                               "y_min": round(_rb.YMin, 4), "y_max": round(_rb.YMax, 4),
+                               "z_min": round(_rb.ZMin, 4), "z_max": round(_rb.ZMax, 4)}},
+            "volume_mm3":    round(result_shape.Volume, 4),
+        }},
+        "center_distance": center_distance,
+        "success": result_shape.Volume > 1e-9,
+    }}
+    doc.commitTransaction()
+except Exception as _e:
+    doc.abortTransaction()
+    raise
+"""
+        result = await bridge.execute_python(code)
+        if result.success and result.result:
+            return result.result
+        raise ValueError(result.error_traceback or "Failed to execute boolean")
 
     @mcp.tool()
     async def execute_revolve(
@@ -2454,7 +2637,10 @@ _result_ = {{
         2. ``create_sketch_geometry`` + ``apply_sketch_constraints`` for each
            ``sketches`` entry.
         3. ``execute_extrude`` / ``execute_revolve`` / ``execute_helix`` for
-           each ``features`` entry.
+           each ``features`` entry.  For extrude features with a ``Join`` /
+           ``Cut`` / ``Intersect`` operation, the solid is first created with
+           ``execute_extrude`` and then combined with the accumulated solid
+           via ``execute_boolean``.
         4. ``feature_fillet`` / ``feature_chamfer`` for each ``finishes`` entry.
 
         The batch path is recommended for production automation.  For RL
@@ -2541,6 +2727,10 @@ _result_ = {{
                 steps_completed += 1
 
         # Step 3: Features
+        # current_solid tracks the accumulated solid so that HistCAD
+        # Join/Cut/Intersect operations can be realised as an extrude followed
+        # by an explicit execute_boolean(base=current_solid, tool=new solid).
+        current_solid: str | None = None
         for feat_spec in fab_plan.features:
             sk_nm = sketch_name_map.get(feat_spec.sketch_name, feat_spec.sketch_name)
             params = feat_spec.params
@@ -2551,12 +2741,24 @@ _result_ = {{
                     sketch_name=sk_nm,
                     towards=params.get("towards", 10.0),
                     opposite=params.get("opposite", 0.0),
-                    operation=feat_spec.operation,
                     param_aliases=aliases or None,
                     feature_name=feat_spec.feature_name,
                     doc_name=doc_name,
                 )
-            elif feat_spec.type == "revolve":
+                steps_completed += 1
+                op = feat_spec.operation
+                if op in ("Join", "Cut", "Intersect") and current_solid:
+                    feat_result = await execute_boolean(  # type: ignore[name-defined]
+                        base_object_name=current_solid,
+                        tool_object_name=feat_result["feature_name"],
+                        operation=op,
+                        doc_name=doc_name,
+                    )
+                current_solid = feat_result.get("feature_name") or current_solid
+                feature_names.append(feat_result.get("feature_name", ""))
+                last_body_name = feat_result.get("body_name")
+                continue
+            if feat_spec.type == "revolve":
                 feat_result = await execute_revolve(  # type: ignore[name-defined]
                     sketch_name=sk_nm,
                     axis=params.get("axis", [[0, 0, 0], [0, 0, 1]]),

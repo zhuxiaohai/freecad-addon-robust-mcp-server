@@ -1,5 +1,8 @@
 # Pre-commit hooks configuration
 # https://pre-commit.com/
+#
+# HistCAD-68C2/ is reference-only Fusion 360 tooling for local development.
+# It is excluded from lint, format, type-check, and file-hygiene hooks below.
 
 default_language_version:
   python: python3.11  # Must match FreeCAD's bundled Python version
@@ -12,30 +15,42 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: \.md$  # Allow trailing spaces in markdown for line breaks
+        exclude: (^HistCAD-68C2/|\.md$)  # HistCAD: reference-only; md: line breaks
       - id: end-of-file-fixer
-        exclude: \.safety-project\.ini$  # Safety CLI manages its own formatting
+        exclude: (^HistCAD-68C2/|\.safety-project\.ini$)
       - id: check-xml
+        exclude: ^HistCAD-68C2/
       - id: check-yaml
         args: [--unsafe]
+        exclude: ^HistCAD-68C2/
       - id: check-toml
+        exclude: ^HistCAD-68C2/
       - id: check-json
-        exclude: ^\.vscode/.*\.json$  # VS Code uses JSONC (JSON with Comments)
+        exclude: (^HistCAD-68C2/|^\.vscode/.*\.json$)  # VS Code uses JSONC
       - id: check-added-large-files
         args: [--maxkb=1000]
+        exclude: ^HistCAD-68C2/
       - id: check-merge-conflict
+        exclude: ^HistCAD-68C2/
       - id: check-case-conflict
+        exclude: ^HistCAD-68C2/
       - id: check-symlinks
+        exclude: ^HistCAD-68C2/
       - id: check-executables-have-shebangs
+        exclude: ^HistCAD-68C2/
       - id: check-shebang-scripts-are-executable
+        exclude: ^HistCAD-68C2/
       - id: detect-private-key
+        exclude: ^HistCAD-68C2/
       - id: mixed-line-ending
         args: [--fix=lf]
+        exclude: ^HistCAD-68C2/
       - id: no-commit-to-branch
         args: [--branch, main, --branch, master]
       - id: check-ast  # Check Python syntax
         types: [text]
         files: \.(py|FCMacro)$
+        exclude: ^HistCAD-68C2/
 
   # JSON5/JSONC validation for VS Code config files (supports comments)
   - repo: https://github.com/maresb/check-json5
@@ -46,6 +61,7 @@ repos:
 
   # ==========================================================================
   # Python - Linting and Formatting
+  # HistCAD-68C2/ is reference-only — excluded from MCP-server quality hooks.
   # ==========================================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.11
@@ -54,9 +70,11 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
         types_or: [python, text]
         files: \.(py|FCMacro)$
+        exclude: ^HistCAD-68C2/
       - id: ruff-format
         types_or: [python, text]
         files: \.(py|FCMacro)$
+        exclude: ^HistCAD-68C2/
 
   # ==========================================================================
   # Python - Type Checking
@@ -72,6 +90,7 @@ repos:
         # Note: mypy doesn't natively support .FCMacro, so we skip those files
         # FCMacro files are checked by ruff and bandit instead
         args: [--config-file=pyproject.toml]
+        exclude: ^HistCAD-68C2/
 
   # ==========================================================================
   # Python - Security Scanning
@@ -84,6 +103,8 @@ repos:
         additional_dependencies: ["bandit[toml]"]
         types: [text]
         files: \.(py|FCMacro)$
+        exclude: ^HistCAD-68C2/
+        pass_filenames: false
 
   # Safety - Dependency vulnerability scanning
   # Checks installed packages against known security vulnerabilities
@@ -161,6 +182,7 @@ repos:
       - id: markdownlint-cli2
         name: markdownlint (linter)
         args: [--fix]
+        exclude: ^HistCAD-68C2/
 
   # Tertiary: md-toc - Table of contents generator
   # Automatically updates TOC between <!--TOC--> markers
@@ -185,7 +207,8 @@ repos:
           - --ignore-words
           - .codespell-ignore-words.txt
           - --skip
-          - "*.lock,*.json,.secrets.baseline"
+          - "*.lock,*.json,.secrets.baseline,HistCAD-68C2/*"
+        exclude: ^HistCAD-68C2/
 
   # ==========================================================================
   # Configuration Validation
@@ -194,6 +217,7 @@ repos:
     rev: v0.24.1
     hooks:
       - id: validate-pyproject
+        exclude: ^HistCAD-68C2/
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 0.36.0

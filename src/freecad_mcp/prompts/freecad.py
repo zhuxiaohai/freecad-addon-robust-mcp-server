@@ -691,7 +691,9 @@ strategies, or calls `execute_fabrication_plan` for batch execution.
        sketch={"line_1": {"start":[0,0], "end":[20,0]}, ...},
        coordinate_system_name="TopPlane",   # or inline coordinate_system dict
    )
-   → sketch_name, entity_index_map, dof_remaining
+   → sketch_name, geometry_count, profile, dof_remaining
+   (check profile.closed is True before extruding — open_loops > 0 means
+    endpoint gaps in the input coordinates)
 
 3. check_sketch_constraints(sketch_name, constraints)   # optional dry-run
    → valid, estimated_dof_after
@@ -701,17 +703,28 @@ strategies, or calls `execute_fabrication_plan` for batch execution.
        "Horizontal": ["line_1", "line_3"],
        "Length":     [["line_1","20 mm"]],
    })
-   → dof_after, sketch_valid   ← key RL reward signal
+   → dof_after, redundant/conflicting constraints, profile, geometry_drift
+   (geometry_drift.max_mm > 0 means a constraint value contradicts the
+    stated coordinates — the solver moved geometry silently; the final
+    solid is unaffected because extrusion uses the raw coordinates)
 
 5. execute_extrude(sketch_name, towards=30.0, param_aliases={"towards": "arm_length"})
-   → feature_name, bounding_box, bound_params
+   → feature_name, local_obb, global_center, bounding_box
+   (local_obb.center and global_center match the NLT "local OBB center" and
+    "global center" values exactly; sketch coordinates are used as written,
+    with no Y sign change)
 
-6. get_body_snapshot()   → edge_samples for fillet near_points
+6. execute_boolean(base_object_name, tool_object_name, operation="Intersect")
+   → base/tool/result observations + center_distance
+   (only when the step is Join / Cut / Intersect; base = accumulated solid,
+    tool = the solid just created by execute_extrude)
 
-7. feature_fillet(near_points=[[10,0,30]], radius=2.0)
+7. get_body_snapshot()   → edge_samples for fillet near_points
+
+8. feature_fillet(near_points=[[10,0,30]], radius=2.0)
    → feature_name
 
-8. list_tunable_params()   → param slider list for frontend
+9. list_tunable_params()   → param slider list for frontend
 ```
 
 ## HistCAD Entity Format
@@ -779,6 +792,8 @@ create_sketch_geometry(
 ## RL Training Tips
 
 - Call primitives individually (not `execute_fabrication_plan`) for per-step rewards.
+- `execute_extrude` returns `local_obb` / `global_center`; `execute_boolean`
+  returns `center_distance` — all directly comparable to NLT ground truth.
 - `apply_sketch_constraints` returns `dof_after` (0 = fully constrained = dense reward).
 - `check_sketch_constraints` enables constraint pruning without burning env steps.
 - `parse_freecad_sketch` is the observation for STEP reverse-engineering episodes.

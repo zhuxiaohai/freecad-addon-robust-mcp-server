@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "histcad-fusion360-tools"
+version = "0.1.0"
+description = "Export HistCAD operation JSON files to STEP/F3D and run editability checks through a Fusion 360 command server."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "scipy>=1.10",
+]
+
+[project.scripts]
+histcad-json-to-step = "export.cli:main"
+histcad-json-to-f3d = "export.f3d_cli:main"
+histcad-editability-experiment = "editability.experiment:main"
+histcad-editability-metrics = "editability.metrics:main"
+histcad-editability-visualize = "editability.visualization:main"
+fusion360-server-launch = "fusion360_tools.server.launch:main"
+
+[project.optional-dependencies]
+visualization = [
+    "matplotlib>=3.7",
+    "pillow>=10",
+]
+
+[tool.setuptools.packages.find]
+include = ["export*", "editability*", "fusion360_tools*"]
+
+[tool.setuptools.package-data]
+"fusion360_tools.server" = ["*.manifest"]

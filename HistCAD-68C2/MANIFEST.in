@@ -1,0 +1,9 @@
+include README.md
+include export/README.md
+include export/README_chinese.md
+include editability/README.md
+include editability/README_chinese.md
+recursive-include examples *.json
+recursive-include scripts *.ps1
+recursive-include fusion360_tools/server *.manifest
+recursive-include fusion360_tools/docs *.md

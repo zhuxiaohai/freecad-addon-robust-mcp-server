@@ -21,7 +21,10 @@ class CoordinateSystemSpec:
     """Specification for a datum coordinate system (sketch plane).
 
     Attributes:
-        euler_angles: Rotation [a, b, g] in degrees around X, Y, Z axes.
+        euler_angles: Rotation [a, b, g] in degrees around X, Y, Z axes,
+            applied as the active local-to-world rotation
+            R = Rx(a) * Ry(b) * Rz(g) (HistCAD / Fusion 360 adapter
+            convention).
         translation: Origin [x, y, z] in millimetres in the world frame.
         name: Optional label used to reference this CS in SketchSpec.
 

@@ -1585,7 +1585,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         "deterministically to FreeCAD API calls. "
                         "Workflow: create_coordinate_system → create_sketch_geometry → "
                         "apply_sketch_constraints → execute_extrude/revolve/helix → "
-                        "feature_fillet/chamfer. "
+                        "execute_boolean (Join/Cut/Intersect) → feature_fillet/chamfer. "
                         "Use execute_fabrication_plan for batch execution from a "
                         "FabricationPlan dict produced by a Layer 2 template tool."
                     ),
@@ -1612,7 +1612,8 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "Accepts inline coordinate_system or coordinate_system_name "
                                 "reference, and optional attachment_support for face-attached "
                                 "sketches (selective follow-on pattern). "
-                                "Returns entity_index_map and dof_remaining."
+                                "Returns geometry_count, profile closure check "
+                                "(closed loops), and dof_remaining."
                             ),
                             "key_params": [
                                 "sketch",
@@ -1648,24 +1649,46 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "Vertical, Perpendicular, Parallel, Equal, Tangent, Normal, "
                                 "Concentric, Fix, Midpoint, Mirror, Angle, Diameter, Radius, "
                                 "MajorRadius, MinorRadius, Length, Distance) to a sketch. "
-                                "Returns dof_after, redundant_constraints, sketch_valid, "
-                                "applied_count — key RL reward signal."
+                                "Returns dof_after, redundant/conflicting constraints, "
+                                "profile closure, and geometry_drift (movement away from "
+                                "the ground-truth coordinates) — key RL reward signals."
                             ),
                             "key_params": ["sketch_name", "constraints", "doc_name"],
                         },
                         {
                             "name": "execute_extrude",
                             "description": (
-                                "Extrude a sketch into a PartDesign::Pad or Pocket. "
-                                "param_aliases dict auto-creates FabricationParams spreadsheet "
-                                "bindings for frontend slider controls."
+                                "Extrude a sketch into a standalone Part::Feature solid, "
+                                "built from ground-truth coordinates (no Sketcher solver "
+                                "drift). Returns NLT-aligned observations: local_obb "
+                                "(center + semi_extents in the sketch frame) and "
+                                "global_center (placement * local center). Combine solids "
+                                "with execute_boolean. param_aliases dict auto-creates "
+                                "FabricationParams spreadsheet bindings."
                             ),
                             "key_params": [
                                 "sketch_name",
                                 "towards",
                                 "opposite",
-                                "operation",
                                 "param_aliases",
+                                "doc_name",
+                            ],
+                        },
+                        {
+                            "name": "execute_boolean",
+                            "description": (
+                                "Combine two solids with HistCAD boolean semantics "
+                                "(Join=fuse, Cut, Intersect=common) using explicit base "
+                                "and tool object names. Returns base/tool/result "
+                                "global_center observations plus center_distance "
+                                "(matches the NLT 'center distance' field)."
+                            ),
+                            "key_params": [
+                                "base_object_name",
+                                "tool_object_name",
+                                "operation",
+                                "result_name",
+                                "keep_originals",
                                 "doc_name",
                             ],
                         },

@@ -504,6 +504,7 @@ Layer 2 — Domain Template Tools  (tools/templates/)
 Layer 1 — Generic Fabrication Primitives  (these tools)
     create_coordinate_system → create_sketch_geometry
     → apply_sketch_constraints → execute_extrude / revolve / helix
+    → execute_boolean (Join / Cut / Intersect)
     → feature_fillet / chamfer
     → list_tunable_params / set_tunable_param
 ```
@@ -530,11 +531,12 @@ Layer 1 — Generic Fabrication Primitives  (these tools)
 
 ### Group D: Feature Execution
 
-| Tool              | Description                                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------------- |
-| `execute_extrude` | Extrude a sketch (Pad or Pocket). `param_aliases` auto-creates spreadsheet slider bindings. |
-| `execute_revolve` | Revolve a sketch around an axis (Revolution or Groove).                                     |
-| `execute_helix`   | Sweep a sketch along a helix (PartDesign::Helix or fallback Part::Sweep).                   |
+| Tool              | Description                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `execute_extrude` | Extrude a sketch into a standalone solid. Returns NLT-aligned `local_obb` + `global_center`. |
+| `execute_boolean` | Combine two solids (`Join`/`Cut`/`Intersect`) with explicit base and tool object names.      |
+| `execute_revolve` | Revolve a sketch around an axis (Revolution or Groove).                                      |
+| `execute_helix`   | Sweep a sketch along a helix (PartDesign::Helix or fallback Part::Sweep).                    |
 
 ### Group E: Finishing Features
 
@@ -594,6 +596,13 @@ result = await apply_sketch_constraints(geo["sketch_name"], {
 # Step 4: Extrude with named parameter
 feat = await execute_extrude(geo["sketch_name"], towards=30.0,
                               param_aliases={"towards": "box_height"})
+# feat["local_obb"]["center"] / feat["global_center"] — NLT-aligned observations
+
+# Step 4b (optional): Boolean-combine with a previously created solid
+# combined = await execute_boolean(base_object_name="Solid001",
+#                                  tool_object_name=feat["feature_name"],
+#                                  operation="Intersect")
+# combined["center_distance"] — matches the NLT "center distance" field
 
 # Step 5: Get edge midpoints for filleting
 snap = await get_body_snapshot()

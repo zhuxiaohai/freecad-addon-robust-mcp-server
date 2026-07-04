@@ -74,6 +74,7 @@ class TestFabricationTools:
             "check_sketch_constraints",
             "apply_sketch_constraints",
             "execute_extrude",
+            "execute_boolean",
             "execute_revolve",
             "execute_helix",
             "feature_fillet",
@@ -133,13 +134,21 @@ class TestFabricationTools:
     async def test_create_sketch_geometry_success(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """create_sketch_geometry returns sketch_name and entity_index_map."""
+        """create_sketch_geometry returns sketch_name, counts, and profile."""
         mock_bridge.execute_python.return_value = self._success(
             {
                 "sketch_name": "Sketch001",
-                "entity_index_map": {"line_1": 0, "line_2": 1},
+                "geometry_count": {"total": 2, "lines": 2, "arcs": 0, "circles": 0},
+                "profile": {
+                    "loops": 1,
+                    "closed_loops": 1,
+                    "open_loops": 0,
+                    "closed": True,
+                },
                 "dof_remaining": 4,
-                "attachment_info": None,
+                "fully_constrained": False,
+                "sketch_normal_world": [0.0, 0.0, 1.0],
+                "sketch_origin_world": [0.0, 0.0, 0.0],
                 "success": True,
             }
         )
@@ -148,7 +157,8 @@ class TestFabricationTools:
             coordinate_system={"euler_angles": [0, 0, 0], "translation": [0, 0, 0]},
         )
         assert result["sketch_name"] == "Sketch001"
-        assert result["entity_index_map"]["line_1"] == 0
+        assert result["geometry_count"]["lines"] == 2
+        assert result["profile"]["closed"] is True
         assert result["dof_remaining"] == 4
 
     @pytest.mark.asyncio
@@ -179,14 +189,23 @@ class TestFabricationTools:
     async def test_apply_sketch_constraints_returns_dof(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """apply_sketch_constraints returns dof_after and sketch_valid."""
+        """apply_sketch_constraints returns dof_after, profile, and drift."""
         mock_bridge.execute_python.return_value = self._success(
             {
                 "dof_before": 8,
                 "dof_after": 0,
-                "redundant_constraints": [],
-                "sketch_valid": True,
+                "fully_constrained": True,
+                "solve_status": 0,
                 "applied_count": 7,
+                "redundant_constraints": [],
+                "conflicting_constraints": [],
+                "profile": {
+                    "loops": 1,
+                    "closed_loops": 1,
+                    "open_loops": 0,
+                    "closed": True,
+                },
+                "geometry_drift": {"max_mm": 0.0, "drifted_entities": []},
                 "success": True,
             }
         )
@@ -199,21 +218,35 @@ class TestFabricationTools:
             },
         )
         assert result["dof_after"] == 0
-        assert result["sketch_valid"] is True
+        assert result["fully_constrained"] is True
         assert result["applied_count"] == 7
+        assert result["profile"]["closed"] is True
+        assert result["geometry_drift"]["max_mm"] == 0.0
 
     @pytest.mark.asyncio
     async def test_apply_sketch_constraints_redundancy_detected(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """apply_sketch_constraints surfaces redundant constraints."""
+        """apply_sketch_constraints surfaces redundancy and geometry drift."""
         mock_bridge.execute_python.return_value = self._success(
             {
                 "dof_before": 2,
                 "dof_after": -1,
-                "redundant_constraints": ["Horizontal"],
-                "sketch_valid": False,
+                "fully_constrained": False,
+                "solve_status": 0,
                 "applied_count": 2,
+                "redundant_constraints": ["Horizontal"],
+                "conflicting_constraints": [],
+                "profile": {
+                    "loops": 1,
+                    "closed_loops": 1,
+                    "open_loops": 0,
+                    "closed": True,
+                },
+                "geometry_drift": {
+                    "max_mm": 3.5706,
+                    "drifted_entities": ["line_1", "line_2"],
+                },
                 "success": True,
             }
         )
@@ -223,7 +256,8 @@ class TestFabricationTools:
         )
         assert result["dof_after"] == -1
         assert "Horizontal" in result["redundant_constraints"]
-        assert result["sketch_valid"] is False
+        assert result["geometry_drift"]["max_mm"] > 0
+        assert "line_1" in result["geometry_drift"]["drifted_entities"]
 
     # ------------------------------------------------------------------
     # check_sketch_constraints
@@ -258,34 +292,116 @@ class TestFabricationTools:
     async def test_execute_extrude_success(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """execute_extrude returns feature_name, bounding_box, and bound_params."""
+        """execute_extrude returns feature_name, local_obb, and global_center."""
         mock_bridge.execute_python.return_value = self._success(
             {
-                "feature_name": "Pad001",
-                "body_name": "Body",
-                "bounding_box": {
-                    "x_min": -10.0,
-                    "x_max": 10.0,
-                    "y_min": -10.0,
-                    "y_max": 10.0,
-                    "z_min": 0.0,
-                    "z_max": 50.0,
+                "feature_name": "Solid001",
+                "local_obb": {
+                    "center": [8.5, 2.0, 0.0],
+                    "semi_extents": [8.5, 2.0, 10.0],
                 },
-                "volume": 20000.0,
-                "bound_params": [
-                    {"alias": "column_height", "cell": "A1", "value": 50.0}
-                ],
+                "global_center": [8.5, 2.0, 0.0],
+                "bounding_box": {
+                    "x_min": 0.0,
+                    "x_max": 17.0,
+                    "y_min": 0.0,
+                    "y_max": 4.0,
+                    "z_min": -10.0,
+                    "z_max": 10.0,
+                },
+                "volume_mm3": 697.4026,
+                "sketch_normal_world": [0.0, 0.0, 1.0],
                 "success": True,
             }
         )
         result = await register_tools["execute_extrude"](
             sketch_name="Sketch001",
-            towards=50.0,
-            param_aliases={"towards": "column_height"},
+            towards=10.0,
+            opposite=10.0,
         )
-        assert result["feature_name"] == "Pad001"
-        assert result["bounding_box"]["z_max"] == 50.0
-        assert result["bound_params"][0]["alias"] == "column_height"
+        assert result["feature_name"] == "Solid001"
+        assert result["local_obb"]["center"] == [8.5, 2.0, 0.0]
+        assert result["global_center"] == [8.5, 2.0, 0.0]
+        assert result["bounding_box"]["z_max"] == 10.0
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_extrude_raises_on_failure(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """execute_extrude raises ValueError when the sketch is missing."""
+        mock_bridge.execute_python.return_value = self._failure(
+            "Sketch not found: 'Sketch999'"
+        )
+        with pytest.raises(ValueError, match="Sketch999"):
+            await register_tools["execute_extrude"](
+                sketch_name="Sketch999", towards=10.0
+            )
+
+    # ------------------------------------------------------------------
+    # execute_boolean
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_execute_boolean_success(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """execute_boolean returns base/tool/result observations."""
+        mock_bridge.execute_python.return_value = self._success(
+            {
+                "feature_name": "Intersect001",
+                "operation": "Intersect",
+                "base": {
+                    "name": "Solid001",
+                    "global_center": [8.5, 2.0, 0.0],
+                    "volume_mm3": 697.4026,
+                },
+                "tool": {
+                    "name": "Solid002",
+                    "global_center": [8.5, 0.0, 3.5],
+                    "volume_mm3": 1644.5576,
+                },
+                "result": {
+                    "global_center": [8.5, 2.0, 3.5],
+                    "bounding_box": {
+                        "x_min": 0.0,
+                        "x_max": 17.0,
+                        "y_min": 0.0,
+                        "y_max": 4.0,
+                        "z_min": 0.0,
+                        "z_max": 7.0,
+                    },
+                    "volume_mm3": 112.2476,
+                },
+                "center_distance": 4.0311,
+                "success": True,
+            }
+        )
+        result = await register_tools["execute_boolean"](
+            base_object_name="Solid001",
+            tool_object_name="Solid002",
+            operation="Intersect",
+        )
+        assert result["feature_name"] == "Intersect001"
+        assert result["base"]["global_center"] == [8.5, 2.0, 0.0]
+        assert result["tool"]["global_center"] == [8.5, 0.0, 3.5]
+        assert result["center_distance"] == 4.0311
+        assert result["result"]["volume_mm3"] == 112.2476
+
+    @pytest.mark.asyncio
+    async def test_execute_boolean_raises_on_missing_object(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """execute_boolean raises ValueError when the base object is missing."""
+        mock_bridge.execute_python.return_value = self._failure(
+            "Base object not found: 'Ghost'"
+        )
+        with pytest.raises(ValueError, match="Ghost"):
+            await register_tools["execute_boolean"](
+                base_object_name="Ghost",
+                tool_object_name="Solid002",
+                operation="Cut",
+            )
 
     # ------------------------------------------------------------------
     # feature_fillet
@@ -417,6 +533,40 @@ class TestFabricationTools:
         assert result["volume"] == 12000.0
         assert len(result["edge_samples"]) == 1
         assert result["edge_samples"][0]["curve_type"] == "Circle"
+
+
+class TestFabricationSourceConventions:
+    """Static checks that fabrication.py matches Fusion adapter semantics."""
+
+    def test_euler_angles_not_negated(self) -> None:
+        """Placement uses active Rx*Ry*Rz without negating HistCAD angles."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "FreeCAD.Vector(0, 0, 1), -euler[2]" not in source
+        assert "FreeCAD.Vector(0, 0, 1), euler[2]" in source
+
+    def test_extrude_uses_bullseye_face_maker(self) -> None:
+        """Multi-loop profiles use FaceMakerBullseye for holes."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "Part::FaceMakerBullseye" in source
+        assert "_make_face" in source
+
+    def test_mirror_constraint_axis_is_middle_entry(self) -> None:
+        """HistCAD Mirror format is [entity, axis, entity]."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "i_ax, _ = _resolve_entity(entry[1])" in source
+        assert "i_dst, _ = _resolve_entity(entry[2])" in source
 
 
 class TestTemplatePlaceholder:

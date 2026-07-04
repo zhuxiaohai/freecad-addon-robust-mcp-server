@@ -1,0 +1,42 @@
+[
+  {
+    "sample_id": 1,
+    "sample_uid": "uid_422758790297",
+    "json_path": "E:\\code\\mobilitycad\\tools\\fusion360\\json_to_step\\examples\\test1.json",
+    "source_subset": "HistCAD-Fusion360",
+    "source_domain": "academic",
+    "op_index": 5,
+    "sketch_index": 2,
+    "intent_family": "modify_dimension",
+    "constraint_type": "Radius",
+    "target_constraint_type": "Radius",
+    "source_record_ref": {
+      "constraint_type": "Radius",
+      "entry_index": 1
+    },
+    "target_value_domain": "length",
+    "target_entry_index": 1,
+    "entities": [
+      "arc_2"
+    ],
+    "target_entities": [
+      "arc_2"
+    ],
+    "line_name": "arc_2",
+    "primary_entity": "arc_2",
+    "extra": null,
+    "target_extra": null,
+    "source_value": 3.8,
+    "original_target_value_expr": 3.8,
+    "original_target_value_numeric": 3.8,
+    "target_value": "6.298167798 mm",
+    "edited_target_value_expr": "6.298167798 mm",
+    "edited_target_value_numeric": 6.298167797970221,
+    "edit_scale": 1.657412578413216,
+    "edit_delta_deg": null,
+    "source_constraint_count": 24,
+    "preserved_constraint_count": 23,
+    "original_length_mm": 3.8,
+    "edited_length_mm": 6.298167797970221
+  }
+]

@@ -1,0 +1,1136 @@
+[
+  {
+    "sample_id": 1,
+    "case_id": "0001_constrained",
+    "branch": "constrained",
+    "json_path": "E:\\code\\mobilitycad\\tools\\fusion360\\json_to_step\\examples\\test1.json",
+    "source_subset": "HistCAD-Fusion360",
+    "source_domain": "academic",
+    "op_index": 5,
+    "sketch_index": 2,
+    "line_name": "arc_2",
+    "intent_family": "modify_dimension",
+    "target_value_domain": "length",
+    "target_extra": null,
+    "original_target_value_numeric": 3.8,
+    "edited_target_value_numeric": 6.298167797970221,
+    "edit_scale": 1.657412578413216,
+    "edit_delta_deg": null,
+    "target_record": {
+      "constraint_type": "Radius",
+      "entry_index": 1,
+      "entities": [
+        "arc_2"
+      ],
+      "value": "6.298167798 mm",
+      "extra": null
+    },
+    "preserved_records": [
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 0,
+        "entities": [
+          "arc_1.end",
+          "line_1.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 1,
+        "entities": [
+          "arc_1.start",
+          "line_4.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 2,
+        "entities": [
+          "arc_2.end",
+          "line_2.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 3,
+        "entities": [
+          "arc_2.start",
+          "line_1.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 4,
+        "entities": [
+          "arc_3.end",
+          "line_3.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 5,
+        "entities": [
+          "arc_3.start",
+          "line_2.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 6,
+        "entities": [
+          "arc_4.end",
+          "line_4.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 7,
+        "entities": [
+          "arc_4.start",
+          "line_3.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Horizontal",
+        "entry_index": 0,
+        "entities": [
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 0,
+        "entities": [
+          "line_4",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 1,
+        "entities": [
+          "line_1",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 2,
+        "entities": [
+          "line_2",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 0,
+        "entities": [
+          "arc_1"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 2,
+        "entities": [
+          "arc_3"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 3,
+        "entities": [
+          "arc_4"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 0,
+        "entities": [
+          "arc_1",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 1,
+        "entities": [
+          "arc_1",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 2,
+        "entities": [
+          "arc_2",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 3,
+        "entities": [
+          "arc_2",
+          "line_2"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 4,
+        "entities": [
+          "arc_3",
+          "line_2"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 5,
+        "entities": [
+          "arc_3",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 6,
+        "entities": [
+          "arc_4",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 7,
+        "entities": [
+          "arc_4",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      }
+    ],
+    "evaluation": {
+      "target_record": {
+        "constraint_type": "Radius",
+        "entry_index": 1,
+        "entities": [
+          "arc_2"
+        ],
+        "value": "6.298167798 mm",
+        "extra": null
+      },
+      "target_hit": true,
+      "target_actual": 0.6298167798000037,
+      "target_expected": 0.6298167798000001,
+      "target_delta": null,
+      "target_error": null,
+      "target_evaluation": {
+        "constraint_type": "Radius",
+        "entities": [
+          "arc_2"
+        ],
+        "ok": true,
+        "actual": 0.6298167798000037,
+        "expected": 0.6298167798000001,
+        "delta": null
+      },
+      "preserved_records": [
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_1.end",
+            "line_1.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_1.start",
+            "line_4.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_2.end",
+            "line_2.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_2.start",
+            "line_1.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_3.end",
+            "line_3.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_3.start",
+            "line_2.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_4.end",
+            "line_4.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_4.start",
+            "line_3.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Horizontal",
+          "entities": [
+            "line_3"
+          ],
+          "ok": true,
+          "actual": null,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_4",
+            "line_3"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_1",
+            "line_4"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_2",
+            "line_1"
+          ],
+          "ok": true,
+          "actual": 1.4210854715202004e-14,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_1"
+          ],
+          "ok": true,
+          "actual": 0.3799999999999999,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_3"
+          ],
+          "ok": true,
+          "actual": 0.38000022711355297,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_4"
+          ],
+          "ok": true,
+          "actual": 0.3800000000000177,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_1",
+            "line_1"
+          ],
+          "ok": true,
+          "actual": 5.551115123125783e-17,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_1",
+            "line_4"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_2",
+            "line_1"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_2",
+            "line_2"
+          ],
+          "ok": true,
+          "actual": 1.1102230246251565e-16,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_3",
+            "line_2"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_3",
+            "line_3"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_4",
+            "line_3"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_4",
+            "line_4"
+          ],
+          "ok": true,
+          "actual": 5.551115123125783e-17,
+          "expected": null,
+          "delta": null
+        }
+      ],
+      "preserved_supported_constraints": 23,
+      "preserved_unsupported_constraints": 0,
+      "preserved_satisfied_constraints": 23,
+      "preserved_total_constraints": 23,
+      "preserved_constraint_satisfaction_rate": 1.0,
+      "preserved_constraints_all_satisfied": true
+    },
+    "validation": {
+      "status": 200,
+      "message": "Success processing validate_sketch_constraints command",
+      "data": {
+        "ok": true,
+        "sketch_num": 2,
+        "health_state": 0,
+        "health_state_name": "HealthyFeatureHealthState",
+        "error_or_warning_message": "",
+        "is_fully_constrained": false,
+        "over_constrained": false,
+        "dimension_count": 4,
+        "geometric_constraint_count": 24
+      },
+      "ok": true,
+      "sketch_num": 2,
+      "health_state": 0,
+      "health_state_name": "HealthyFeatureHealthState",
+      "error_or_warning_message": "",
+      "is_fully_constrained": false,
+      "over_constrained": false,
+      "dimension_count": 4,
+      "geometric_constraint_count": 24
+    },
+    "skipped_constraints": [],
+    "missing_refs": [],
+    "rebuild_success": true,
+    "overall_editable_success": true,
+    "failure_reason": ""
+  },
+  {
+    "sample_id": 1,
+    "case_id": "0001_closure_only",
+    "branch": "closure_only",
+    "json_path": "E:\\code\\mobilitycad\\tools\\fusion360\\json_to_step\\examples\\test1.json",
+    "source_subset": "HistCAD-Fusion360",
+    "source_domain": "academic",
+    "op_index": 5,
+    "sketch_index": 2,
+    "line_name": "arc_2",
+    "intent_family": "modify_dimension",
+    "target_value_domain": "length",
+    "target_extra": null,
+    "original_target_value_numeric": 3.8,
+    "edited_target_value_numeric": 6.298167797970221,
+    "edit_scale": 1.657412578413216,
+    "edit_delta_deg": null,
+    "target_record": {
+      "constraint_type": "Radius",
+      "entry_index": 1,
+      "entities": [
+        "arc_2"
+      ],
+      "value": "6.298167798 mm",
+      "extra": null
+    },
+    "preserved_records": [
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 0,
+        "entities": [
+          "arc_1.end",
+          "line_1.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 1,
+        "entities": [
+          "arc_1.start",
+          "line_4.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 2,
+        "entities": [
+          "arc_2.end",
+          "line_2.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 3,
+        "entities": [
+          "arc_2.start",
+          "line_1.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 4,
+        "entities": [
+          "arc_3.end",
+          "line_3.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 5,
+        "entities": [
+          "arc_3.start",
+          "line_2.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 6,
+        "entities": [
+          "arc_4.end",
+          "line_4.start"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Coincident",
+        "entry_index": 7,
+        "entities": [
+          "arc_4.start",
+          "line_3.end"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Horizontal",
+        "entry_index": 0,
+        "entities": [
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 0,
+        "entities": [
+          "line_4",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 1,
+        "entities": [
+          "line_1",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Perpendicular",
+        "entry_index": 2,
+        "entities": [
+          "line_2",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 0,
+        "entities": [
+          "arc_1"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 2,
+        "entities": [
+          "arc_3"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Radius",
+        "entry_index": 3,
+        "entities": [
+          "arc_4"
+        ],
+        "value": 3.8,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 0,
+        "entities": [
+          "arc_1",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 1,
+        "entities": [
+          "arc_1",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 2,
+        "entities": [
+          "arc_2",
+          "line_1"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 3,
+        "entities": [
+          "arc_2",
+          "line_2"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 4,
+        "entities": [
+          "arc_3",
+          "line_2"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 5,
+        "entities": [
+          "arc_3",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 6,
+        "entities": [
+          "arc_4",
+          "line_3"
+        ],
+        "value": null,
+        "extra": null
+      },
+      {
+        "constraint_type": "Tangent",
+        "entry_index": 7,
+        "entities": [
+          "arc_4",
+          "line_4"
+        ],
+        "value": null,
+        "extra": null
+      }
+    ],
+    "evaluation": {
+      "target_record": {
+        "constraint_type": "Radius",
+        "entry_index": 1,
+        "entities": [
+          "arc_2"
+        ],
+        "value": "6.298167798 mm",
+        "extra": null
+      },
+      "target_hit": true,
+      "target_actual": 0.6298167798000001,
+      "target_expected": 0.6298167798000001,
+      "target_delta": null,
+      "target_error": null,
+      "target_evaluation": {
+        "constraint_type": "Radius",
+        "entities": [
+          "arc_2"
+        ],
+        "ok": true,
+        "actual": 0.6298167798000001,
+        "expected": 0.6298167798000001,
+        "delta": null
+      },
+      "preserved_records": [
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_1.end",
+            "line_1.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_1.start",
+            "line_4.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_2.end",
+            "line_2.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_2.start",
+            "line_1.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_3.end",
+            "line_3.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_3.start",
+            "line_2.end"
+          ],
+          "ok": true,
+          "actual": 5.444533712761768e-13,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_4.end",
+            "line_4.start"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Coincident",
+          "entities": [
+            "arc_4.start",
+            "line_3.end"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Horizontal",
+          "entities": [
+            "line_3"
+          ],
+          "ok": false,
+          "actual": null,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_4",
+            "line_3"
+          ],
+          "ok": false,
+          "actual": 1.1990366983010858,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_1",
+            "line_4"
+          ],
+          "ok": false,
+          "actual": 11.49495828148838,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Perpendicular",
+          "entities": [
+            "line_2",
+            "line_1"
+          ],
+          "ok": false,
+          "actual": 14.27532827259472,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_1"
+          ],
+          "ok": false,
+          "actual": 0.39723146241737384,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_3"
+          ],
+          "ok": false,
+          "actual": 0.5138006933173294,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Radius",
+          "entities": [
+            "arc_4"
+          ],
+          "ok": false,
+          "actual": 0.38229249392548464,
+          "expected": 0.38,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_1",
+            "line_1"
+          ],
+          "ok": true,
+          "actual": 3.2795988147427124e-13,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_1",
+            "line_4"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_2",
+            "line_1"
+          ],
+          "ok": false,
+          "actual": 0.012618135732153202,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_2",
+            "line_2"
+          ],
+          "ok": true,
+          "actual": 0.0007295884872050573,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_3",
+            "line_2"
+          ],
+          "ok": false,
+          "actual": 0.003927490381840482,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_3",
+            "line_3"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_4",
+            "line_3"
+          ],
+          "ok": true,
+          "actual": 0.0,
+          "expected": null,
+          "delta": null
+        },
+        {
+          "constraint_type": "Tangent",
+          "entities": [
+            "arc_4",
+            "line_4"
+          ],
+          "ok": true,
+          "actual": 2.220446049250313e-16,
+          "expected": null,
+          "delta": null
+        }
+      ],
+      "preserved_supported_constraints": 23,
+      "preserved_unsupported_constraints": 0,
+      "preserved_satisfied_constraints": 14,
+      "preserved_total_constraints": 23,
+      "preserved_constraint_satisfaction_rate": 0.6086956521739131,
+      "preserved_constraints_all_satisfied": false
+    },
+    "validation": {
+      "status": 200,
+      "message": "Success processing validate_sketch_constraints command",
+      "data": {
+        "ok": true,
+        "sketch_num": 2,
+        "health_state": 0,
+        "health_state_name": "HealthyFeatureHealthState",
+        "error_or_warning_message": "",
+        "is_fully_constrained": false,
+        "over_constrained": false,
+        "dimension_count": 1,
+        "geometric_constraint_count": 12
+      },
+      "ok": true,
+      "sketch_num": 2,
+      "health_state": 0,
+      "health_state_name": "HealthyFeatureHealthState",
+      "error_or_warning_message": "",
+      "is_fully_constrained": false,
+      "over_constrained": false,
+      "dimension_count": 1,
+      "geometric_constraint_count": 12
+    },
+    "skipped_constraints": [],
+    "missing_refs": [],
+    "rebuild_success": true,
+    "overall_editable_success": false,
+    "failure_reason": "preserved_constraints_broken"
+  }
+]

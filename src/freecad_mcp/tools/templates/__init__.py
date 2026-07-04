@@ -23,7 +23,7 @@ Architecture
         create_coordinate_system()
         create_sketch_geometry()
         apply_sketch_constraints()
-        execute_extrude() / execute_revolve() / execute_helix()
+        execute_extrude() / execute_boolean() / execute_revolve() / execute_helix()
         feature_fillet() / feature_chamfer()
         list_tunable_params() / set_tunable_param()
         execute_fabrication_plan()

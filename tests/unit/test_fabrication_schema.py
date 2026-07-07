@@ -138,6 +138,23 @@ class TestFeatureSpec:
         feat = FeatureSpec.from_dict(d)
         assert feat.param_aliases == {}
 
+    def test_boolean_feature_accepts_operation_from_params(self) -> None:
+        """Boolean features can carry operation inside params."""
+        d = {
+            "type": "boolean",
+            "params": {
+                "base_object_name": "BaseSolid",
+                "tool_object_name": "ToolSolid",
+                "operation": "Intersect",
+            },
+            "feature_name": "Intersection",
+        }
+        feat = FeatureSpec.from_dict(d)
+        assert feat.type == "boolean"
+        assert feat.sketch_name == ""
+        assert feat.operation == "Intersect"
+        assert feat.params["base_object_name"] == "BaseSolid"
+
 
 class TestFinishSpec:
     """Tests for FinishSpec serialisation / deserialisation."""

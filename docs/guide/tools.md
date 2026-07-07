@@ -504,7 +504,7 @@ Layer 2 — Domain Template Tools  (tools/templates/)
 Layer 1 — Generic Fabrication Primitives  (these tools)
     create_coordinate_system → create_sketch_geometry
     → apply_sketch_constraints → execute_extrude / revolve / helix
-    → execute_boolean (Join / Cut / Intersect)
+    → execute_boolean(base_object_name, tool_object_name, Join / Cut / Intersect)
     → feature_fillet / chamfer
     → list_tunable_params / set_tunable_param
 ```
@@ -531,12 +531,14 @@ Layer 1 — Generic Fabrication Primitives  (these tools)
 
 ### Group D: Feature Execution
 
+<!-- markdownlint-disable MD060 -->
 | Tool              | Description                                                                                  |
 | ----------------- | -------------------------------------------------------------------------------------------- |
-| `execute_extrude` | Extrude a sketch into a standalone solid. Returns NLT-aligned `local_obb` + `global_center`. |
-| `execute_boolean` | Combine two solids (`Join`/`Cut`/`Intersect`) with explicit base and tool object names.      |
-| `execute_revolve` | Revolve a sketch around an axis (Revolution or Groove).                                      |
-| `execute_helix`   | Sweep a sketch along a helix (PartDesign::Helix or fallback Part::Sweep).                    |
+| `execute_extrude` | Extrude a sketch into a standalone solid. Defaults to `extrusion_mode="auto"` with robust face fallback.  |
+| `execute_boolean` | Create an explicit base/tool boolean; `boolean_mode="auto"` falls back to direct shape boolean if needed. |
+| `execute_revolve` | Revolve a sketch into a standalone solid; combine later with explicit `execute_boolean`.                    |
+| `execute_helix`   | Sweep a sketch along a helix into a standalone solid; combine later with explicit boolean.                  |
+<!-- markdownlint-enable MD060 -->
 
 ### Group E: Finishing Features
 
@@ -596,13 +598,14 @@ result = await apply_sketch_constraints(geo["sketch_name"], {
 # Step 4: Extrude with named parameter
 feat = await execute_extrude(geo["sketch_name"], towards=30.0,
                               param_aliases={"towards": "box_height"})
-# feat["local_obb"]["center"] / feat["global_center"] — NLT-aligned observations
+# feat["extrusion_mode_used"] is "parametric_sketch" or "robust_face"
+# For complex HistCAD JSON profiles, pass extrusion_mode="robust_face".
 
-# Step 4b (optional): Boolean-combine with a previously created solid
+# Step 4b (optional): Boolean-combine with an explicit base and tool
 # combined = await execute_boolean(base_object_name="Solid001",
 #                                  tool_object_name=feat["feature_name"],
 #                                  operation="Intersect")
-# combined["center_distance"] — matches the NLT "center distance" field
+# combined["boolean_mode_used"] is "parametric" or "static_shape"
 
 # Step 5: Get edge midpoints for filleting
 snap = await get_body_snapshot()

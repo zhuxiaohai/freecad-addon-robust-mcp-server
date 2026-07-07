@@ -156,7 +156,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
 _SKETCH_CONSTRAINT_CODE = r"""
 def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
     # Apply HistCAD constraints to a Sketcher object.
-    # Returns list of redundant constraint names (strings).
+    # Returns {"redundant": [...], "dimension_bindings": [...]}.
     import Sketcher
 
     # FreeCAD 1.1 removed Sketcher.PointPos; use integer PointPos values directly.
@@ -173,6 +173,8 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
 
     def _resolve_point(ref):
         # 'line_1.start' -> (idx, START)
+        if ref == "origin":
+            return -1, START
         if "." not in ref:
             return idx_map[ref], NONE
         name, point = ref.split(".", 1)
@@ -186,6 +188,12 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
 
     def _parse_length(val):
         # '10 mm' -> 10.0  (already in mm, FreeCAD uses mm internally)
+        if isinstance(val, dict):
+            val = (
+                val.get("length")
+                if val.get("length") is not None
+                else val.get("value")
+            )
         if isinstance(val, (int, float)):
             return float(val)
         s = str(val).strip()
@@ -201,6 +209,38 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     return num * 25.4
                 return num
         return float(s)
+
+    def _dimension_meta(raw, *, default_unit="mm", value_key="length"):
+        if not isinstance(raw, dict):
+            return {"value": _parse_length(raw), "unit": default_unit}
+        value = raw.get(value_key)
+        if value is None:
+            value = raw.get("length")
+        if value is None:
+            value = raw.get("value")
+        out = {
+            "value": _parse_length(value),
+            "unit": raw.get("unit", default_unit),
+        }
+        for key in ("alias", "label", "role", "min", "max", "default"):
+            if raw.get(key) is not None:
+                out[key] = raw[key]
+        return out
+
+    def _angle_meta(raw):
+        if not isinstance(raw, dict):
+            return {"value": float(raw), "unit": "deg"}
+        value = raw.get("angle")
+        if value is None:
+            value = raw.get("value")
+        out = {
+            "value": float(value),
+            "unit": raw.get("unit", "deg"),
+        }
+        for key in ("alias", "label", "role", "min", "max", "default"):
+            if raw.get(key) is not None:
+                out[key] = raw[key]
+        return out
 
     # Build endpoint-adjacency map from Coincident entries so that Tangent
     # constraints can use the 4-argument point-specific form (smooth G1
@@ -218,9 +258,11 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
     _pos_map = {"start": START, "end": END, "center": MID, "middle": MID}
 
     added = []
+    dimension_bindings = []
     for ctype, entries in constraint_dict.items():
         for entry in entries:
             try:
+                dim_meta = None
                 if ctype == "Coincident":
                     i1, p1 = _resolve_point(entry[0])
                     i2, p2 = _resolve_point(entry[1])
@@ -352,33 +394,40 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     i1, _ = _resolve_entity(entry[0])
                     i2, _ = _resolve_entity(entry[1])
                     import math
-                    angle_rad = math.radians(float(entry[2]))
+                    dim_meta = _angle_meta(entry[2])
+                    angle_rad = math.radians(float(dim_meta["value"]))
                     c = Sketcher.Constraint("Angle", i1, i2, angle_rad)
                 elif ctype == "Diameter":
                     i, _ = _resolve_entity(entry[0])
-                    val = _parse_length(entry[1])
+                    dim_meta = _dimension_meta(entry[1])
+                    val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val / 2.0)
                 elif ctype == "Radius":
                     i, _ = _resolve_entity(entry[0])
-                    val = _parse_length(entry[1])
+                    dim_meta = _dimension_meta(entry[1])
+                    val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val)
                 elif ctype == "MajorRadius":
                     i, _ = _resolve_entity(entry[0])
-                    val = _parse_length(entry[1])
+                    dim_meta = _dimension_meta(entry[1])
+                    val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val)
                 elif ctype == "MinorRadius":
                     i, _ = _resolve_entity(entry[0])
-                    val = _parse_length(entry[1])
+                    dim_meta = _dimension_meta(entry[1])
+                    val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val)
                 elif ctype == "Length":
                     i, _ = _resolve_entity(entry[0])
-                    val = _parse_length(entry[1])
+                    dim_meta = _dimension_meta(entry[1])
+                    val = dim_meta["value"]
                     c = Sketcher.Constraint("Distance", i, val)
                 elif ctype == "Distance":
                     i1, p1 = _resolve_point(entry[0])
                     i2, p2 = _resolve_point(entry[1])
                     extra = entry[2] if len(entry) > 2 else {}
-                    val = _parse_length(extra.get("length", 0))
+                    dim_meta = _dimension_meta(extra)
+                    val = dim_meta["value"]
                     direction = extra.get("direction", "")
                     if direction == "HORIZONTAL":
                         c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
@@ -388,7 +437,18 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                         c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
                 else:
                     continue
+                before_count = len(sketch_obj.Constraints)
                 sketch_obj.addConstraint(c)
+                if dim_meta and dim_meta.get("alias"):
+                    binding = dict(dim_meta)
+                    binding.update(
+                        {
+                            "constraint_index": before_count,
+                            "constraint_type": ctype,
+                            "property": f"Constraints[{before_count}]",
+                        }
+                    )
+                    dimension_bindings.append(binding)
                 added.append(ctype)
             except Exception as _ce:
                 pass  # redundant or conflicting constraints are silently skipped
@@ -403,7 +463,7 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     redundant.append(sketch_obj.Constraints[r_idx].Name or str(r_idx))
     except Exception:
         pass
-    return redundant
+    return {"redundant": redundant, "dimension_bindings": dimension_bindings}
 """
 
 
@@ -1295,9 +1355,75 @@ dof_before = getattr(sk, "DoF", -1)
 doc.openTransaction("Apply Sketch Constraints")
 try:
     applied_before = len(sk.Constraints) if hasattr(sk, "Constraints") else 0
-    redundant = _apply_histcad_constraints(sk, constraints_in, idx_map)
+    constraint_result = _apply_histcad_constraints(sk, constraints_in, idx_map)
+    redundant = constraint_result.get("redundant", [])
+    dimension_bindings = constraint_result.get("dimension_bindings", [])
     applied_after = len(sk.Constraints) if hasattr(sk, "Constraints") else applied_before
     applied_count = applied_after - applied_before
+
+    bound_params = []
+    if dimension_bindings:
+        sheet = doc.getObject("FabricationParams")
+        if sheet is None:
+            sheet = doc.addObject("Spreadsheet::Sheet", "FabricationParams")
+
+        def _used_cells(_sheet):
+            try:
+                return list(_sheet.getUsedCells()) if hasattr(_sheet, "getUsedCells") else []
+            except Exception:
+                return []
+
+        def _find_alias_cell(_sheet, _alias):
+            for _cell in _used_cells(_sheet):
+                try:
+                    if _sheet.getAlias(_cell) == _alias:
+                        return _cell
+                except Exception:
+                    pass
+            return None
+
+        _allocated_cells = set(_used_cells(sheet))
+
+        def _next_cell():
+            _row = 1
+            while True:
+                _cell = f"A{{_row}}"
+                if _cell not in _allocated_cells:
+                    _allocated_cells.add(_cell)
+                    return _cell
+                _row += 1
+
+        for _binding in dimension_bindings:
+            _alias = _binding.get("alias")
+            if not _alias:
+                continue
+            _cell = _find_alias_cell(sheet, _alias) or _next_cell()
+            _allocated_cells.add(_cell)
+            _value = _binding.get("value")
+            sheet.set(_cell, str(_value))
+            try:
+                sheet.setAlias(_cell, _alias)
+            except Exception:
+                pass
+            _prop = _binding.get("property")
+            try:
+                sk.setExpression(_prop, f"FabricationParams.{{_alias}}")
+            except Exception:
+                pass
+            bound_params.append({{
+                "alias": _alias,
+                "cell": _cell,
+                "value": _value,
+                "unit": _binding.get("unit", "mm"),
+                "property": _prop,
+                "object": sk.Name,
+                "constraint_type": _binding.get("constraint_type"),
+                "role": _binding.get("role"),
+                "label": _binding.get("label"),
+                "min": _binding.get("min"),
+                "max": _binding.get("max"),
+                "default": _binding.get("default"),
+            }})
 
     doc.recompute()
     dof_after = getattr(sk, "DoF", -1)
@@ -1394,6 +1520,7 @@ try:
         "conflicting_constraints": conflicting,
         "profile":                 _profile,
         "geometry_drift":          _drift,
+        "bound_params":            bound_params,
         "success":                 True,
     }}
 except Exception as _e:
@@ -1421,11 +1548,9 @@ except Exception as _e:
     ) -> dict[str, Any]:
         """Extrude a sketch into a standalone solid (``Part::Feature``).
 
-        The solid is built from ground-truth coordinates via the Part
-        workbench (wire → face → placement transform → extrude), bypassing
-        Sketcher solver drift.  The geometry dict is retrieved automatically
-        from the sketch object (stored by ``create_sketch_geometry``); the
-        caller does **not** need to pass ``sketch=`` explicitly.
+        The solid is created as a parametric ``Part::Extrusion`` referencing
+        the Sketcher object directly, so spreadsheet-driven sketch dimensions
+        and extrusion thickness update the final solid on recompute.
 
         This tool only creates geometry.  Boolean combination with existing
         solids (HistCAD ``Join`` / ``Cut`` / ``Intersect`` semantics) is a
@@ -1586,38 +1711,28 @@ try:
         except Exception:
             return _PM.Face(_wires[0])
 
-    # Build the solid via the Part workbench so the sketch Placement (world
-    # transform from Euler angles) is respected.  PartDesign::Pad ignores
-    # Placement and always extrudes along the Body's Z axis, giving the wrong
-    # orientation when the sketch has a non-default rotation.
-    import Part as _Part
-    _edges = _edges_from_raw_json(sk, _Part)
-    if not _edges:
-        # Fallback: use Sketcher geometry directly (may be solver-drift distorted)
-        for _geo in sk.Geometry:
-            _tid = type(_geo).__name__
-            if "LineSegment" in _tid or ("Line" in _tid and "Segment" not in _tid
-                                          and "ArcOf" not in _tid):
-                _edges.append(_Part.makeLine(_geo.StartPoint, _geo.EndPoint))
-            elif "ArcOfCircle" in _tid:
-                _edges.append(_Part.Edge(_geo))
-            elif "Circle" in _tid and "ArcOf" not in _tid:
-                _edges.append(_Part.Edge(_geo))
-    _face = _make_face(_Part, _edges)
-
-    # Transform face to world space using the sketch placement, then extrude
-    # along the world-space sketch normal (both directions when opposite > 0).
+    # Use a parametric Part::Extrusion that references the Sketch directly.
+    # This keeps the final solid driven by Sketcher constraints and spreadsheet
+    # expressions, so frontend slider edits update the model through recompute.
     _pl = sk.Placement
-    _face_world = _face.transformGeometry(_pl.toMatrix())
     _normal = _pl.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-    if opposite > 0:
-        _solid = _face_world.extrude(_normal * towards).fuse(
-            _face_world.extrude(-_normal * opposite))
-    else:
-        _solid = _face_world.extrude(_normal * towards)
-
-    feat = doc.addObject("Part::Feature", feat_nm or "Solid")
-    feat.Shape = _solid
+    feat = doc.addObject("Part::Extrusion", feat_nm or "Solid")
+    feat.Base = sk
+    try:
+        feat.DirMode = "Normal"
+    except Exception:
+        pass
+    try:
+        feat.Dir = _normal
+    except Exception:
+        pass
+    try:
+        feat.FaceMakerClass = "Part::FaceMakerBullseye"
+    except Exception:
+        pass
+    feat.LengthFwd = towards
+    feat.LengthRev = opposite
+    feat.Solid = True
     doc.recompute()
 
     # World-space AABB + volume.
@@ -1664,34 +1779,58 @@ try:
         if sheet is None:
             sheet = doc.addObject("Spreadsheet::Sheet", "FabricationParams")
 
-        col_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        # Find next free row
-        row = 1
-        while True:
+        def _used_cells(_sheet):
             try:
-                existing = sheet.get(f"A{{row}}")
-                if not existing:
-                    break
+                return list(_sheet.getUsedCells()) if hasattr(_sheet, "getUsedCells") else []
             except Exception:
-                break
-            row += 1
+                return []
+
+        def _find_alias_cell(_sheet, _alias):
+            for _cell in _used_cells(_sheet):
+                try:
+                    if _sheet.getAlias(_cell) == _alias:
+                        return _cell
+                except Exception:
+                    pass
+            return None
+
+        _allocated_cells = set(_used_cells(sheet))
+
+        def _next_cell():
+            _row = 1
+            while True:
+                _cell = f"A{{_row}}"
+                if _cell not in _allocated_cells:
+                    _allocated_cells.add(_cell)
+                    return _cell
+                _row += 1
 
         alias_map = {{"towards": towards, "opposite": opposite}}
+        prop_map = {{"towards": "LengthFwd", "opposite": "LengthRev"}}
         for param_key, alias_name in aliases.items():
             value = alias_map.get(param_key, towards)
-            cell = f"A{{row}}"
+            cell = _find_alias_cell(sheet, alias_name) or _next_cell()
+            _allocated_cells.add(cell)
             sheet.set(cell, str(value))
-            sheet.setAlias(cell, alias_name)
-            # Bind the feature property to the spreadsheet cell
             try:
-                if param_key == "towards":
-                    feat.setExpression(".Length", f"FabricationParams.{{alias_name}}")
-                elif param_key == "opposite":
-                    feat.setExpression(".Length2", f"FabricationParams.{{alias_name}}")
+                sheet.setAlias(cell, alias_name)
             except Exception:
                 pass
-            bound_params.append({{"alias": alias_name, "cell": cell, "value": value}})
-            row += 1
+            prop_name = prop_map.get(param_key, "LengthFwd")
+            try:
+                setattr(feat, prop_name, value)
+                feat.setExpression(prop_name, f"FabricationParams.{{alias_name}}")
+            except Exception:
+                pass
+            bound_params.append({{
+                "alias": alias_name,
+                "cell": cell,
+                "value": value,
+                "unit": "mm",
+                "object": feat.Name,
+                "property": prop_name,
+                "role": "thickness" if param_key == "towards" else param_key,
+            }})
 
     doc.recompute()
     doc.commitTransaction()
@@ -1704,6 +1843,7 @@ try:
         "bounding_box":        bbox,
         "volume_mm3":          round(volume, 4),
         "sketch_normal_world": sketch_normal_world,
+        "bound_params":        bound_params,
         "success":             volume > 0,
     }}
 except Exception as _e:
@@ -2161,9 +2301,18 @@ else:
         if obj.TypeId == "PartDesign::Body":
             body = obj
             break
+    if body is None:
+        for obj in reversed(doc.Objects):
+            if hasattr(obj, "Shape"):
+                try:
+                    if not obj.Shape.isNull():
+                        body = obj
+                        break
+                except Exception:
+                    pass
 
 if body is None:
-    raise ValueError("No PartDesign Body found")
+    raise ValueError("No shape-bearing object found")
 
 shape = body.Shape
 radii = radius_in if isinstance(radius_in, list) else [radius_in] * len(near_pts)
@@ -2371,6 +2520,20 @@ if sheet is None:
     _result_ = {{"params": [], "spreadsheet_name": None}}
 else:
     params = []
+    sheet_refs = [
+        sheet.Name,
+        sheet.Label,
+        f"<<{{sheet.Name}}>>",
+        f"<<{{sheet.Label}}>>",
+    ]
+
+    def _expr_references_alias(_expr, _alias):
+        _text = str(_expr)
+        for _sheet_ref in sheet_refs:
+            if f"{{_sheet_ref}}.{{_alias}}" in _text:
+                return True
+        return _text.endswith("." + _alias)
+
     # Scan all cells in the used range
     try:
         used_cells = sheet.getUsedCells() if hasattr(sheet, "getUsedCells") else []
@@ -2388,21 +2551,50 @@ else:
             except (ValueError, TypeError):
                 value = raw_val
 
-            # Find which feature properties reference this alias
+            # Find which feature/sketch properties reference this alias.
             bound_to = []
-            expr_pat = f"FabricationParams.{{alias}}"
             for obj in doc.Objects:
                 if hasattr(obj, "ExpressionEngine"):
                     for prop, expr in obj.ExpressionEngine:
-                        if expr_pat in str(expr):
-                            bound_to.append({{"object": obj.Name, "property": prop}})
+                        if _expr_references_alias(expr, alias):
+                            role = "parameter"
+                            unit = "mm"
+                            label = alias
+                            if str(prop).startswith("Constraints["):
+                                role = "sketch_dimension"
+                                try:
+                                    idx_txt = str(prop).split("[", 1)[1].split("]", 1)[0]
+                                    c_idx = int(idx_txt)
+                                    c_type = obj.Constraints[c_idx].Type
+                                    label = c_type
+                                    if c_type == "Angle":
+                                        unit = "deg"
+                                except Exception:
+                                    pass
+                            elif str(prop) in ("LengthFwd", "LengthRev"):
+                                role = "thickness" if "thickness" in alias.lower() else "feature_parameter"
+                                label = str(prop)
+                            elif str(prop).startswith(".FabricationParam_"):
+                                role = "thickness" if "thickness" in alias.lower() else "feature_parameter"
+                            bound_to.append({{
+                                "object": obj.Name,
+                                "property": prop,
+                                "role": role,
+                                "label": label,
+                                "unit": unit,
+                            }})
 
             params.append({{
                 "alias":    alias,
                 "value":    value,
-                "unit":     "mm",
+                "unit":     bound_to[0].get("unit", "mm") if bound_to else "mm",
                 "cell":     cell_addr,
                 "bound_to": bound_to,
+                "role":     bound_to[0].get("role", "parameter") if bound_to else "parameter",
+                "label":    bound_to[0].get("label", alias) if bound_to else alias,
+                "min":      None,
+                "max":      None,
+                "default":  value,
             }})
         except Exception:
             continue
@@ -2498,12 +2690,25 @@ try:
     doc.recompute()
 
     # Collect affected objects (those that reference this alias)
-    expr_pat = f"FabricationParams.{{alias_name}}"
     affected = []
+    sheet_refs = [
+        sheet.Name,
+        sheet.Label,
+        f"<<{{sheet.Name}}>>",
+        f"<<{{sheet.Label}}>>",
+    ]
+
+    def _expr_references_alias(_expr, _alias):
+        _text = str(_expr)
+        for _sheet_ref in sheet_refs:
+            if f"{{_sheet_ref}}.{{_alias}}" in _text:
+                return True
+        return _text.endswith("." + _alias)
+
     for obj in doc.Objects:
         if hasattr(obj, "ExpressionEngine"):
             for prop, expr in obj.ExpressionEngine:
-                if expr_pat in str(expr):
+                if _expr_references_alias(expr, alias_name):
                     affected.append(obj.Name)
                     break
 
@@ -2524,6 +2729,278 @@ except Exception as _e:
         if result.success and result.result:
             return result.result
         raise ValueError(result.error_traceback or "Failed to set tunable param")
+
+    @mcp.tool()
+    async def evaluate_editability(
+        target_alias: str,
+        value: float | None = None,
+        scale: float | None = None,
+        preserved_aliases: list[str] | None = None,
+        doc_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate one parametric edit and return HistCAD-style reward metrics.
+
+        The evaluator edits one exposed ``FabricationParams`` alias, recomputes
+        the model, checks whether the target value was reached, and verifies
+        that preserved parameters/constraints remain evaluable.  It is generic:
+        any template or FabricationPlan that exposes tunable aliases can use it
+        as a process reward during RL.
+        """
+        before = await list_tunable_params(doc_name=doc_name)  # type: ignore[name-defined]
+        params_before = {
+            item.get("alias"): item
+            for item in before.get("params", [])
+            if item.get("alias")
+        }
+        if target_alias not in params_before:
+            raise ValueError(f"Alias {target_alias!r} not found")
+        old_value = params_before[target_alias].get("value")
+        if value is None:
+            if scale is None:
+                raise ValueError("Either value or scale must be provided")
+            value = float(old_value) * float(scale)
+
+        if preserved_aliases is None:
+            preserved_aliases = [
+                alias for alias in params_before if alias != target_alias
+            ]
+
+        edit_result: dict[str, Any] | None = None
+        edit_error: str | None = None
+        try:
+            edit_result = await set_tunable_param(  # type: ignore[name-defined]
+                alias=target_alias,
+                value=float(value),
+                doc_name=doc_name,
+            )
+        except Exception as exc:
+            edit_error = str(exc)
+
+        after = await list_tunable_params(doc_name=doc_name)  # type: ignore[name-defined]
+        params_after = {
+            item.get("alias"): item
+            for item in after.get("params", [])
+            if item.get("alias")
+        }
+        target_after = params_after.get(target_alias, {})
+        try:
+            target_actual = float(target_after.get("value"))
+            target_expected = float(value)
+            target_delta = abs(target_actual - target_expected)
+            target_hit = target_delta <= max(1e-6, abs(target_expected) * 1e-6)
+        except Exception:
+            target_actual = target_after.get("value")
+            target_expected = value
+            target_delta = None
+            target_hit = target_after.get("value") == value
+
+        bridge = await get_bridge()
+        validation_code = f"""
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No active document")
+rebuild_success = True
+exception = None
+try:
+    doc.recompute()
+except Exception as _exc:
+    rebuild_success = False
+    exception = str(_exc)
+
+sketches = []
+shape_errors = []
+for obj in doc.Objects:
+    try:
+        if obj.TypeId == "Sketcher::SketchObject":
+            sketches.append({{
+                "name": obj.Name,
+                "dof": getattr(obj, "DoF", None),
+                "fully_constrained": getattr(obj, "FullyConstrained", None),
+                "conflicting": list(getattr(obj, "ConflictingConstraints", ())),
+                "redundant": list(getattr(obj, "RedundantConstraints", ())),
+            }})
+        if hasattr(obj, "Shape") and not obj.Shape.isNull():
+            try:
+                if not obj.Shape.isValid():
+                    shape_errors.append(obj.Name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+validation_ok = rebuild_success and not shape_errors and all(
+    not item.get("conflicting") for item in sketches
+)
+_result_ = {{
+    "rebuild_success": rebuild_success,
+    "validation_ok": validation_ok,
+    "exception": exception,
+    "shape_errors": shape_errors,
+    "sketches": sketches,
+}}
+"""
+        validation_exec = await bridge.execute_python(validation_code)
+        validation = (
+            validation_exec.result
+            if validation_exec.success and validation_exec.result
+            else {
+                "rebuild_success": False,
+                "validation_ok": False,
+                "exception": validation_exec.error_traceback,
+                "shape_errors": [],
+                "sketches": [],
+            }
+        )
+
+        def _numeric_close(a: Any, b: Any) -> bool:
+            try:
+                fa = float(a)
+                fb = float(b)
+                return abs(fa - fb) <= max(1e-6, abs(fb) * 1e-6)
+            except Exception:
+                return a == b
+
+        preserved_records = []
+        for alias in preserved_aliases:
+            before_item = params_before.get(alias)
+            after_item = params_after.get(alias)
+            before_bound = before_item.get("bound_to", []) if before_item else []
+            after_bound = after_item.get("bound_to", []) if after_item else []
+            value_preserved = (
+                before_item is not None
+                and after_item is not None
+                and _numeric_close(before_item.get("value"), after_item.get("value"))
+            )
+            binding_preserved = bool(before_bound) and bool(after_bound)
+            satisfied = (
+                after_item is not None
+                and binding_preserved
+                and value_preserved
+                and validation.get("validation_ok") is True
+            )
+            preserved_records.append(
+                {
+                    "kind": "alias",
+                    "alias": alias,
+                    "before_value": before_item.get("value") if before_item else None,
+                    "after_value": after_item.get("value") if after_item else None,
+                    "value_preserved": value_preserved,
+                    "binding_preserved": binding_preserved,
+                    "before_bound_to": before_bound,
+                    "after_bound_to": after_bound,
+                    "satisfied": satisfied,
+                    "supported": before_item is not None,
+                }
+            )
+
+        sketch_constraint_records = []
+        for sketch in validation.get("sketches", []):
+            conflicting = sketch.get("conflicting") or []
+            redundant = sketch.get("redundant") or []
+            fully = sketch.get("fully_constrained")
+            satisfied = not conflicting and (fully is not False)
+            sketch_constraint_records.append(
+                {
+                    "kind": "sketch_constraint_health",
+                    "sketch": sketch.get("name"),
+                    "dof": sketch.get("dof"),
+                    "fully_constrained": fully,
+                    "conflicting": conflicting,
+                    "redundant": redundant,
+                    "satisfied": satisfied,
+                    "supported": True,
+                }
+            )
+
+        shape_records = []
+        for shape_name in validation.get("shape_errors", []):
+            shape_records.append(
+                {
+                    "kind": "shape_validity",
+                    "object": shape_name,
+                    "satisfied": False,
+                    "supported": True,
+                }
+            )
+
+        all_preserved_records = [
+            *preserved_records,
+            *sketch_constraint_records,
+            *shape_records,
+        ]
+
+        supported_count = sum(1 for item in all_preserved_records if item["supported"])
+        satisfied_count = sum(1 for item in all_preserved_records if item["satisfied"])
+        preserved_all_satisfied = (
+            satisfied_count == supported_count if supported_count > 0 else True
+        )
+        cpcsr = (
+            float(satisfied_count) / float(supported_count)
+            if supported_count > 0
+            else 1.0
+        )
+        rebuild_success = validation.get("rebuild_success") is True
+        validation_ok = validation.get("validation_ok") is True
+        target_bound = bool(target_after.get("bound_to"))
+        er = 1.0 if target_hit and rebuild_success and validation_ok else 0.0
+        oes = er * cpcsr
+        alias_preserved_supported = sum(
+            1 for item in preserved_records if item["supported"]
+        )
+        alias_preserved_satisfied = sum(
+            1 for item in preserved_records if item["satisfied"]
+        )
+        sketch_supported = sum(
+            1 for item in sketch_constraint_records if item["supported"]
+        )
+        sketch_satisfied = sum(
+            1 for item in sketch_constraint_records if item["satisfied"]
+        )
+        component_scores = {
+            "target_hit": 1.0 if target_hit else 0.0,
+            "target_binding": 1.0 if target_bound else 0.0,
+            "rebuild_success": 1.0 if rebuild_success else 0.0,
+            "validation_ok": 1.0 if validation_ok else 0.0,
+            "preserved_alias_satisfaction": (
+                float(alias_preserved_satisfied) / float(alias_preserved_supported)
+                if alias_preserved_supported > 0
+                else 1.0
+            ),
+            "sketch_constraint_health": (
+                float(sketch_satisfied) / float(sketch_supported)
+                if sketch_supported > 0
+                else 1.0
+            ),
+            "shape_validity": 0.0 if validation.get("shape_errors") else 1.0,
+        }
+
+        return {
+            "target_alias": target_alias,
+            "old_value": old_value,
+            "edited_value": value,
+            "target_actual": target_actual,
+            "target_expected": target_expected,
+            "target_delta": target_delta,
+            "target_hit": target_hit,
+            "target_bound": target_bound,
+            "rebuild_success": rebuild_success,
+            "validation_ok": validation_ok,
+            "preserved_records": preserved_records,
+            "sketch_constraint_records": sketch_constraint_records,
+            "shape_records": shape_records,
+            "all_preserved_records": all_preserved_records,
+            "preserved_supported_constraints": supported_count,
+            "preserved_satisfied_constraints": satisfied_count,
+            "preserved_constraints_all_satisfied": preserved_all_satisfied,
+            "ER": er,
+            "cPCSR": cpcsr,
+            "OES": oes,
+            "reward": oes,
+            "component_scores": component_scores,
+            "edit_result": edit_result,
+            "edit_error": edit_error,
+            "validation": validation,
+            "success": edit_error is None,
+        }
 
     # ------------------------------------------------------------------
     # Group G — Observation
@@ -2596,6 +3073,8 @@ features = []
 if hasattr(body, "Group"):
     for feat in body.Group:
         features.append({{"name": feat.Name, "type": feat.TypeId.split("::")[-1]}})
+else:
+    features.append({{"name": body.Name, "type": body.TypeId.split("::")[-1]}})
 
 edge_samples = []
 try:
@@ -2778,7 +3257,9 @@ _result_ = {{
                     )
                 current_solid = feat_result.get("feature_name") or current_solid
                 feature_names.append(feat_result.get("feature_name", ""))
-                last_body_name = feat_result.get("body_name")
+                last_body_name = feat_result.get("body_name") or feat_result.get(
+                    "feature_name"
+                )
                 continue
             if feat_spec.type == "revolve":
                 feat_result = await execute_revolve(  # type: ignore[name-defined]

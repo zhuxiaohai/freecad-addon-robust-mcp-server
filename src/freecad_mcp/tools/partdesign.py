@@ -2787,9 +2787,14 @@ try:
     doc.recompute()
     doc.commitTransaction()
 
+    try:
+        external_count = sketch.ExternalGeometryCount
+    except Exception:
+        external_count = len(getattr(sketch, "ExternalGeometry", []))
+
     _result_ = {{
         "success": True,
-        "external_geometry_count": sketch.ExternalGeometryCount,
+        "external_geometry_count": external_count,
     }}
 except Exception:
     doc.abortTransaction()
@@ -2920,14 +2925,24 @@ sketch = doc.getObject({sketch_name!r})
 if sketch is None:
     raise ValueError(f"Sketch not found: {sketch_name!r}")
 
+try:
+    external_count = sketch.ExternalGeometryCount
+except Exception:
+    external_count = len(getattr(sketch, "ExternalGeometry", []))
+
+try:
+    dof = sketch.DoF
+except Exception:
+    dof = sketch.solve() if hasattr(sketch, "solve") else None
+
 _result_ = {{
     "name": sketch.Name,
     "label": sketch.Label,
     "geometry_count": sketch.GeometryCount,
     "constraint_count": sketch.ConstraintCount,
-    "external_geometry_count": sketch.ExternalGeometryCount,
+    "external_geometry_count": external_count,
     "fully_constrained": sketch.FullyConstrained if hasattr(sketch, "FullyConstrained") else None,
-    "dof": sketch.solve() if hasattr(sketch, "solve") else None,
+    "dof": dof,
 }}
 """
         result = await bridge.execute_python(code)

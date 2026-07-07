@@ -71,5 +71,6 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
             )
             register_connector_templates(mcp, get_bridge)
     """
-    # No domain templates registered yet.
-    # Add imports and calls here as templates are developed.
+    from freecad_mcp.tools.templates.connectors import register_connector_templates
+
+    register_connector_templates(mcp, get_bridge)

@@ -81,6 +81,7 @@ class TestFabricationTools:
             "feature_chamfer",
             "list_tunable_params",
             "set_tunable_param",
+            "evaluate_editability",
             "get_body_snapshot",
             "execute_fabrication_plan",
         }
@@ -498,6 +499,77 @@ class TestFabricationTools:
         with pytest.raises(ValueError, match="unknown_param"):
             await register_tools["set_tunable_param"](alias="unknown_param", value=10.0)
 
+    @pytest.mark.asyncio
+    async def test_evaluate_editability_success(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """evaluate_editability returns HistCAD-style reward metrics."""
+        before_params = {
+            "params": [
+                {
+                    "alias": "arm_x_length",
+                    "value": 50.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
+                },
+                {
+                    "alias": "arm_y_length",
+                    "value": 80.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[16]"}],
+                },
+            ],
+            "spreadsheet_name": "FabricationParams",
+        }
+        after_params = {
+            "params": [
+                {
+                    "alias": "arm_x_length",
+                    "value": 60.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
+                },
+                {
+                    "alias": "arm_y_length",
+                    "value": 80.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[16]"}],
+                },
+            ],
+            "spreadsheet_name": "FabricationParams",
+        }
+        mock_bridge.execute_python.side_effect = [
+            self._success(before_params),
+            self._success(
+                {
+                    "alias": "arm_x_length",
+                    "old_value": 50.0,
+                    "new_value": 60.0,
+                    "recomputed": True,
+                    "affected_features": ["L_Connector_Profile"],
+                    "success": True,
+                }
+            ),
+            self._success(after_params),
+            self._success(
+                {
+                    "rebuild_success": True,
+                    "validation_ok": True,
+                    "exception": None,
+                    "shape_errors": [],
+                    "sketches": [],
+                }
+            ),
+        ]
+
+        result = await register_tools["evaluate_editability"](
+            target_alias="arm_x_length",
+            value=60.0,
+        )
+
+        assert result["ER"] == 1.0
+        assert result["cPCSR"] == 1.0
+        assert result["OES"] == 1.0
+        assert result["preserved_satisfied_constraints"] == 1
+        assert result["component_scores"]["target_hit"] == 1.0
+        assert result["component_scores"]["preserved_alias_satisfaction"] == 1.0
+
     # ------------------------------------------------------------------
     # get_body_snapshot
     # ------------------------------------------------------------------
@@ -596,8 +668,8 @@ class TestFabricationSourceConventions:
         assert '"translation"' in source
 
 
-class TestTemplatePlaceholder:
-    """Tests for the Layer 2 template placeholder."""
+class TestConnectorTemplates:
+    """Tests for Layer 2 connector templates."""
 
     @pytest.fixture
     def mock_mcp(self) -> MagicMock:
@@ -614,14 +686,64 @@ class TestTemplatePlaceholder:
         mcp.tool = tool_decorator
         return mcp
 
-    def test_register_template_tools_registers_nothing(
+    def test_register_template_tools_registers_l_connector(
         self, mock_mcp: MagicMock
     ) -> None:
-        """Template placeholder registers zero tools (until domains are added)."""
+        """Template registration exposes the L connector resolver."""
         from freecad_mcp.tools.templates import register_template_tools
 
         async def get_bridge() -> AsyncMock:
             return AsyncMock()
 
         register_template_tools(mock_mcp, get_bridge)
-        assert mock_mcp._registered_tools == {}
+        assert "resolve_l_connector_template" in mock_mcp._registered_tools
+
+    @pytest.mark.asyncio
+    async def test_l_connector_template_contract(self, mock_mcp: MagicMock) -> None:
+        """L connector template returns a FabricationPlan with tunable aliases."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        result = await mock_mcp._registered_tools["resolve_l_connector_template"](
+            description="L connector 5cm 8cm 3cm",
+            thickness=6.0,
+        )
+
+        assert len(result["coordinate_systems"]) == 1
+        assert len(result["sketches"]) == 1
+        assert len(result["features"]) == 1
+        sketch = result["sketches"][0]
+        assert len(sketch["sketch"]) == 6
+        assert sketch["constraints"]["Length"][0][1]["alias"] == "arm_x_length"
+        assert sketch["constraints"]["Length"][1][1]["alias"] == "arm_x_width"
+        assert sketch["constraints"]["Length"][2][1]["alias"] == "arm_y_width"
+        assert sketch["constraints"]["Length"][3][1]["alias"] == "arm_y_length"
+        assert result["features"][0]["param_aliases"] == {"towards": "thickness"}
+        assert result["metadata"]["editable_aliases"] == [
+            "arm_x_length",
+            "arm_x_width",
+            "arm_y_width",
+            "arm_y_length",
+            "thickness",
+        ]
+
+    def test_l_connector_template_parses_keyed_chinese_dimensions(self) -> None:
+        """Chinese long/short/width/thickness labels map to the intended aliases."""
+        from freecad_mcp.tools.templates.connectors import build_l_connector_plan
+
+        plan = build_l_connector_plan(
+            description="生成一个L型焊装连接件, 长边80mm, 短边50mm, 宽度30mm, 厚度6mm"
+        )
+        sketch = plan.sketches[0].sketch
+        length_constraints = plan.sketches[0].constraints["Length"]
+
+        assert sketch["line_1"]["end"] == [50.0, 0.0]
+        assert sketch["line_6"]["end"] == [0.0, 0.0]
+        assert length_constraints[0][1]["length"] == 50.0
+        assert length_constraints[1][1]["length"] == 30.0
+        assert length_constraints[2][1]["length"] == 30.0
+        assert length_constraints[3][1]["length"] == 80.0
+        assert plan.features[0].params["towards"] == 6.0

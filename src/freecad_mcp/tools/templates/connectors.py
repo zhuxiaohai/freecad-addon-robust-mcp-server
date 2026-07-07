@@ -251,6 +251,21 @@ def build_l_connector_plan(
                 "arm_y_length",
                 "thickness",
             ],
+            "design_intent": {
+                "preserve_aliases_by_default": [
+                    "arm_x_width",
+                    "arm_y_width",
+                    "thickness",
+                ],
+                "coupled_alias_groups": [],
+                "required_constraint_types": [
+                    "Coincident",
+                    "Horizontal",
+                    "Vertical",
+                    "Length",
+                ],
+                "expected_dof": 0,
+            },
         },
     )
 

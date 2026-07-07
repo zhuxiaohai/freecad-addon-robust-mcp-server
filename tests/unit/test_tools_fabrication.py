@@ -553,7 +553,16 @@ class TestFabricationTools:
                     "validation_ok": True,
                     "exception": None,
                     "shape_errors": [],
-                    "sketches": [],
+                    "sketches": [
+                        {
+                            "name": "Sketch",
+                            "dof": 0,
+                            "fully_constrained": True,
+                            "conflicting": [],
+                            "redundant": [],
+                            "constraint_types": ["Horizontal", "Vertical", "Length"],
+                        }
+                    ],
                 }
             ),
         ]
@@ -561,14 +570,26 @@ class TestFabricationTools:
         result = await register_tools["evaluate_editability"](
             target_alias="arm_x_length",
             value=60.0,
+            design_intent={
+                "preserve_aliases": ["arm_y_length"],
+                "coupled_aliases": [],
+                "free_aliases": [],
+                "expected_dof": 0,
+                "required_constraint_types": ["Horizontal", "Vertical", "Length"],
+            },
         )
 
         assert result["ER"] == 1.0
         assert result["cPCSR"] == 1.0
         assert result["OES"] == 1.0
-        assert result["preserved_satisfied_constraints"] == 1
+        assert result["preserved_satisfied_constraints"] == 2
+        assert len(result["preserved_records"]) == 1
+        assert len(result["sketch_constraint_records"]) == 1
         assert result["component_scores"]["target_hit"] == 1.0
         assert result["component_scores"]["preserved_alias_satisfaction"] == 1.0
+        assert result["component_scores"]["sketch_constraint_health"] == 1.0
+        assert result["weighted_reward"] == 1.0
+        assert result["design_intent"]["expected_dof"] == 0
 
     # ------------------------------------------------------------------
     # get_body_snapshot

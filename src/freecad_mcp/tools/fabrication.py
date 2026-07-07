@@ -2731,11 +2731,12 @@ except Exception as _e:
         raise ValueError(result.error_traceback or "Failed to set tunable param")
 
     @mcp.tool()
-    async def evaluate_editability(
+    async def evaluate_editability(  # noqa: PLR0912
         target_alias: str,
         value: float | None = None,
         scale: float | None = None,
         preserved_aliases: list[str] | None = None,
+        design_intent: dict[str, Any] | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Evaluate one parametric edit and return HistCAD-style reward metrics.
@@ -2760,10 +2761,20 @@ except Exception as _e:
                 raise ValueError("Either value or scale must be provided")
             value = float(old_value) * float(scale)
 
-        if preserved_aliases is None:
-            preserved_aliases = [
+        intent = design_intent or {}
+        preserve_aliases = list(
+            preserved_aliases
+            if preserved_aliases is not None
+            else intent.get("preserve_aliases", [])
+        )
+        if not preserve_aliases:
+            preserve_aliases = [
                 alias for alias in params_before if alias != target_alias
             ]
+        coupled_aliases = list(intent.get("coupled_aliases", []))
+        free_aliases = list(intent.get("free_aliases", []))
+        expected_dof = intent.get("expected_dof")
+        required_constraint_types = set(intent.get("required_constraint_types", []))
 
         edit_result: dict[str, Any] | None = None
         edit_error: str | None = None
@@ -2812,12 +2823,18 @@ shape_errors = []
 for obj in doc.Objects:
     try:
         if obj.TypeId == "Sketcher::SketchObject":
+            _constraint_types = []
+            try:
+                _constraint_types = [c.Type for c in obj.Constraints]
+            except Exception:
+                pass
             sketches.append({{
                 "name": obj.Name,
                 "dof": getattr(obj, "DoF", None),
                 "fully_constrained": getattr(obj, "FullyConstrained", None),
                 "conflicting": list(getattr(obj, "ConflictingConstraints", ())),
                 "redundant": list(getattr(obj, "RedundantConstraints", ())),
+                "constraint_types": _constraint_types,
             }})
         if hasattr(obj, "Shape") and not obj.Shape.isNull():
             try:
@@ -2860,7 +2877,7 @@ _result_ = {{
                 return a == b
 
         preserved_records = []
-        for alias in preserved_aliases:
+        for alias in preserve_aliases:
             before_item = params_before.get(alias)
             after_item = params_after.get(alias)
             before_bound = before_item.get("bound_to", []) if before_item else []
@@ -2897,17 +2914,73 @@ _result_ = {{
             conflicting = sketch.get("conflicting") or []
             redundant = sketch.get("redundant") or []
             fully = sketch.get("fully_constrained")
-            satisfied = not conflicting and (fully is not False)
+            dof = sketch.get("dof")
+            dof_ok = expected_dof is None or dof == expected_dof
+            present_types = set(sketch.get("constraint_types") or [])
+            required_present = sorted(required_constraint_types & present_types)
+            required_missing = sorted(required_constraint_types - present_types)
+            required_ok = not required_missing
+            satisfied = (
+                not conflicting and (fully is not False) and dof_ok and required_ok
+            )
             sketch_constraint_records.append(
                 {
                     "kind": "sketch_constraint_health",
                     "sketch": sketch.get("name"),
-                    "dof": sketch.get("dof"),
+                    "dof": dof,
+                    "expected_dof": expected_dof,
+                    "dof_ok": dof_ok,
                     "fully_constrained": fully,
                     "conflicting": conflicting,
                     "redundant": redundant,
+                    "required_constraint_types": sorted(required_constraint_types),
+                    "required_present": required_present,
+                    "required_missing": required_missing,
+                    "required_ok": required_ok,
                     "satisfied": satisfied,
                     "supported": True,
+                }
+            )
+
+        coupled_records = []
+        for spec in coupled_aliases:
+            if isinstance(spec, str):
+                alias = spec
+                expected_value = value
+            else:
+                alias = spec.get("alias")
+                expected_value = spec.get("expected_value", value)
+            before_item = params_before.get(alias)
+            after_item = params_after.get(alias)
+            target_changed = after_item is not None and _numeric_close(
+                after_item.get("value"), expected_value
+            )
+            coupled_records.append(
+                {
+                    "kind": "coupled_alias",
+                    "alias": alias,
+                    "expected_value": expected_value,
+                    "before_value": before_item.get("value") if before_item else None,
+                    "after_value": after_item.get("value") if after_item else None,
+                    "satisfied": target_changed,
+                    "supported": before_item is not None,
+                }
+            )
+
+        free_records = []
+        for alias in free_aliases:
+            before_item = params_before.get(alias)
+            after_item = params_after.get(alias)
+            binding_after = after_item.get("bound_to", []) if after_item else []
+            free_records.append(
+                {
+                    "kind": "free_alias",
+                    "alias": alias,
+                    "before_value": before_item.get("value") if before_item else None,
+                    "after_value": after_item.get("value") if after_item else None,
+                    "binding_after": binding_after,
+                    "satisfied": after_item is not None,
+                    "supported": before_item is not None,
                 }
             )
 
@@ -2924,6 +2997,8 @@ _result_ = {{
 
         all_preserved_records = [
             *preserved_records,
+            *coupled_records,
+            *free_records,
             *sketch_constraint_records,
             *shape_records,
         ]
@@ -2955,6 +3030,10 @@ _result_ = {{
         sketch_satisfied = sum(
             1 for item in sketch_constraint_records if item["satisfied"]
         )
+        coupled_supported = sum(1 for item in coupled_records if item["supported"])
+        coupled_satisfied = sum(1 for item in coupled_records if item["satisfied"])
+        free_supported = sum(1 for item in free_records if item["supported"])
+        free_satisfied = sum(1 for item in free_records if item["satisfied"])
         component_scores = {
             "target_hit": 1.0 if target_hit else 0.0,
             "target_binding": 1.0 if target_bound else 0.0,
@@ -2970,8 +3049,27 @@ _result_ = {{
                 if sketch_supported > 0
                 else 1.0
             ),
+            "coupled_alias_satisfaction": (
+                float(coupled_satisfied) / float(coupled_supported)
+                if coupled_supported > 0
+                else 1.0
+            ),
+            "free_alias_reachability": (
+                float(free_satisfied) / float(free_supported)
+                if free_supported > 0
+                else 1.0
+            ),
             "shape_validity": 0.0 if validation.get("shape_errors") else 1.0,
         }
+        weighted_reward = (
+            0.25 * component_scores["target_hit"]
+            + 0.15 * component_scores["rebuild_success"]
+            + 0.15 * component_scores["validation_ok"]
+            + 0.20 * component_scores["preserved_alias_satisfaction"]
+            + 0.15 * component_scores["sketch_constraint_health"]
+            + 0.05 * component_scores["coupled_alias_satisfaction"]
+            + 0.05 * component_scores["free_alias_reachability"]
+        )
 
         return {
             "target_alias": target_alias,
@@ -2985,6 +3083,8 @@ _result_ = {{
             "rebuild_success": rebuild_success,
             "validation_ok": validation_ok,
             "preserved_records": preserved_records,
+            "coupled_records": coupled_records,
+            "free_records": free_records,
             "sketch_constraint_records": sketch_constraint_records,
             "shape_records": shape_records,
             "all_preserved_records": all_preserved_records,
@@ -2995,7 +3095,15 @@ _result_ = {{
             "cPCSR": cpcsr,
             "OES": oes,
             "reward": oes,
+            "weighted_reward": weighted_reward,
             "component_scores": component_scores,
+            "design_intent": {
+                "preserve_aliases": preserve_aliases,
+                "coupled_aliases": coupled_aliases,
+                "free_aliases": free_aliases,
+                "expected_dof": expected_dof,
+                "required_constraint_types": sorted(required_constraint_types),
+            },
             "edit_result": edit_result,
             "edit_error": edit_error,
             "validation": validation,

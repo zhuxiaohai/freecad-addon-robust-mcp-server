@@ -1585,7 +1585,8 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         "deterministically to FreeCAD API calls. "
                         "Workflow: create_coordinate_system → create_sketch_geometry → "
                         "apply_sketch_constraints → execute_extrude/revolve/helix → "
-                        "execute_boolean (Join/Cut/Intersect) → feature_fillet/chamfer. "
+                        "execute_boolean with explicit base/tool object names "
+                        "(Join/Cut/Intersect) → feature_fillet/chamfer. "
                         "Use execute_fabrication_plan for batch execution from a "
                         "FabricationPlan dict produced by a Layer 2 template tool."
                     ),
@@ -1658,18 +1659,18 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "execute_extrude",
                             "description": (
-                                "Extrude a sketch into a standalone Part::Feature solid, "
-                                "built from ground-truth coordinates (no Sketcher solver "
-                                "drift). Returns NLT-aligned observations: local_obb "
-                                "(center + semi_extents in the sketch frame) and "
-                                "global_center (placement * local center). Combine solids "
-                                "with execute_boolean. param_aliases dict auto-creates "
-                                "FabricationParams spreadsheet bindings."
+                                "Extrude a sketch into a standalone solid. Defaults to "
+                                "extrusion_mode='auto': try parametric Sketch-based "
+                                "Part::Extrusion first, then fall back to robust raw-face "
+                                "extrusion if FreeCAD returns a null or zero-volume shape. "
+                                "Returns local_obb, global_center, extrusion_mode_used, "
+                                "and fallback_reason."
                             ),
                             "key_params": [
                                 "sketch_name",
                                 "towards",
                                 "opposite",
+                                "extrusion_mode",
                                 "param_aliases",
                                 "doc_name",
                             ],
@@ -1677,11 +1678,13 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "execute_boolean",
                             "description": (
-                                "Combine two solids with HistCAD boolean semantics "
+                                "Create a parametric boolean result "
                                 "(Join=fuse, Cut, Intersect=common) using explicit base "
                                 "and tool object names. Returns base/tool/result "
-                                "global_center observations plus center_distance "
-                                "(matches the NLT 'center distance' field)."
+                                "global_center observations plus center_distance. Defaults "
+                                "to boolean_mode='auto': try parametric boolean first, then "
+                                "fall back to direct shape boolean if FreeCAD returns null, "
+                                "invalid, or zero-volume geometry."
                             ),
                             "key_params": [
                                 "base_object_name",
@@ -1689,6 +1692,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "operation",
                                 "result_name",
                                 "keep_originals",
+                                "boolean_mode",
                                 "doc_name",
                             ],
                         },

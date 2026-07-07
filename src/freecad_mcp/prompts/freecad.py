@@ -705,19 +705,20 @@ strategies, or calls `execute_fabrication_plan` for batch execution.
    })
    → dof_after, redundant/conflicting constraints, profile, geometry_drift
    (geometry_drift.max_mm > 0 means a constraint value contradicts the
-    stated coordinates — the solver moved geometry silently; the final
-    solid is unaffected because extrusion uses the raw coordinates)
+    stated coordinates — the solver moved geometry silently. Use
+    extrusion_mode="robust_face" for HistCAD-style ground-truth geometry, or
+    leave extrusion_mode="auto" to try parametric Sketch extrusion first.)
 
-5. execute_extrude(sketch_name, towards=30.0, param_aliases={"towards": "arm_length"})
-   → feature_name, local_obb, global_center, bounding_box
+5. execute_extrude(sketch_name, towards=30.0, extrusion_mode="auto")
+   → feature_name, local_obb, global_center, bounding_box, extrusion_mode_used
    (local_obb.center and global_center match the NLT "local OBB center" and
     "global center" values exactly; sketch coordinates are used as written,
     with no Y sign change)
 
 6. execute_boolean(base_object_name, tool_object_name, operation="Intersect")
    → base/tool/result observations + center_distance
-   (only when the step is Join / Cut / Intersect; base = accumulated solid,
-    tool = the solid just created by execute_extrude)
+   (base and tool must be named explicitly; do not infer an accumulated
+    solid from feature order)
 
 7. get_body_snapshot()   → edge_samples for fillet near_points
 

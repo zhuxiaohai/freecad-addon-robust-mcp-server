@@ -133,14 +133,21 @@ class FeatureSpec:
     """Specification for a 3-D feature execution (extrude, revolve, or helix).
 
     Attributes:
-        type: Feature type — ``"extrude"``, ``"revolve"``, or ``"helix"``.
+        type: Feature type — ``"extrude"``, ``"boolean"``, ``"revolve"``,
+            or ``"helix"``.
         sketch_name: Name of the sketch to operate on.  Must match a
             ``SketchSpec.sketch_name`` resolved during plan execution, or be a
-            pre-existing sketch object name in the document.
-        operation: Boolean semantics — ``"NewBody"``, ``"Join"``,
-            ``"Cut"``, or ``"Intersect"``.
+            pre-existing sketch object name in the document.  Not used for
+            ``"boolean"`` features.
+        operation: Feature operation.  For ``"extrude"``, ``"revolve"``, and
+            ``"helix"``, the canonical pipeline only supports ``"NewBody"``.
+            For ``"boolean"``, use ``"Join"``, ``"Cut"``, or ``"Intersect"``.
         params: Type-specific parameter dict:
-            - extrude: ``{"towards": float, "opposite": float}``
+            - extrude: ``{"towards": float, "opposite": float,
+              "extrusion_mode": "auto"|"parametric_sketch"|"robust_face"}``
+            - boolean: ``{"base_object_name": str, "tool_object_name": str,
+              "operation": "Join"|"Cut"|"Intersect",
+              "boolean_mode": "auto"|"parametric"|"static_shape"}``
             - revolve: ``{"axis": [[bx,by,bz],[dx,dy,dz]], "start": float,
               "end": float}``
             - helix:   ``{"axis": ..., "pitch": float, "turns": float,
@@ -182,8 +189,11 @@ class FeatureSpec:
         """Deserialise from plain dict."""
         return cls(
             type=d["type"],
-            sketch_name=d["sketch_name"],
-            operation=d["operation"],
+            sketch_name=d.get("sketch_name", ""),
+            operation=d.get(
+                "operation",
+                d.get("params", {}).get("operation", "NewBody"),
+            ),
             params=d["params"],
             param_aliases=d.get("param_aliases", {}),
             feature_name=d.get("feature_name"),

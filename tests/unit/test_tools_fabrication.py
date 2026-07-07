@@ -312,6 +312,8 @@ class TestFabricationTools:
                 },
                 "volume_mm3": 697.4026,
                 "sketch_normal_world": [0.0, 0.0, 1.0],
+                "extrusion_mode_used": "parametric_sketch",
+                "fallback_reason": None,
                 "success": True,
             }
         )
@@ -324,6 +326,7 @@ class TestFabricationTools:
         assert result["local_obb"]["center"] == [8.5, 2.0, 0.0]
         assert result["global_center"] == [8.5, 2.0, 0.0]
         assert result["bounding_box"]["z_max"] == 10.0
+        assert result["extrusion_mode_used"] == "parametric_sketch"
         assert result["success"] is True
 
     @pytest.mark.asyncio
@@ -351,7 +354,13 @@ class TestFabricationTools:
         mock_bridge.execute_python.return_value = self._success(
             {
                 "feature_name": "Intersect001",
+                "type_id": "Part::Common",
                 "operation": "Intersect",
+                "base_object_name": "Solid001",
+                "tool_object_name": "Solid002",
+                "dependency_preserved": True,
+                "boolean_mode_used": "parametric",
+                "fallback_reason": None,
                 "base": {
                     "name": "Solid001",
                     "global_center": [8.5, 2.0, 0.0],
@@ -384,6 +393,11 @@ class TestFabricationTools:
             operation="Intersect",
         )
         assert result["feature_name"] == "Intersect001"
+        assert result["type_id"] == "Part::Common"
+        assert result["base_object_name"] == "Solid001"
+        assert result["tool_object_name"] == "Solid002"
+        assert result["dependency_preserved"] is True
+        assert result["boolean_mode_used"] == "parametric"
         assert result["base"]["global_center"] == [8.5, 2.0, 0.0]
         assert result["tool"]["global_center"] == [8.5, 0.0, 3.5]
         assert result["center_distance"] == 4.0311
@@ -488,6 +502,17 @@ class TestFabricationTools:
         assert result["new_value"] == 200.0
         assert "Pad001" in result["affected_features"]
 
+    def test_set_tunable_param_collects_downstream_boolean_dependencies(self) -> None:
+        """Source includes traversal from direct aliases to boolean result objects."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'for attr in ("Base", "Tool")' in source
+        assert 'getattr(obj, "Shapes", [])' in source
+        assert "affected_set.add(obj.Name)" in source
+
     @pytest.mark.asyncio
     async def test_set_tunable_param_missing_alias_raises(
         self, register_tools: dict, mock_bridge: AsyncMock
@@ -538,6 +563,19 @@ class TestFabricationTools:
             self._success(before_params),
             self._success(
                 {
+                    "objects": [
+                        {
+                            "name": "L_Connector_Profile",
+                            "type_id": "Sketcher::SketchObject",
+                            "volume": 0.0,
+                            "bounding_box": [0, 50, 0, 80, 0, 0],
+                            "dependencies": [],
+                        }
+                    ]
+                }
+            ),
+            self._success(
+                {
                     "alias": "arm_x_length",
                     "old_value": 50.0,
                     "new_value": 60.0,
@@ -565,6 +603,19 @@ class TestFabricationTools:
                     ],
                 }
             ),
+            self._success(
+                {
+                    "objects": [
+                        {
+                            "name": "L_Connector_Profile",
+                            "type_id": "Sketcher::SketchObject",
+                            "volume": 0.0,
+                            "bounding_box": [0, 60, 0, 80, 0, 0],
+                            "dependencies": [],
+                        }
+                    ]
+                }
+            ),
         ]
 
         result = await register_tools["evaluate_editability"](
@@ -582,14 +633,87 @@ class TestFabricationTools:
         assert result["ER"] == 1.0
         assert result["cPCSR"] == 1.0
         assert result["OES"] == 1.0
-        assert result["preserved_satisfied_constraints"] == 2
+        assert result["preserved_satisfied_constraints"] == 3
         assert len(result["preserved_records"]) == 1
         assert len(result["sketch_constraint_records"]) == 1
         assert result["component_scores"]["target_hit"] == 1.0
         assert result["component_scores"]["preserved_alias_satisfaction"] == 1.0
         assert result["component_scores"]["sketch_constraint_health"] == 1.0
+        assert result["component_scores"]["geometry_update"] == 1.0
         assert result["weighted_reward"] == 1.0
         assert result["design_intent"]["expected_dof"] == 0
+
+    @pytest.mark.asyncio
+    async def test_evaluate_editability_fails_when_affected_geometry_is_static(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Editability catches a changed parameter that does not update final shape."""
+        params_before = {
+            "params": [
+                {
+                    "alias": "arm_x_length",
+                    "value": 50.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
+                }
+            ],
+            "spreadsheet_name": "FabricationParams",
+        }
+        params_after = {
+            "params": [
+                {
+                    "alias": "arm_x_length",
+                    "value": 60.0,
+                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
+                }
+            ],
+            "spreadsheet_name": "FabricationParams",
+        }
+        static_shape = {
+            "objects": [
+                {
+                    "name": "Join",
+                    "type_id": "Part::Feature",
+                    "volume": 178000.0,
+                    "bounding_box": [0, 100, 0, 80, 0, 26],
+                    "dependencies": [],
+                }
+            ]
+        }
+        mock_bridge.execute_python.side_effect = [
+            self._success(params_before),
+            self._success(static_shape),
+            self._success(
+                {
+                    "alias": "arm_x_length",
+                    "old_value": 50.0,
+                    "new_value": 60.0,
+                    "recomputed": True,
+                    "affected_features": ["Join"],
+                    "success": True,
+                }
+            ),
+            self._success(params_after),
+            self._success(
+                {
+                    "rebuild_success": True,
+                    "validation_ok": True,
+                    "exception": None,
+                    "shape_errors": [],
+                    "sketches": [],
+                }
+            ),
+            self._success(static_shape),
+        ]
+
+        result = await register_tools["evaluate_editability"](
+            target_alias="arm_x_length",
+            value=60.0,
+        )
+
+        assert result["geometry_update_ok"] is False
+        assert result["component_scores"]["geometry_update"] == 0.0
+        assert result["ER"] == 0.0
+        assert result["reward"] == 0.0
 
     # ------------------------------------------------------------------
     # get_body_snapshot
@@ -627,6 +751,119 @@ class TestFabricationTools:
         assert len(result["edge_samples"]) == 1
         assert result["edge_samples"][0]["curve_type"] == "Circle"
 
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_rejects_implicit_extrude_boolean(
+        self, register_tools: dict
+    ) -> None:
+        """Batch plans must use explicit boolean features, not extrude.operation."""
+        plan = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [
+                {
+                    "type": "extrude",
+                    "sketch_name": "ToolSketch",
+                    "operation": "Join",
+                    "params": {"towards": 10.0},
+                    "feature_name": "ToolSolid",
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="explicit boolean features"):
+            await register_tools["execute_fabrication_plan"](plan)
+
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_boolean_requires_base_and_tool(
+        self, register_tools: dict
+    ) -> None:
+        """Boolean features must explicitly identify both operands."""
+        plan = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [
+                {
+                    "type": "boolean",
+                    "operation": "Intersect",
+                    "params": {"base_object_name": "BaseSolid"},
+                    "feature_name": "Intersection",
+                }
+            ],
+        }
+
+        with pytest.raises(ValueError, match="base_object_name"):
+            await register_tools["execute_fabrication_plan"](plan)
+
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_runs_explicit_boolean_feature(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Batch executor dispatches boolean features with explicit base/tool."""
+        mock_bridge.execute_python.side_effect = [
+            self._success(
+                {
+                    "feature_name": "Intersection",
+                    "type_id": "Part::Common",
+                    "operation": "Intersect",
+                    "base_object_name": "BaseSolid",
+                    "tool_object_name": "ToolSolid",
+                    "dependency_preserved": True,
+                    "boolean_mode_used": "parametric",
+                    "fallback_reason": None,
+                    "base": {
+                        "name": "BaseSolid",
+                        "global_center": [0, 0, 0],
+                        "volume_mm3": 10.0,
+                    },
+                    "tool": {
+                        "name": "ToolSolid",
+                        "global_center": [0, 0, 0],
+                        "volume_mm3": 10.0,
+                    },
+                    "result": {
+                        "global_center": [0, 0, 0],
+                        "bounding_box": {},
+                        "volume_mm3": 5.0,
+                    },
+                    "center_distance": 0.0,
+                    "success": True,
+                }
+            ),
+            self._success(
+                {
+                    "bounding_box": {},
+                    "volume": 5.0,
+                    "features": [],
+                    "edge_samples": [],
+                    "success": True,
+                }
+            ),
+            self._success({"params": [], "spreadsheet_name": None}),
+        ]
+        plan = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [
+                {
+                    "type": "boolean",
+                    "operation": "Intersect",
+                    "params": {
+                        "base_object_name": "BaseSolid",
+                        "tool_object_name": "ToolSolid",
+                    },
+                    "feature_name": "Intersection",
+                }
+            ],
+        }
+
+        result = await register_tools["execute_fabrication_plan"](plan)
+
+        assert result["feature_names"] == ["Intersection"]
+        assert result["body_name"] == "Intersection"
+        boolean_code = mock_bridge.execute_python.call_args_list[0].args[0]
+        assert "BaseSolid" in boolean_code
+        assert "ToolSolid" in boolean_code
+
 
 class TestFabricationSourceConventions:
     """Static checks that fabrication.py matches Fusion adapter semantics."""
@@ -650,6 +887,41 @@ class TestFabricationSourceConventions:
         )
         assert "Part::FaceMakerBullseye" in source
         assert "_make_face" in source
+
+    def test_extrude_has_robust_face_fallback(self) -> None:
+        """Sketch extrusion falls back to raw-face extrusion when invalid."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        extrude_source = source.split("async def execute_extrude", 1)[1].split(
+            "async def execute_boolean", 1
+        )[0]
+        assert 'extrusion_mode: str = "auto"' in extrude_source
+        assert '"robust_face"' in extrude_source
+        assert "_create_robust_face_extrusion" in extrude_source
+        assert "_shape_failure_reason" in extrude_source
+        assert 'extrusion_mode_used": extrusion_mode_used' in extrude_source
+
+    def test_boolean_uses_parametric_objects_with_static_fallback(self) -> None:
+        """Boolean execution preserves dependencies until fallback is needed."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        boolean_source = source.split("async def execute_boolean", 1)[1].split(
+            "async def execute_revolve", 1
+        )[0]
+        assert ".Shape.copy()" not in boolean_source
+        assert "feat.Shape = result_shape" not in boolean_source
+        assert "_create_parametric_boolean" in boolean_source
+        assert "_direct_boolean_shape" in boolean_source
+        assert "boolean_mode_used" in boolean_source
+        assert "feat.Base = base_obj" in boolean_source
+        assert "feat.Tool = tool_obj" in boolean_source
+        assert "dependency_preserved" in boolean_source
 
     def test_mirror_constraint_axis_is_middle_entry(self) -> None:
         """HistCAD Mirror format is [entity, axis, entity]."""

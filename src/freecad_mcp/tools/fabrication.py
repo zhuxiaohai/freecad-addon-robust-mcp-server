@@ -1544,13 +1544,16 @@ except Exception as _e:
         sketch: dict[str, Any] | None = None,
         param_aliases: dict[str, str] | None = None,
         feature_name: str | None = None,
+        extrusion_mode: str = "auto",
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Extrude a sketch into a standalone solid (``Part::Feature``).
 
-        The solid is created as a parametric ``Part::Extrusion`` referencing
-        the Sketcher object directly, so spreadsheet-driven sketch dimensions
-        and extrusion thickness update the final solid on recompute.
+        By default this tool first tries a parametric ``Part::Extrusion``
+        referencing the Sketcher object directly.  If FreeCAD produces a null
+        or zero-volume shape, it falls back to the HistCAD-stable raw-face path:
+        build edges from the cached JSON, create a face with
+        ``Part::FaceMakerBullseye``, and extrude that face into a solid.
 
         This tool only creates geometry.  Boolean combination with existing
         solids (HistCAD ``Join`` / ``Cut`` / ``Intersect`` semantics) is a
@@ -1575,6 +1578,9 @@ except Exception as _e:
                 frontend sliders.  E.g. ``{"towards": "column_height"}`` binds
                 the ``towards`` value to a cell aliased ``column_height``.
             feature_name: Explicit FreeCAD object name. Auto-generated if None.
+            extrusion_mode: ``"auto"`` (default), ``"parametric_sketch"``, or
+                ``"robust_face"``.  ``"auto"`` falls back to ``"robust_face"``
+                when sketch-based extrusion is invalid.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
@@ -1592,6 +1598,8 @@ except Exception as _e:
                   in world space.
                 - volume_mm3: Solid volume in cubic millimetres.
                 - sketch_normal_world: Extrusion direction in world space.
+                - extrusion_mode_used: Actual extrusion path used.
+                - fallback_reason: Reason for robust-face fallback, if any.
                 - success: ``True`` when a non-zero solid was produced.
 
         Raises:
@@ -1609,6 +1617,8 @@ except Exception as _e:
         """
         bridge = await get_bridge()
         code = f"""
+import Part
+
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
     raise ValueError("No active document")
@@ -1621,8 +1631,15 @@ towards        = {towards!r}
 opposite       = {opposite!r}
 aliases        = {param_aliases!r} or {{}}
 feat_nm        = {feature_name!r}
+mode           = {extrusion_mode!r}
 # Geometry dict: use caller-supplied value; fall back to cached value on sketch object.
 _sketch_direct = {sketch!r}
+
+if mode not in ("auto", "parametric_sketch", "robust_face"):
+    raise ValueError(
+        f"Invalid extrusion_mode: {{mode}}. Use 'auto', 'parametric_sketch', "
+        "or 'robust_face'."
+    )
 
 doc.openTransaction("Execute Extrude")
 try:
@@ -1711,29 +1728,98 @@ try:
         except Exception:
             return _PM.Face(_wires[0])
 
-    # Use a parametric Part::Extrusion that references the Sketch directly.
-    # This keeps the final solid driven by Sketcher constraints and spreadsheet
-    # expressions, so frontend slider edits update the model through recompute.
     _pl = sk.Placement
     _normal = _pl.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
-    feat = doc.addObject("Part::Extrusion", feat_nm or "Solid")
-    feat.Base = sk
-    try:
-        feat.DirMode = "Normal"
-    except Exception:
-        pass
-    try:
-        feat.Dir = _normal
-    except Exception:
-        pass
-    try:
-        feat.FaceMakerClass = "Part::FaceMakerBullseye"
-    except Exception:
-        pass
-    feat.LengthFwd = towards
-    feat.LengthRev = opposite
-    feat.Solid = True
-    doc.recompute()
+    fallback_reason = None
+    extrusion_mode_used = None
+    feat = None
+
+    def _shape_failure_reason(_obj):
+        try:
+            _sh = _obj.Shape
+            if _sh.isNull():
+                return "null_shape"
+            try:
+                if not _sh.isValid():
+                    return "invalid_shape"
+            except Exception:
+                pass
+            if _sh.Volume <= 1e-9:
+                return f"zero_volume_{{round(_sh.Volume, 9)}}"
+            return None
+        except Exception as _exc:
+            return "shape_error: " + str(_exc)
+
+    def _create_parametric_extrusion():
+        _feat = doc.addObject("Part::Extrusion", feat_nm or "Solid")
+        _feat.Base = sk
+        try:
+            _feat.DirMode = "Normal"
+        except Exception:
+            pass
+        try:
+            _feat.Dir = _normal
+        except Exception:
+            pass
+        try:
+            _feat.FaceMakerClass = "Part::FaceMakerBullseye"
+        except Exception:
+            pass
+        _feat.LengthFwd = towards
+        _feat.LengthRev = opposite
+        _feat.Solid = True
+        doc.recompute()
+        return _feat
+
+    def _create_robust_face_extrusion():
+        _edges = _edges_from_raw_json(sk, Part)
+        if not _edges:
+            raise ValueError("Cannot build robust extrusion: no raw sketch edges")
+        _face = _make_face(Part, _edges)
+        _face_world = _face.transformGeometry(_pl.toMatrix())
+        _pieces = []
+        if abs(float(towards or 0.0)) > 1e-9:
+            _pieces.append(_face_world.extrude(_normal * float(towards)))
+        if abs(float(opposite or 0.0)) > 1e-9:
+            _pieces.append(_face_world.extrude(_normal * -float(opposite)))
+        if not _pieces:
+            raise ValueError("Cannot extrude: towards and opposite are both zero")
+        _solid = _pieces[0]
+        for _piece in _pieces[1:]:
+            _solid = _solid.fuse(_piece)
+        _feat = doc.addObject("Part::Feature", feat_nm or "Solid")
+        _feat.Shape = _solid
+        doc.recompute()
+        return _feat
+
+    if mode in ("auto", "parametric_sketch"):
+        try:
+            feat = _create_parametric_extrusion()
+            fallback_reason = _shape_failure_reason(feat)
+            if fallback_reason is None:
+                extrusion_mode_used = "parametric_sketch"
+        except Exception as _exc:
+            fallback_reason = "parametric_error: " + str(_exc)
+            feat = None
+        if fallback_reason and mode == "parametric_sketch":
+            raise ValueError(
+                "Parametric sketch extrusion failed: " + fallback_reason
+            )
+
+    if mode == "robust_face" or (mode == "auto" and fallback_reason):
+        if feat is not None:
+            try:
+                doc.removeObject(feat.Name)
+            except Exception:
+                pass
+        feat = _create_robust_face_extrusion()
+        robust_reason = _shape_failure_reason(feat)
+        if robust_reason:
+            raise ValueError("Robust face extrusion failed: " + robust_reason)
+        extrusion_mode_used = "robust_face"
+
+    if feat is None:
+        raise ValueError("Failed to create extrusion feature")
 
     # World-space AABB + volume.
     try:
@@ -1773,7 +1859,7 @@ try:
 
     # Bind param_aliases to spreadsheet
     bound_params = []
-    if aliases:
+    if aliases and extrusion_mode_used == "parametric_sketch":
         # Find or create the FabricationParams spreadsheet
         sheet = doc.getObject("FabricationParams")
         if sheet is None:
@@ -1831,6 +1917,20 @@ try:
                 "property": prop_name,
                 "role": "thickness" if param_key == "towards" else param_key,
             }})
+    elif aliases:
+        # The robust-face fallback is intentionally stable geometry, not a
+        # sketch-driven parametric feature.  Report the missing binding so the
+        # caller can decide whether to rebuild through parametric_sketch mode.
+        for param_key, alias_name in aliases.items():
+            bound_params.append({{
+                "alias": alias_name,
+                "cell": None,
+                "value": {{"towards": towards, "opposite": opposite}}.get(param_key),
+                "unit": "mm",
+                "object": feat.Name,
+                "property": None,
+                "role": "unbound_fallback",
+            }})
 
     doc.recompute()
     doc.commitTransaction()
@@ -1843,6 +1943,10 @@ try:
         "bounding_box":        bbox,
         "volume_mm3":          round(volume, 4),
         "sketch_normal_world": sketch_normal_world,
+        "extrusion_mode_used": extrusion_mode_used,
+        "fallback_reason": (
+            fallback_reason if extrusion_mode_used == "robust_face" else None
+        ),
         "bound_params":        bound_params,
         "success":             volume > 0,
     }}
@@ -1862,13 +1966,14 @@ except Exception as _e:
         operation: str,
         result_name: str | None = None,
         keep_originals: bool = False,
+        boolean_mode: str = "auto",
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Combine two solids with a boolean operation (HistCAD semantics).
+        """Combine two solids with an explicit parametric boolean operation.
 
         Takes explicit base and tool objects — no auto-detection.  Use this
-        after ``execute_extrude`` / ``execute_revolve`` to realise the HistCAD
-        ``Join`` / ``Cut`` / ``Intersect`` feature operations:
+        after ``execute_extrude`` / ``execute_revolve`` / ``execute_helix`` to
+        realise ToolCAD-style explicit boolean actions:
 
         - ``"Join"``: union of base and tool (fuse).
         - ``"Cut"``: base minus tool.
@@ -1883,15 +1988,25 @@ except Exception as _e:
             result_name: Explicit FreeCAD object name for the result.
                 Auto-generated from the operation if None.
             keep_originals: When ``False`` (default) the base and tool objects
-                are removed from the document after the boolean, leaving only
-                the result.  Set ``True`` to keep them (hidden state useful
-                for debugging).
+                are kept as parametric dependencies but hidden from view.
+                Set ``True`` to keep them visible.
+            boolean_mode: ``"auto"`` (default), ``"parametric"``, or
+                ``"static_shape"``.  ``"auto"`` tries a parametric FreeCAD
+                boolean first and falls back to a direct shape boolean when the
+                parametric result is null, invalid, or zero-volume.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
             Dictionary with:
                 - feature_name: Name of the result solid.
+                - type_id: FreeCAD TypeId of the parametric boolean object.
                 - operation: The operation performed.
+                - base_object_name: Explicit base object used.
+                - tool_object_name: Explicit tool object used.
+                - dependency_preserved: ``True`` when base/tool references are
+                  retained for recompute.
+                - boolean_mode_used: Actual boolean path used.
+                - fallback_reason: Reason for static fallback, if any.
                 - base: ``{"name", "global_center", "volume_mm3"}`` of the
                   base solid before the boolean (``global_center`` is the
                   world-space AABB center).
@@ -1924,10 +2039,15 @@ if tool_obj is None:
 operation   = {operation!r}
 result_nm   = {result_name!r}
 keep_orig   = {keep_originals!r}
+mode        = {boolean_mode!r}
 
 if operation not in ("Join", "Cut", "Intersect"):
     raise ValueError(
         f"Invalid operation: {{operation}}. Use 'Join', 'Cut', or 'Intersect'.")
+if mode not in ("auto", "parametric", "static_shape"):
+    raise ValueError(
+        f"Invalid boolean_mode: {{mode}}. Use 'auto', 'parametric', "
+        "or 'static_shape'.")
 
 def _aabb_center(_sh):
     _b = _sh.BoundBox
@@ -1935,38 +2055,127 @@ def _aabb_center(_sh):
             round((_b.YMin + _b.YMax) / 2, 4),
             round((_b.ZMin + _b.ZMax) / 2, 4)]
 
+def _shape_failure_reason(_sh):
+    try:
+        if _sh.isNull():
+            return "null_shape"
+        try:
+            if not _sh.isValid():
+                return "invalid_shape"
+        except Exception:
+            pass
+        if _sh.Volume <= 1e-9:
+            return f"zero_volume_{{round(_sh.Volume, 9)}}"
+        return None
+    except Exception as _exc:
+        return "shape_error: " + str(_exc)
+
+def _direct_boolean_shape():
+    if operation == "Join":
+        return base_obj.Shape.fuse(tool_obj.Shape)
+    if operation == "Cut":
+        return base_obj.Shape.cut(tool_obj.Shape)
+    return base_obj.Shape.common(tool_obj.Shape)
+
+def _create_parametric_boolean():
+    if operation == "Join":
+        try:
+            _feat = doc.addObject("Part::Fuse", result_nm or operation)
+            _feat.Base = base_obj
+            _feat.Tool = tool_obj
+            return _feat
+        except Exception:
+            _feat = doc.addObject("Part::MultiFuse", result_nm or operation)
+            _feat.Shapes = [base_obj, tool_obj]
+            return _feat
+    if operation == "Cut":
+        _feat = doc.addObject("Part::Cut", result_nm or operation)
+        _feat.Base = base_obj
+        _feat.Tool = tool_obj
+        return _feat
+    try:
+        _feat = doc.addObject("Part::Common", result_nm or operation)
+        _feat.Base = base_obj
+        _feat.Tool = tool_obj
+        return _feat
+    except Exception:
+        _feat = doc.addObject("Part::MultiCommon", result_nm or operation)
+        _feat.Shapes = [base_obj, tool_obj]
+        return _feat
+
 doc.openTransaction("Execute Boolean")
 try:
-    base_shape = base_obj.Shape.copy()
-    tool_shape = tool_obj.Shape.copy()
-
-    if operation == "Join":
-        result_shape = base_shape.fuse(tool_shape)
-    elif operation == "Cut":
-        result_shape = base_shape.cut(tool_shape)
-    else:
-        result_shape = base_shape.common(tool_shape)
+    base_shape = base_obj.Shape
+    tool_shape = tool_obj.Shape
 
     base_center = _aabb_center(base_shape)
     tool_center = _aabb_center(tool_shape)
     center_distance = round(_math.sqrt(sum(
         (base_center[_i] - tool_center[_i]) ** 2 for _i in range(3))), 4)
 
-    feat = doc.addObject("Part::Feature", result_nm or operation)
-    feat.Shape = result_shape
+    feat = None
+    boolean_mode_used = None
+    fallback_reason = None
+    dependency_preserved = True
+
+    if mode in ("auto", "parametric"):
+        try:
+            feat = _create_parametric_boolean()
+            doc.recompute()
+            fallback_reason = _shape_failure_reason(feat.Shape)
+            if fallback_reason is None:
+                boolean_mode_used = "parametric"
+        except Exception as _exc:
+            fallback_reason = "parametric_error: " + str(_exc)
+            feat = None
+        if fallback_reason and mode == "parametric":
+            raise ValueError("Parametric boolean failed: " + fallback_reason)
+
+    if mode == "static_shape" or (mode == "auto" and fallback_reason):
+        direct_shape = _direct_boolean_shape()
+        direct_reason = _shape_failure_reason(direct_shape)
+        if mode == "static_shape" or direct_reason is None:
+            if feat is not None:
+                try:
+                    doc.removeObject(feat.Name)
+                except Exception:
+                    pass
+            feat = doc.addObject("Part::Feature", result_nm or operation)
+            feat.Shape = direct_shape
+            doc.recompute()
+            boolean_mode_used = "static_shape"
+            dependency_preserved = False
+        elif feat is None:
+            raise ValueError(
+                "Parametric boolean failed: "
+                + str(fallback_reason)
+                + "; static fallback failed: "
+                + str(direct_reason)
+            )
+
+    if feat is None:
+        raise ValueError("Failed to create boolean feature")
 
     if not keep_orig:
-        _base_nm, _tool_nm = base_obj.Name, tool_obj.Name
-        doc.removeObject(_base_nm)
-        if _tool_nm != _base_nm:
-            doc.removeObject(_tool_nm)
+        for _obj in (base_obj, tool_obj):
+            try:
+                _obj.ViewObject.Visibility = False
+            except Exception:
+                pass
 
-    doc.recompute()
-
+    result_shape = feat.Shape
     _rb = result_shape.BoundBox
     _result_ = {{
         "feature_name": feat.Name,
+        "type_id":      feat.TypeId,
         "operation":    operation,
+        "base_object_name": {base_object_name!r},
+        "tool_object_name": {tool_object_name!r},
+        "dependency_preserved": dependency_preserved,
+        "boolean_mode_used": boolean_mode_used,
+        "fallback_reason": (
+            fallback_reason if boolean_mode_used == "static_shape" else None
+        ),
         "base": {{
             "name":          {base_object_name!r},
             "global_center": base_center,
@@ -2011,8 +2220,8 @@ except Exception as _e:
     ) -> dict[str, Any]:
         """Revolve a sketch around an axis to create a 3-D feature.
 
-        Creates a ``PartDesign::Revolution`` or ``PartDesign::Groove``
-        depending on the ``operation`` parameter.
+        Creates a standalone ``PartDesign::Revolution``.  Boolean operations
+        must be performed by a separate explicit ``execute_boolean`` call.
 
         Args:
             sketch_name: Name of the sketch to revolve.
@@ -2020,8 +2229,7 @@ except Exception as _e:
                 ``[[base_x, base_y, base_z], [dir_x, dir_y, dir_z]]``.
             start: Start angle in degrees (default: 0.0).
             end: End angle in degrees (default: 360.0 for a full revolution).
-            operation: ``"NewBody"``, ``"Join"`` (Revolution), ``"Cut"``
-                (Groove), or ``"Intersect"``.
+            operation: Must be ``"NewBody"`` in the canonical pipeline.
             param_aliases: Maps parameter keys to spreadsheet alias names.
                 Supported keys: ``"start"``, ``"end"``.
             body_name: PartDesign Body. Auto-detected if None.
@@ -2035,6 +2243,11 @@ except Exception as _e:
         Raises:
             ValueError: If the sketch is not found or the operation fails.
         """
+        if operation != "NewBody":
+            raise ValueError(
+                "Canonical fabrication uses explicit boolean features; "
+                "execute_revolve only supports operation='NewBody'."
+            )
         bridge = await get_bridge()
         code = f"""
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
@@ -2067,10 +2280,7 @@ try:
     base_pt = FreeCAD.Vector(*axis_spec[0])
     dir_vec = FreeCAD.Vector(*axis_spec[1])
 
-    if operation in ("NewBody", "Join"):
-        feat = doc.addObject("PartDesign::Revolution", feat_nm or "Revolution")
-    else:
-        feat = doc.addObject("PartDesign::Groove", feat_nm or "Groove")
+    feat = doc.addObject("PartDesign::Revolution", feat_nm or "Revolution")
 
     feat.Profile  = sk
     feat.Angle    = end_ang - start_ang
@@ -2138,7 +2348,7 @@ except Exception as _e:
             pitch: Distance along the axis per full turn (mm, positive).
             turns: Total number of turns (positive).
             handedness: ``"Right"`` (default) or ``"Left"``.
-            operation: ``"NewBody"``, ``"Join"``, or ``"Cut"``.
+            operation: Must be ``"NewBody"`` in the canonical pipeline.
             param_aliases: Maps ``"pitch"`` or ``"turns"`` to spreadsheet alias
                 names for frontend sliders.
             body_name: PartDesign Body. Auto-detected if None.
@@ -2151,6 +2361,11 @@ except Exception as _e:
         Raises:
             ValueError: If the sketch is not found or the operation fails.
         """
+        if operation != "NewBody":
+            raise ValueError(
+                "Canonical fabrication uses explicit boolean features; "
+                "execute_helix only supports operation='NewBody'."
+            )
         bridge = await get_bridge()
         code = f"""
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
@@ -2712,6 +2927,39 @@ try:
                     affected.append(obj.Name)
                     break
 
+    # Include downstream parametric objects (for example Part::Fuse,
+    # Part::Cut, Part::Common) that depend on directly affected sketches or
+    # extrusions.  This is what makes a slider edit report the final boolean
+    # result, not only the source sketch.
+    affected_set = set(affected)
+    changed = True
+    while changed:
+        changed = False
+        for obj in doc.Objects:
+            if obj.Name in affected_set:
+                continue
+            deps = []
+            for attr in ("Base", "Tool"):
+                try:
+                    dep = getattr(obj, attr)
+                    if dep is not None:
+                        deps.append(dep)
+                except Exception:
+                    pass
+            try:
+                deps.extend(list(getattr(obj, "Shapes", []) or []))
+            except Exception:
+                pass
+            for dep in deps:
+                try:
+                    if dep.Name in affected_set:
+                        affected_set.add(obj.Name)
+                        affected.append(obj.Name)
+                        changed = True
+                        break
+                except Exception:
+                    pass
+
     doc.commitTransaction()
     _result_ = {{
         "alias":            alias_name,
@@ -2776,6 +3024,54 @@ except Exception as _e:
         expected_dof = intent.get("expected_dof")
         required_constraint_types = set(intent.get("required_constraint_types", []))
 
+        bridge = await get_bridge()
+
+        async def _geometry_snapshot() -> dict[str, Any]:
+            snapshot_code = f"""
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No active document")
+objects = []
+for obj in doc.Objects:
+    try:
+        if not hasattr(obj, "Shape") or obj.Shape.isNull():
+            continue
+        sh = obj.Shape
+        bb = sh.BoundBox
+        deps = []
+        for attr in ("Base", "Tool"):
+            try:
+                dep = getattr(obj, attr)
+                if dep is not None:
+                    deps.append(dep.Name)
+            except Exception:
+                pass
+        try:
+            deps.extend([dep.Name for dep in (getattr(obj, "Shapes", []) or [])])
+        except Exception:
+            pass
+        objects.append({{
+            "name": obj.Name,
+            "type_id": obj.TypeId,
+            "volume": round(sh.Volume, 6),
+            "bounding_box": [
+                round(bb.XMin, 6), round(bb.XMax, 6),
+                round(bb.YMin, 6), round(bb.YMax, 6),
+                round(bb.ZMin, 6), round(bb.ZMax, 6),
+            ],
+            "dependencies": deps,
+        }})
+    except Exception:
+        pass
+_result_ = {{"objects": objects}}
+"""
+            exec_result = await bridge.execute_python(snapshot_code)
+            if exec_result.success and exec_result.result:
+                return exec_result.result
+            return {"objects": []}
+
+        geometry_before = await _geometry_snapshot()
+
         edit_result: dict[str, Any] | None = None
         edit_error: str | None = None
         try:
@@ -2805,7 +3101,6 @@ except Exception as _e:
             target_delta = None
             target_hit = target_after.get("value") == value
 
-        bridge = await get_bridge()
         validation_code = f"""
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
@@ -2866,6 +3161,45 @@ _result_ = {{
                 "shape_errors": [],
                 "sketches": [],
             }
+        )
+
+        geometry_after = await _geometry_snapshot()
+
+        def _shape_signature(item: dict[str, Any]) -> tuple[Any, Any]:
+            return item.get("volume"), tuple(item.get("bounding_box") or [])
+
+        before_shapes = {
+            item.get("name"): item
+            for item in geometry_before.get("objects", [])
+            if item.get("name")
+        }
+        after_shapes = {
+            item.get("name"): item
+            for item in geometry_after.get("objects", [])
+            if item.get("name")
+        }
+        affected_names = set((edit_result or {}).get("affected_features") or [])
+        geometry_records = []
+        for name in sorted(affected_names & set(before_shapes) & set(after_shapes)):
+            before_sig = _shape_signature(before_shapes[name])
+            after_sig = _shape_signature(after_shapes[name])
+            changed = before_sig != after_sig
+            geometry_records.append(
+                {
+                    "kind": "geometry_update",
+                    "object": name,
+                    "before": before_shapes[name],
+                    "after": after_shapes[name],
+                    "changed": changed,
+                    "satisfied": changed,
+                    "supported": True,
+                }
+            )
+        geometry_supported = bool(geometry_records)
+        geometry_update_ok = (
+            all(item["satisfied"] for item in geometry_records)
+            if geometry_supported
+            else True
         )
 
         def _numeric_close(a: Any, b: Any) -> bool:
@@ -3001,6 +3335,7 @@ _result_ = {{
             *free_records,
             *sketch_constraint_records,
             *shape_records,
+            *geometry_records,
         ]
 
         supported_count = sum(1 for item in all_preserved_records if item["supported"])
@@ -3014,7 +3349,7 @@ _result_ = {{
             else 1.0
         )
         rebuild_success = validation.get("rebuild_success") is True
-        validation_ok = validation.get("validation_ok") is True
+        validation_ok = validation.get("validation_ok") is True and geometry_update_ok
         target_bound = bool(target_after.get("bound_to"))
         er = 1.0 if target_hit and rebuild_success and validation_ok else 0.0
         oes = er * cpcsr
@@ -3060,6 +3395,7 @@ _result_ = {{
                 else 1.0
             ),
             "shape_validity": 0.0 if validation.get("shape_errors") else 1.0,
+            "geometry_update": 1.0 if geometry_update_ok else 0.0,
         }
         weighted_reward = (
             0.25 * component_scores["target_hit"]
@@ -3085,6 +3421,7 @@ _result_ = {{
             "preserved_records": preserved_records,
             "coupled_records": coupled_records,
             "free_records": free_records,
+            "geometry_records": geometry_records,
             "sketch_constraint_records": sketch_constraint_records,
             "shape_records": shape_records,
             "all_preserved_records": all_preserved_records,
@@ -3107,6 +3444,9 @@ _result_ = {{
             "edit_result": edit_result,
             "edit_error": edit_error,
             "validation": validation,
+            "geometry_before": geometry_before,
+            "geometry_after": geometry_after,
+            "geometry_update_ok": geometry_update_ok,
             "success": edit_error is None,
         }
 
@@ -3245,11 +3585,10 @@ _result_ = {{
         1. ``create_coordinate_system`` for each ``coordinate_systems`` entry.
         2. ``create_sketch_geometry`` + ``apply_sketch_constraints`` for each
            ``sketches`` entry.
-        3. ``execute_extrude`` / ``execute_revolve`` / ``execute_helix`` for
-           each ``features`` entry.  For extrude features with a ``Join`` /
-           ``Cut`` / ``Intersect`` operation, the solid is first created with
-           ``execute_extrude`` and then combined with the accumulated solid
-           via ``execute_boolean``.
+        3. ``execute_extrude`` / ``execute_revolve`` / ``execute_helix`` /
+           ``execute_boolean`` for each explicit ``features`` entry.  Boolean
+           features must name their base and tool objects; there is no implicit
+           accumulated-solid state.
         4. ``feature_fillet`` / ``feature_chamfer`` for each ``finishes`` entry.
 
         The batch path is recommended for production automation.  For RL
@@ -3336,40 +3675,73 @@ _result_ = {{
                 steps_completed += 1
 
         # Step 3: Features
-        # current_solid tracks the accumulated solid so that HistCAD
-        # Join/Cut/Intersect operations can be realised as an extrude followed
-        # by an explicit execute_boolean(base=current_solid, tool=new solid).
-        current_solid: str | None = None
+        object_name_map: dict[str, str] = {}
+
+        def _resolve_object_ref(_name: str | None) -> str | None:
+            if _name is None:
+                return None
+            return object_name_map.get(_name, _name)
+
         for feat_spec in fab_plan.features:
             sk_nm = sketch_name_map.get(feat_spec.sketch_name, feat_spec.sketch_name)
             params = feat_spec.params
             aliases = feat_spec.param_aliases or fab_plan.param_aliases
 
             if feat_spec.type == "extrude":
+                if feat_spec.operation != "NewBody":
+                    raise ValueError(
+                        "Canonical FabricationPlan requires explicit boolean "
+                        f"features; extrude operation must be 'NewBody', got "
+                        f"{feat_spec.operation!r} for "
+                        f"{feat_spec.feature_name or sk_nm!r}."
+                    )
                 feat_result = await execute_extrude(  # type: ignore[name-defined]
                     sketch_name=sk_nm,
                     towards=params.get("towards", 10.0),
                     opposite=params.get("opposite", 0.0),
                     param_aliases=aliases or None,
                     feature_name=feat_spec.feature_name,
+                    extrusion_mode=params.get("extrusion_mode", "auto"),
                     doc_name=doc_name,
                 )
                 steps_completed += 1
-                op = feat_spec.operation
-                if op in ("Join", "Cut", "Intersect") and current_solid:
-                    feat_result = await execute_boolean(  # type: ignore[name-defined]
-                        base_object_name=current_solid,
-                        tool_object_name=feat_result["feature_name"],
-                        operation=op,
-                        doc_name=doc_name,
+                created_name = feat_result.get("feature_name", "")
+                if feat_spec.feature_name and created_name:
+                    object_name_map[feat_spec.feature_name] = created_name
+                feature_names.append(created_name)
+                last_body_name = feat_result.get("body_name") or created_name
+                continue
+            if feat_spec.type == "boolean":
+                operation = params.get("operation", feat_spec.operation)
+                base_ref = _resolve_object_ref(params.get("base_object_name"))
+                tool_ref = _resolve_object_ref(params.get("tool_object_name"))
+                if not base_ref or not tool_ref:
+                    raise ValueError(
+                        "Boolean feature requires params.base_object_name and "
+                        "params.tool_object_name"
                     )
-                current_solid = feat_result.get("feature_name") or current_solid
-                feature_names.append(feat_result.get("feature_name", ""))
-                last_body_name = feat_result.get("body_name") or feat_result.get(
-                    "feature_name"
+                feat_result = await execute_boolean(  # type: ignore[name-defined]
+                    base_object_name=base_ref,
+                    tool_object_name=tool_ref,
+                    operation=operation,
+                    result_name=feat_spec.feature_name,
+                    boolean_mode=params.get("boolean_mode", "auto"),
+                    doc_name=doc_name,
                 )
+                steps_completed += 1
+                created_name = feat_result.get("feature_name", "")
+                if feat_spec.feature_name and created_name:
+                    object_name_map[feat_spec.feature_name] = created_name
+                feature_names.append(created_name)
+                last_body_name = created_name
                 continue
             if feat_spec.type == "revolve":
+                if feat_spec.operation != "NewBody":
+                    raise ValueError(
+                        "Canonical FabricationPlan requires explicit boolean "
+                        f"features; revolve operation must be 'NewBody', got "
+                        f"{feat_spec.operation!r}."
+                    )
                 feat_result = await execute_revolve(  # type: ignore[name-defined]
                     sketch_name=sk_nm,
                     axis=params.get("axis", [[0, 0, 0], [0, 0, 1]]),
@@ -3381,6 +3753,12 @@ _result_ = {{
                     doc_name=doc_name,
                 )
             elif feat_spec.type == "helix":
+                if feat_spec.operation != "NewBody":
+                    raise ValueError(
+                        "Canonical FabricationPlan requires explicit boolean "
+                        f"features; helix operation must be 'NewBody', got "
+                        f"{feat_spec.operation!r}."
+                    )
                 feat_result = await execute_helix(  # type: ignore[name-defined]
                     sketch_name=sk_nm,
                     axis=params.get("axis", [[0, 0, 0], [0, 0, 1]]),
@@ -3393,10 +3771,13 @@ _result_ = {{
                     doc_name=doc_name,
                 )
             else:
-                continue
+                raise ValueError(f"Unsupported feature type: {feat_spec.type!r}")
 
-            feature_names.append(feat_result.get("feature_name", ""))
-            last_body_name = feat_result.get("body_name")
+            created_name = feat_result.get("feature_name", "")
+            if feat_spec.feature_name and created_name:
+                object_name_map[feat_spec.feature_name] = created_name
+            feature_names.append(created_name)
+            last_body_name = feat_result.get("body_name") or created_name
             steps_completed += 1
 
         # Step 4: Finishing

@@ -979,16 +979,17 @@ class TestConnectorTemplates:
         mcp.tool = tool_decorator
         return mcp
 
-    def test_register_template_tools_registers_l_connector(
+    def test_register_template_tools_registers_template_tools(
         self, mock_mcp: MagicMock
     ) -> None:
-        """Template registration exposes the L connector resolver."""
+        """Template registration exposes resolve_template and L connector tool."""
         from freecad_mcp.tools.templates import register_template_tools
 
         async def get_bridge() -> AsyncMock:
             return AsyncMock()
 
         register_template_tools(mock_mcp, get_bridge)
+        assert "resolve_template" in mock_mcp._registered_tools
         assert "resolve_l_connector_template" in mock_mcp._registered_tools
 
     @pytest.mark.asyncio
@@ -1001,8 +1002,13 @@ class TestConnectorTemplates:
 
         register_template_tools(mock_mcp, get_bridge)
         result = await mock_mcp._registered_tools["resolve_l_connector_template"](
-            description="L connector 5cm 8cm 3cm",
-            thickness=6.0,
+            slots={
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "arm_x_width": 30.0,
+                "arm_y_width": 30.0,
+                "thickness": 6.0,
+            },
         )
 
         assert len(result["coordinate_systems"]) == 1
@@ -1023,20 +1029,31 @@ class TestConnectorTemplates:
             "thickness",
         ]
 
-    def test_l_connector_template_parses_keyed_chinese_dimensions(self) -> None:
-        """Chinese long/short/width/thickness labels map to the intended aliases."""
-        from freecad_mcp.tools.templates.connectors import build_l_connector_plan
+    @pytest.mark.asyncio
+    async def test_resolve_template_dispatcher(self, mock_mcp: MagicMock) -> None:
+        """resolve_template routes IntentSpec to the correct domain template."""
+        from freecad_mcp.tools.templates import register_template_tools
 
-        plan = build_l_connector_plan(
-            description="生成一个L型焊装连接件, 长边80mm, 短边50mm, 宽度30mm, 厚度6mm"
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        result = await mock_mcp._registered_tools["resolve_template"](
+            {
+                "template_name": "l_connector",
+                "slots": {
+                    "arm_x_length": 50.0,
+                    "arm_y_length": 80.0,
+                    "width": 30.0,
+                    "thickness": 6.0,
+                },
+                "slot_bindings": [
+                    "arm_x_width = width",
+                    "arm_y_width = width",
+                ],
+            }
         )
-        sketch = plan.sketches[0].sketch
-        length_constraints = plan.sketches[0].constraints["Length"]
 
-        assert sketch["line_1"]["end"] == [50.0, 0.0]
-        assert sketch["line_6"]["end"] == [0.0, 0.0]
-        assert length_constraints[0][1]["length"] == 50.0
-        assert length_constraints[1][1]["length"] == 30.0
-        assert length_constraints[2][1]["length"] == 30.0
-        assert length_constraints[3][1]["length"] == 80.0
-        assert plan.features[0].params["towards"] == 6.0
+        assert result["metadata"]["template"] == "l_connector"
+        assert result["metadata"]["intent_spec"]["template_name"] == "l_connector"
+        assert result["features"][0]["params"]["towards"] == 6.0

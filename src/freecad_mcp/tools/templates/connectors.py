@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Any
 
 from freecad_mcp.tools.fabrication_schema import (
@@ -14,66 +13,6 @@ from freecad_mcp.tools.fabrication_schema import (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-
-_DIMENSION_RE = re.compile(
-    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>mm|毫米|cm|厘米|m|米|in|inch|英寸)?",
-    re.IGNORECASE,
-)
-_KEYED_DIMENSION_RE = re.compile(
-    r"(?P<key>长边|长臂|长|短边|短臂|短|宽度|全局宽度|宽|厚度|厚)"
-    r"[^0-9]{0,12}"
-    r"(?P<value>\d+(?:\.\d+)?)\s*"
-    r"(?P<unit>mm|毫米|cm|厘米|m|米|in|inch|英寸)?",
-    re.IGNORECASE,
-)
-
-
-def _unit_to_mm(value: float, unit: str | None) -> float:
-    normalized = (unit or "mm").lower()
-    if normalized in {"cm", "厘米"}:
-        return value * 10.0
-    if normalized in {"m", "米"}:
-        return value * 1000.0
-    if normalized in {"in", "inch", "英寸"}:
-        return value * 25.4
-    return value
-
-
-def _numbers_from_description(description: str) -> list[float]:
-    values: list[float] = []
-    for match in _DIMENSION_RE.finditer(description):
-        values.append(_unit_to_mm(float(match.group("value")), match.group("unit")))
-    return values
-
-
-def _keyed_dimensions_from_description(description: str) -> dict[str, float]:
-    values: dict[str, float] = {}
-    for match in _KEYED_DIMENSION_RE.finditer(description):
-        key = match.group("key")
-        value = _unit_to_mm(float(match.group("value")), match.group("unit"))
-        if key in {"长边", "长臂", "长"}:
-            values["long_arm"] = value
-        elif key in {"短边", "短臂", "短"}:
-            values["short_arm"] = value
-        elif key in {"宽度", "全局宽度", "宽"}:
-            values["width"] = value
-        elif key in {"厚度", "厚"}:
-            values["thickness"] = value
-    return values
-
-
-def _coalesce_dimension(
-    explicit_value: float | None,
-    fallback_values: list[float],
-    index: int,
-    default: float,
-) -> float:
-    if explicit_value is not None:
-        return float(explicit_value)
-    if index < len(fallback_values):
-        return float(fallback_values[index])
-    return default
 
 
 def _plane_to_coordinate_system(plane: dict[str, Any] | None) -> CoordinateSystemSpec:
@@ -92,53 +31,40 @@ def _plane_to_coordinate_system(plane: dict[str, Any] | None) -> CoordinateSyste
 
 def build_l_connector_plan(
     *,
-    description: str = "",
-    arm_x_length: float | None = None,
-    arm_y_length: float | None = None,
-    arm_x_width: float | None = None,
-    arm_y_width: float | None = None,
-    thickness: float | None = None,
+    slots: dict[str, float],
     plane: dict[str, Any] | None = None,
 ) -> FabricationPlan:
-    """Build a FabricationPlan for a fully constrained L connector."""
-    parsed = _numbers_from_description(description)
-    keyed = _keyed_dimensions_from_description(description)
+    """Build a FabricationPlan for a fully constrained L connector.
 
-    short_arm = keyed.get("short_arm")
-    long_arm = keyed.get("long_arm")
-    global_width = keyed.get("width")
-    keyed_thickness = keyed.get("thickness")
+    Args:
+        slots: Resolved dimension slots in millimetres.  Required keys:
+            ``arm_x_length``, ``arm_y_length``, ``arm_x_width``, ``arm_y_width``,
+            ``thickness``.
+        plane: Optional sketch-plane placement (euler_angles, translation, name).
 
-    lx = _coalesce_dimension(
-        arm_x_length,
-        [short_arm] if short_arm is not None else parsed,
-        0,
-        50.0,
-    )
-    ly = _coalesce_dimension(
-        arm_y_length,
-        [long_arm] if long_arm is not None else parsed,
-        0 if long_arm is not None else 1,
-        80.0,
-    )
-    wx = _coalesce_dimension(
-        arm_x_width,
-        [global_width] if global_width is not None else parsed,
-        0 if global_width is not None else 2,
-        30.0,
-    )
-    wy = _coalesce_dimension(
-        arm_y_width,
-        [global_width] if global_width is not None else parsed,
-        0 if global_width is not None else 3,
-        wx,
-    )
-    thick = _coalesce_dimension(
-        thickness,
-        [keyed_thickness] if keyed_thickness is not None else parsed,
-        0 if keyed_thickness is not None else 4,
-        10.0,
-    )
+    Returns:
+        FabricationPlan ready for ``execute_fabrication_plan()``.
+
+    Raises:
+        ValueError: If required slots are missing or geometry is infeasible.
+    """
+    required = [
+        "arm_x_length",
+        "arm_y_length",
+        "arm_x_width",
+        "arm_y_width",
+        "thickness",
+    ]
+    missing = [name for name in required if name not in slots]
+    if missing:
+        msg = f"Missing required slots: {', '.join(missing)}"
+        raise ValueError(msg)
+
+    lx = float(slots["arm_x_length"])
+    ly = float(slots["arm_y_length"])
+    wx = float(slots["arm_x_width"])
+    wy = float(slots["arm_y_width"])
+    thick = float(slots["thickness"])
 
     if min(lx, ly, wx, wy, thick) <= 0:
         raise ValueError("All L connector dimensions must be positive")
@@ -278,22 +204,19 @@ def register_connector_templates(
 
     @mcp.tool()
     async def resolve_l_connector_template(
-        description: str = "",
-        arm_x_length: float | None = None,
-        arm_y_length: float | None = None,
-        arm_x_width: float | None = None,
-        arm_y_width: float | None = None,
-        thickness: float | None = None,
+        slots: dict[str, float],
         plane: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Resolve L connector business intent into a FabricationPlan."""
-        plan = build_l_connector_plan(
-            description=description,
-            arm_x_length=arm_x_length,
-            arm_y_length=arm_y_length,
-            arm_x_width=arm_x_width,
-            arm_y_width=arm_y_width,
-            thickness=thickness,
-            plane=plane,
-        )
+        """Build an L connector FabricationPlan from resolved dimension slots.
+
+        Args:
+            slots: Dimension values in mm (arm_x_length, arm_y_length,
+                arm_x_width, arm_y_width, thickness).  Use ``resolve_template``
+                when starting from a full IntentSpec.
+            plane: Optional sketch-plane placement dict.
+
+        Returns:
+            FabricationPlan dict ready for ``execute_fabrication_plan()``.
+        """
+        plan = build_l_connector_plan(slots=slots, plane=plane)
         return plan.to_dict()

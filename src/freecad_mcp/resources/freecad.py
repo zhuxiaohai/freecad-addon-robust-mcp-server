@@ -1793,6 +1793,31 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         },
                     ],
                 },
+                "templates": {
+                    "description": (
+                        "Layer 2 domain template tools. Compile a structured IntentSpec "
+                        "into a FabricationPlan deterministically. Natural language parsing "
+                        "happens upstream in the Intent Model — not here."
+                    ),
+                    "tools": [
+                        {
+                            "name": "resolve_template",
+                            "description": (
+                                "Compile an IntentSpec dict into a FabricationPlan via the "
+                                "template registry. Fully deterministic — no NL parsing."
+                            ),
+                            "key_params": ["intent"],
+                        },
+                        {
+                            "name": "resolve_l_connector_template",
+                            "description": (
+                                "Build an L connector FabricationPlan from resolved dimension "
+                                "slots in mm. Prefer resolve_template for full IntentSpec."
+                            ),
+                            "key_params": ["slots", "plane"],
+                        },
+                    ],
+                },
                 "validation": {
                     "description": "Object and document validation for error detection",
                     "tools": [

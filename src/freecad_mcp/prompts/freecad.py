@@ -674,12 +674,19 @@ await create_connector(
 - Legacy `Part::Feature` connectors are still readable for backward compatibility""",
             "fabrication": """# HistCAD-Style Layer 1 Fabrication Primitives
 
-## Two-Layer Architecture
+## Three-Layer Architecture
 
-**Layer 2** (domain templates in tools/templates/) converts user intent into a
-FabricationPlan.  **Layer 1** (this module) executes it deterministically.
-The LLM or RL agent works at the Layer 1 level when exploring constraint
-strategies, or calls `execute_fabrication_plan` for batch execution.
+**Intent Model** (external — Cursor, skill/RAG, Policy 1) converts natural
+language into a structured **IntentSpec** (`template_name`, `slots`,
+`slot_bindings`, `placement`).
+
+**Layer 2** (domain templates in tools/templates/) compiles IntentSpec into a
+FabricationPlan **deterministically** — no LLM at this stage.  Use
+`resolve_template(intent)`.
+
+**Layer 1** (this module) executes the plan deterministically.  The RL CAD agent
+works at Layer 1 when exploring constraint strategies, or calls
+`execute_fabrication_plan` for batch execution.
 
 ## Standard Workflow (step-by-step)
 
@@ -802,11 +809,15 @@ create_sketch_geometry(
 
 ## Batch Execution
 
-For production automation, use `execute_fabrication_plan` with a plan
-dict produced by a Layer 2 domain template tool:
+For production automation, compile an IntentSpec then batch-execute:
 
 ```python
-plan = await resolve_connector_params("L型连接件,5cmx8cm,宽3cm")
+intent = {
+    "template_name": "l_connector",
+    "slots": {"arm_x_length": 50, "arm_y_length": 80, "width": 30},
+    "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
+}
+plan = await resolve_template(intent)
 result = await execute_fabrication_plan(plan)
 # → result["tunable_params"] for frontend slider panel
 # → result["bounding_box"] for downstream assembly

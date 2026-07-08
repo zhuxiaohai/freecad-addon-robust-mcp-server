@@ -3579,8 +3579,8 @@ _result_ = {{
 
         This tool is the batch-execution bridge between Layer 2 domain template
         tools and the Layer 1 generic primitives.  It accepts a
-        ``FabricationPlan`` dict (as returned by domain template tools such as
-        ``resolve_connector_params``) and drives:
+        ``FabricationPlan`` dict (as returned by ``resolve_template`` or domain
+        template tools such as ``resolve_l_connector_template``) and drives:
 
         1. ``create_coordinate_system`` for each ``coordinate_systems`` entry.
         2. ``create_sketch_geometry`` + ``apply_sketch_constraints`` for each
@@ -3617,7 +3617,19 @@ _result_ = {{
         Example:
             Execute a plan produced by a domain template::
 
-                plan = await resolve_connector_params("L型连接件,5cmx8cm,宽3cm")
+                intent = {
+                    "template_name": "l_connector",
+                    "slots": {
+                        "arm_x_length": 50,
+                        "arm_y_length": 80,
+                        "width": 30,
+                    },
+                    "slot_bindings": [
+                        "arm_x_width = width",
+                        "arm_y_width = width",
+                    ],
+                }
+                plan = await resolve_template(intent)
                 result = await execute_fabrication_plan(plan)
                 # result["tunable_params"] → [{alias:"arm_length",...}]
         """

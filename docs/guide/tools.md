@@ -491,15 +491,19 @@ HistCAD-style generic fabrication primitives for parametric solid modeling.
 The LLM or RL agent specifies geometry and constraints using kernel-independent
 JSON schemas; the adapter translates them deterministically to FreeCAD API calls.
 
-### Two-Layer Architecture
+### Three-Layer Architecture
 
 ```text
-User Intent (L0–L2)
+User Intent (L0–L2, natural language)
+    │
+    ▼
+Intent Model (external — Cursor, skill/RAG, Policy 1)
+    IntentSpec { template_name, slots, slot_bindings, placement }
     │
     ▼
 Layer 2 — Domain Template Tools  (tools/templates/)
-    e.g. resolve_connector_params() → FabricationPlan
-    │  FabricationPlan dict
+    resolve_template(intent) → FabricationPlan   [deterministic]
+    │
     ▼
 Layer 1 — Generic Fabrication Primitives  (these tools)
     create_coordinate_system → create_sketch_geometry
@@ -508,6 +512,16 @@ Layer 1 — Generic Fabrication Primitives  (these tools)
     → feature_fillet / chamfer
     → list_tunable_params / set_tunable_param
 ```
+
+### Layer 2 Template Tools
+
+| Tool                           | Description                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| `resolve_template`             | Compile an IntentSpec dict into a FabricationPlan (deterministic).                    |
+| `resolve_l_connector_template` | Build an L connector plan from resolved dimension slots (mm).                         |
+
+IntentSpec schema: ``freecad_mcp.intent.schema.IntentSpec``.  Natural language
+parsing happens upstream in the Intent Model — not in template tools.
 
 ### Group A: Coordinate System
 

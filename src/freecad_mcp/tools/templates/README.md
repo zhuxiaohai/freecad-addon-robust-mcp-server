@@ -1,7 +1,8 @@
 # Layer 2: Domain Template Tools
 
-This directory contains scene-specific template tools that bridge
-natural-language user intent and the generic Layer 1 fabrication primitives.
+This directory contains scene-specific template tools that compile a structured
+**IntentSpec** (from an external Intent Model) into a **FabricationPlan** for
+Layer 1 generic fabrication primitives.
 
 ## Architecture Overview
 
@@ -9,18 +10,42 @@ natural-language user intent and the generic Layer 1 fabrication primitives.
 User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
           │
           ▼
-   Layer 2 Template Tool
-   resolve_connector_params(description) → FabricationPlan
+   Intent Model (external — Cursor, skill/RAG, Policy 1)
+   NL → IntentSpec { template_name, slots, slot_bindings, placement }
           │
-          │  FabricationPlan (typed schema, see fabrication_schema.py)
+          ▼
+   Layer 2 Template Tool  [deterministic, no LLM]
+   resolve_template(intent) → FabricationPlan
+          │
           ▼
    Layer 1 Generic Primitives
-   create_coordinate_system()
-   create_sketch_geometry() + apply_sketch_constraints()
-   execute_extrude()
-   feature_fillet()
-   list_tunable_params() / set_tunable_param()
+   execute_fabrication_plan(plan)
 ```
+
+Natural language parsing is **not** done in this package.  The Intent Model
+produces structured slots; templates compile them deterministically.
+
+## IntentSpec Contract
+
+See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
+
+```json
+{
+  "template_name": "l_connector",
+  "slots": {
+    "arm_x_length": 50,
+    "arm_y_length": 80,
+    "width": 30,
+    "thickness": 10
+  },
+  "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
+  "assumptions": ["unit=mm", "width applies to both arms"]
+}
+```
+
+- ``slot_bindings``: semantic slot coupling — compiled by the template, **not**
+  passed through to FabricationPlan geometric constraints.
+- ``placement``: optional sketch-plane placement — passed through as ``plane``.
 
 ## Adding a New Domain Template
 
@@ -28,87 +53,62 @@ User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
 
 ```text
 tools/templates/
-├── __init__.py          ← register here
+├── __init__.py          ← register resolve_template + domain tools
 ├── connectors.py        ← connector domain (example)
-├── structural.py        ← structural elements
 └── README.md            ← this file
 ```
 
-### 2. Implement the template tool
+### 2. Implement the plan builder
 
 ```python
-# tools/templates/connectors.py
-
-from freecad_mcp.tools.fabrication_schema import (
-    CoordinateSystemSpec, FabricationPlan, FeatureSpec, FinishSpec, SketchSpec,
-)
-
-
-def register_connector_templates(mcp, get_bridge):
-    """Register connector domain template tools."""
-
-    @mcp.tool()
-    async def resolve_connector_params(description: str) -> dict:
-        """Convert a connector description to a FabricationPlan.
-
-        Args:
-            description: Natural language, e.g. "L型连接件，5cm×8cm，宽3cm"
-
-        Returns:
-            FabricationPlan dict ready for execute_fabrication_plan().
-
-        Example param_aliases exposed as frontend sliders:
-            - short_arm_length: 短臂长度 (mm)
-            - long_arm_length:  长臂长度 (mm)
-            - width:            全局宽度 (mm)
-            - thickness:        壁厚 (mm)
-        """
-        # TODO: use RAG over product knowledge base to resolve ambiguities
-        # Parse description → extract dimensions
-        # Build and return FabricationPlan
-        plan = FabricationPlan(
-            coordinate_systems=[...],
-            sketches=[...],
-            features=[...],
-            finishes=[...],
-        )
-        return plan.to_dict()
+def build_my_part_plan(*, slots: dict[str, float], plane: dict | None = None) -> FabricationPlan:
+  # validate slots, build sketch + constraints + features
+  return FabricationPlan(...)
 ```
 
-### 3. Register in `__init__.py`
+### 3. Register in intent registry
 
 ```python
-# In register_template_tools():
-from freecad_mcp.tools.templates.connectors import register_connector_templates
-register_connector_templates(mcp, get_bridge)
+# freecad_mcp/intent/registry.py
+TEMPLATE_BUILDERS["my_part"] = _build_my_part_from_intent
+TEMPLATE_SLOT_SCHEMAS["my_part"] = SlotSchema(required=[...], defaults={...})
+```
+
+### 4. Register MCP tools (optional domain-specific shortcut)
+
+```python
+# In register_<domain>_templates():
+@mcp.tool()
+async def resolve_my_part_template(slots: dict[str, float], ...) -> dict:
+    return build_my_part_plan(slots=slots).to_dict()
 ```
 
 ## Contract Rules for Template Tools
 
 Every template tool MUST:
 
-1. Accept at minimum a `description: str` parameter.
-2. Return `FabricationPlan.to_dict()` — a plain `dict[str, Any]`.
+1. Accept structured ``slots`` or a full ``IntentSpec`` dict — **never** natural language.
+2. Return ``FabricationPlan.to_dict()`` — a plain ``dict[str, Any]``.
 3. Never call the FreeCAD API directly — all CAD execution is Layer 1's job.
-4. Document which `param_aliases` it exposes (these become frontend sliders).
-5. Validate required dimensions and raise `ValueError` for unresolvable inputs.
+4. Document which ``param_aliases`` it exposes (these become frontend sliders).
+5. Validate required slots and raise ``ValueError`` for infeasible geometry.
 
-## Typical Workflow for an RL Agent
-
-The RL agent can use templates at the geometry level while learning constraints:
+## Typical Workflow
 
 ```text
-Agent calls: resolve_connector_params("L型连接件，5cm×8cm，宽3cm")
-  → Returns FabricationPlan with:
-      sketches[].sketch      ← geometry provided by template
-      sketches[].constraints ← empty dict  (RL agent fills this in)
+# 1. Intent Model (Cursor) produces IntentSpec from user NL
+intent = {
+    "template_name": "l_connector",
+    "slots": {"arm_x_length": 50, "arm_y_length": 80, "width": 30},
+    "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
+}
 
-Agent fills in constraints:
-  apply_sketch_constraints("Sketch001", {...agent-generated constraints...})
+# 2. Deterministic template compilation
+plan = await resolve_template(intent)
 
-Agent executes features:
-  execute_fabrication_plan({...plan with filled constraints...})
+# 3. Deterministic CAD execution
+result = await execute_fabrication_plan(plan)
 ```
 
-This lets the RL policy focus on constraint strategy while the template
-handles the geometry parameterization that requires domain knowledge.
+For RL training on Layer 1 tool trajectories, the agent can call primitives
+individually instead of batch execution — see the fabrication prompt.

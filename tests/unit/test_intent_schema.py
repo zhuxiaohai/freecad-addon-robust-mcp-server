@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from freecad_mcp.intent.registry import resolve_intent_to_plan, validate_intent
-from freecad_mcp.intent.schema import IntentSpec, apply_slot_bindings
+from freecad_mcp.intent.schema import HoleArraySpec, IntentSpec, apply_slot_bindings
 
 
 class TestIntentSpec:
@@ -26,6 +26,36 @@ class TestIntentSpec:
         assert restored.assumptions == ["unit=mm"]
         assert restored.slot_bindings == ["arm_x_width = width"]
         assert restored.placement == {"translation": [0.0, 0.0, 100.0]}
+
+    def test_round_trip_with_hole_groups(self) -> None:
+        """hole_groups survive dict serialisation."""
+        spec = IntentSpec(
+            template_name="l_connector",
+            slots={"arm_x_length": 50.0, "arm_y_length": 80.0, "width": 30.0},
+            hole_groups=[
+                HoleArraySpec(
+                    face_id="arm_x_top",
+                    count_u=2,
+                    count_v=2,
+                    diameter=6.0,
+                )
+            ],
+        )
+        restored = IntentSpec.from_dict(spec.to_dict())
+        assert len(restored.hole_groups) == 1
+        assert restored.hole_groups[0].face_id == "arm_x_top"
+        assert restored.hole_groups[0].count_u == 2
+        assert restored.hole_groups[0].diameter == 6.0
+
+    def test_hole_groups_default_empty(self) -> None:
+        """Legacy IntentSpec dicts without hole_groups deserialise cleanly."""
+        restored = IntentSpec.from_dict(
+            {
+                "template_name": "l_connector",
+                "slots": {"arm_x_length": 50.0},
+            }
+        )
+        assert restored.hole_groups == []
 
 
 class TestApplySlotBindings:

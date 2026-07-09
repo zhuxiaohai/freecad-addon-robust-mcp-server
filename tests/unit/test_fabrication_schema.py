@@ -37,6 +37,22 @@ class TestCoordinateSystemSpec:
         d = cs.to_dict()
         assert set(d.keys()) == {"euler_angles", "translation", "name"}
 
+    def test_placement_expressions_round_trip(self) -> None:
+        """offset_expressions survive serialisation (legacy Placement keys migrate)."""
+        cs = CoordinateSystemSpec(
+            [0, 0, 0],
+            [20, 0, 10],
+            name="CS_arm_x_top",
+            attachment_support={"feature_name": "L_Connector_Solid"},
+            offset_expressions={
+                "AttachmentOffset.Base.x": "FabricationParams.arm_y_width",
+                "AttachmentOffset.Base.z": "FabricationParams.thickness",
+            },
+        )
+        cs2 = CoordinateSystemSpec.from_dict(cs.to_dict())
+        assert cs2.offset_expressions == cs.offset_expressions
+        assert cs2.attachment_support == {"feature_name": "L_Connector_Solid"}
+
     def test_from_dict_missing_name_defaults_none(self) -> None:
         """from_dict tolerates a missing 'name' key."""
         d = {"euler_angles": [0, 0, 0], "translation": [0, 0, 0]}

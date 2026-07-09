@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from freecad_mcp.intent.schema import HoleArraySpec
 from freecad_mcp.tools.fabrication_schema import (
     CoordinateSystemSpec,
     FabricationPlan,
     FeatureSpec,
     SketchSpec,
 )
+from freecad_mcp.tools.templates.hole_arrays import compile_hole_groups
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -29,25 +31,8 @@ def _plane_to_coordinate_system(plane: dict[str, Any] | None) -> CoordinateSyste
     )
 
 
-def build_l_connector_plan(
-    *,
-    slots: dict[str, float],
-    plane: dict[str, Any] | None = None,
-) -> FabricationPlan:
-    """Build a FabricationPlan for a fully constrained L connector.
-
-    Args:
-        slots: Resolved dimension slots in millimetres.  Required keys:
-            ``arm_x_length``, ``arm_y_length``, ``arm_x_width``, ``arm_y_width``,
-            ``thickness``.
-        plane: Optional sketch-plane placement (euler_angles, translation, name).
-
-    Returns:
-        FabricationPlan ready for ``execute_fabrication_plan()``.
-
-    Raises:
-        ValueError: If required slots are missing or geometry is infeasible.
-    """
+def _validate_l_connector_slots(slots: dict[str, float]) -> None:
+    """Validate required L-connector dimension slots."""
     required = [
         "arm_x_length",
         "arm_y_length",
@@ -72,6 +57,19 @@ def build_l_connector_plan(
         raise ValueError("arm_x_width must be smaller than arm_y_length")
     if wy >= lx:
         raise ValueError("arm_y_width must be smaller than arm_x_length")
+
+
+def _build_l_connector_profile_plan(
+    *,
+    slots: dict[str, float],
+    plane: dict[str, Any] | None = None,
+) -> FabricationPlan:
+    """Build the base L-profile sketch and extrude (no holes)."""
+    lx = float(slots["arm_x_length"])
+    ly = float(slots["arm_y_length"])
+    wx = float(slots["arm_x_width"])
+    wy = float(slots["arm_y_width"])
+    thick = float(slots["thickness"])
 
     cs = _plane_to_coordinate_system(plane)
     sketch = {
@@ -196,6 +194,51 @@ def build_l_connector_plan(
     )
 
 
+def build_l_connector_plan(
+    *,
+    slots: dict[str, float],
+    plane: dict[str, Any] | None = None,
+    hole_groups: list[HoleArraySpec] | None = None,
+) -> FabricationPlan:
+    """Build a FabricationPlan for a fully constrained L connector.
+
+    Args:
+        slots: Resolved dimension slots in millimetres.  Required keys:
+            ``arm_x_length``, ``arm_y_length``, ``arm_x_width``, ``arm_y_width``,
+            ``thickness``.
+        plane: Optional sketch-plane placement (euler_angles, translation, name).
+        hole_groups: Optional per-face rectangular hole arrays compiled after
+            the base solid is created.
+
+    Returns:
+        FabricationPlan ready for ``execute_fabrication_plan()``.
+
+    Raises:
+        ValueError: If required slots are missing or geometry is infeasible.
+    """
+    _validate_l_connector_slots(slots)
+    plan = _build_l_connector_profile_plan(slots=slots, plane=plane)
+
+    if not hole_groups:
+        return plan
+
+    hole_sketches, hole_features, face_ids, hole_aliases = compile_hole_groups(
+        hole_groups,
+        slots=slots,
+        base_body_name="L_Connector_Solid",
+    )
+
+    plan.sketches.extend(hole_sketches)
+    plan.features.extend(hole_features)
+    plan.metadata["hole_face_ids"] = face_ids
+    plan.metadata["hole_group_count"] = len(hole_groups)
+    editable = list(plan.metadata.get("editable_aliases", []))
+    editable.extend(hole_aliases)
+    plan.metadata["editable_aliases"] = editable
+
+    return plan
+
+
 def register_connector_templates(
     mcp: Any,
     _get_bridge: Callable[[], Awaitable[Any]],
@@ -206,6 +249,7 @@ def register_connector_templates(
     async def resolve_l_connector_template(
         slots: dict[str, float],
         plane: dict[str, Any] | None = None,
+        hole_groups: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Build an L connector FabricationPlan from resolved dimension slots.
 
@@ -214,9 +258,17 @@ def register_connector_templates(
                 arm_x_width, arm_y_width, thickness).  Use ``resolve_template``
                 when starting from a full IntentSpec.
             plane: Optional sketch-plane placement dict.
+            hole_groups: Optional list of HoleArraySpec dicts (per-face arrays).
 
         Returns:
             FabricationPlan dict ready for ``execute_fabrication_plan()``.
         """
-        plan = build_l_connector_plan(slots=slots, plane=plane)
+        parsed_holes = (
+            [HoleArraySpec.from_dict(g) for g in hole_groups] if hole_groups else None
+        )
+        plan = build_l_connector_plan(
+            slots=slots,
+            plane=plane,
+            hole_groups=parsed_holes,
+        )
         return plan.to_dict()

@@ -1797,7 +1797,8 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                     "description": (
                         "Layer 2 domain template tools. Compile a structured IntentSpec "
                         "into a FabricationPlan deterministically. Natural language parsing "
-                        "happens upstream in the Intent Model — not here."
+                        "happens upstream in the Intent Model — not here. Intent expansion "
+                        "guide: docs/guide/l-connector-intent-expansion/index.md"
                     ),
                     "tools": [
                         {
@@ -1812,9 +1813,11 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "name": "resolve_l_connector_template",
                             "description": (
                                 "Build an L connector FabricationPlan from resolved dimension "
-                                "slots in mm. Prefer resolve_template for full IntentSpec."
+                                "slots in mm. Supports optional hole_groups per exterior "
+                                "face (rectangular arrays). Prefer resolve_template for "
+                                "full IntentSpec."
                             ),
-                            "key_params": ["slots", "plane"],
+                            "key_params": ["slots", "plane", "hole_groups"],
                         },
                     ],
                 },

@@ -217,12 +217,16 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
         if value is None:
             value = raw.get("length")
         if value is None:
+            value = raw.get("radius")
+        if value is None:
+            value = raw.get("diameter")
+        if value is None:
             value = raw.get("value")
         out = {
             "value": _parse_length(value),
             "unit": raw.get("unit", default_unit),
         }
-        for key in ("alias", "label", "role", "min", "max", "default"):
+        for key in ("alias", "expression", "label", "role", "min", "max", "default"):
             if raw.get(key) is not None:
                 out[key] = raw[key]
         return out
@@ -399,12 +403,12 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     c = Sketcher.Constraint("Angle", i1, i2, angle_rad)
                 elif ctype == "Diameter":
                     i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1])
+                    dim_meta = _dimension_meta(entry[1], value_key="diameter")
                     val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val / 2.0)
                 elif ctype == "Radius":
                     i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1])
+                    dim_meta = _dimension_meta(entry[1], value_key="radius")
                     val = dim_meta["value"]
                     c = Sketcher.Constraint("Radius", i, val)
                 elif ctype == "MajorRadius":
@@ -439,7 +443,9 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     continue
                 before_count = len(sketch_obj.Constraints)
                 sketch_obj.addConstraint(c)
-                if dim_meta and dim_meta.get("alias"):
+                if dim_meta and (
+                    dim_meta.get("alias") or dim_meta.get("expression")
+                ):
                     binding = dict(dim_meta)
                     binding.update(
                         {
@@ -763,7 +769,7 @@ try:
     attachment_info = None
     _auto_lcs_name = None
     _pending_lcs = None
-    if cs_inline is not None and attach_spec is None and cs_name_ref is None:
+    if cs_inline is not None and cs_name_ref is None:
         # Accept both the original Fusion-360-adapter key style
         # ("Euler Angles" / "Translation Vector") and the lowercase-underscore
         # style ("euler_angles" / "translation") used in most HistCAD examples.
@@ -779,27 +785,49 @@ try:
         _cs_label = (sketch_nm + "_coordinate_system") if sketch_nm else "coordinate_system"
         _pending_lcs = doc.addObject("PartDesign::CoordinateSystem", _cs_label)
         _pending_lcs.Label = _cs_label
-        _pending_lcs.Placement = FreeCAD.Placement(FreeCAD.Vector(*trans), rot)
-        if body is not None:
+        _cs_attach = cs_inline.get("attachment_support") or {{}}
+        _ref_nm = _cs_attach.get("object_name")
+        _offset_rot = rot
+        _offset_trans = FreeCAD.Vector(*trans)
+        if _ref_nm:
+            _ref_obj = doc.getObject(_ref_nm)
+            if _ref_obj is None:
+                raise ValueError(f"Coordinate system attachment object not found: {{_ref_nm!r}}")
+            _pending_lcs.AttachmentSupport = [(_ref_obj, ("", ""))]
+            _pending_lcs.MapMode = "ObjectXY"
+            _pending_lcs.AttachmentOffset = FreeCAD.Placement(_offset_trans, _offset_rot)
+        else:
+            _pending_lcs.Placement = FreeCAD.Placement(_offset_trans, _offset_rot)
+        if body is not None and getattr(body, "TypeId", "") == "PartDesign::Body":
             body.addObject(_pending_lcs)
         doc.recompute()
+        _offset_exprs = cs_inline.get("offset_expressions") or cs_inline.get("placement_expressions") or {{}}
+        if _offset_exprs:
+            for _prop, _expr in _offset_exprs.items():
+                try:
+                    _pending_lcs.setExpression(_prop, _expr)
+                except Exception:
+                    pass
+            doc.recompute()
         _auto_lcs_name = _pending_lcs.Name
 
     # --- Step 2: create the sketch object ---
     sk = doc.addObject("Sketcher::SketchObject", sketch_nm or "Sketch")
 
     # --- Step 3: attach the sketch to its plane ---
+    _plane_attached = False
     if attach_spec is not None:
         near_pt = attach_spec.get("near_point")
         face_nm = attach_spec.get("face_name")
         if near_pt is not None and body is not None:
             shape = body.Shape
             pt = FreeCAD.Vector(*near_pt)
+            vtx = Part.Vertex(pt)
             best_face = None
             best_dist = float("inf")
             for i, face in enumerate(shape.Faces):
                 try:
-                    dist = pt.distanceToShape(face)[0]
+                    dist = face.distToShape(vtx)[0]
                 except Exception:
                     dist = float("inf")
                 if dist < best_dist:
@@ -809,11 +837,13 @@ try:
                 sk.AttachmentSupport = [best_face]
                 sk.MapMode = "FlatFace"
                 attachment_info = {{"face_name": best_face[1], "attachment_offset": 0.0}}
+                _plane_attached = True
         elif face_nm is not None and body is not None:
             sk.AttachmentSupport = [(body, face_nm)]
             sk.MapMode = "FlatFace"
             attachment_info = {{"face_name": face_nm, "attachment_offset": 0.0}}
-    elif cs_name_ref is not None:
+            _plane_attached = True
+    if not _plane_attached and cs_name_ref is not None:
         # Look up by Label first (the user-visible name returned by
         # create_coordinate_system as cs_name), then fall back to the
         # internal FreeCAD Name so both "MyPlane" and "CoordinateSystem001"
@@ -828,12 +858,14 @@ try:
         if lcs is not None:
             sk.AttachmentSupport = [(lcs, "")]
             sk.MapMode = "ObjectXY"
-    elif _pending_lcs is not None:
+            _plane_attached = True
+    if not _plane_attached and _pending_lcs is not None:
         # Attach to the datum created in step 1 from cs_inline
         sk.AttachmentSupport = [(_pending_lcs, "")]
         sk.MapMode = "ObjectXY"
+        _plane_attached = True
 
-    if body is not None:
+    if body is not None and getattr(body, "TypeId", "") == "PartDesign::Body":
         body.addObject(sk)
 
     doc.recompute()
@@ -1395,35 +1427,41 @@ try:
 
         for _binding in dimension_bindings:
             _alias = _binding.get("alias")
-            if not _alias:
+            _expr = _binding.get("expression")
+            if not _alias and not _expr:
                 continue
-            _cell = _find_alias_cell(sheet, _alias) or _next_cell()
-            _allocated_cells.add(_cell)
             _value = _binding.get("value")
-            sheet.set(_cell, str(_value))
-            try:
-                sheet.setAlias(_cell, _alias)
-            except Exception:
-                pass
             _prop = _binding.get("property")
+            if _alias:
+                _cell = _find_alias_cell(sheet, _alias) or _next_cell()
+                _allocated_cells.add(_cell)
+                sheet.set(_cell, str(_value))
+                try:
+                    sheet.setAlias(_cell, _alias)
+                except Exception:
+                    pass
             try:
-                sk.setExpression(_prop, f"FabricationParams.{{_alias}}")
+                if _expr:
+                    sk.setExpression(_prop, _expr)
+                elif _alias:
+                    sk.setExpression(_prop, f"FabricationParams.{{_alias}}")
             except Exception:
                 pass
-            bound_params.append({{
-                "alias": _alias,
-                "cell": _cell,
-                "value": _value,
-                "unit": _binding.get("unit", "mm"),
-                "property": _prop,
-                "object": sk.Name,
-                "constraint_type": _binding.get("constraint_type"),
-                "role": _binding.get("role"),
-                "label": _binding.get("label"),
-                "min": _binding.get("min"),
-                "max": _binding.get("max"),
-                "default": _binding.get("default"),
-            }})
+            if _alias:
+                bound_params.append({{
+                    "alias": _alias,
+                    "cell": _cell,
+                    "value": _value,
+                    "unit": _binding.get("unit", "mm"),
+                    "property": _prop,
+                    "object": sk.Name,
+                    "constraint_type": _binding.get("constraint_type"),
+                    "role": _binding.get("role"),
+                    "label": _binding.get("label"),
+                    "min": _binding.get("min"),
+                    "max": _binding.get("max"),
+                    "default": _binding.get("default"),
+                }})
 
     doc.recompute()
     dof_after = getattr(sk, "DoF", -1)
@@ -3640,36 +3678,36 @@ _result_ = {{
         feature_names: list[str] = []
         cs_map: dict[str, str] = {}  # cs spec name → FreeCAD cs_name
         sketch_name_map: dict[str, str] = {}  # spec sketch_name → FreeCAD obj name
+        object_name_map: dict[str, str] = {}
         steps_completed = 0
         last_body_name: str | None = None
+        partdesign_body_name: str | None = None
 
-        # Step 1: Coordinate systems
-        for cs_spec in fab_plan.coordinate_systems:
-            result = await create_coordinate_system(  # type: ignore[name-defined]
-                euler_angles=cs_spec.euler_angles,
-                translation=cs_spec.translation,
-                name=cs_spec.name,
-                doc_name=doc_name,
-            )
-            if cs_spec.name:
-                cs_map[cs_spec.name] = result["cs_name"]
-            steps_completed += 1
-
-        # Step 2: Sketches (geometry + constraints)
-        for sk_spec in fab_plan.sketches:
+        async def _create_sketch_from_spec(sk_spec: Any) -> None:
+            nonlocal steps_completed, partdesign_body_name
             cs_name_ref = sk_spec.coordinate_system_name
             if cs_name_ref and cs_name_ref in cs_map:
                 cs_name_ref = cs_map[cs_name_ref]
 
+            attach_body = partdesign_body_name
+            if attach_body is None and sk_spec.attach_after_feature:
+                attach_body = object_name_map.get(sk_spec.attach_after_feature)
+            if attach_body is None and sk_spec.attach_body_feature:
+                attach_body = object_name_map.get(sk_spec.attach_body_feature)
+
+            cs_inline = None
+            if sk_spec.coordinate_system is not None:
+                cs_inline = sk_spec.coordinate_system.to_dict()
+                cs_attach = cs_inline.get("attachment_support") or {}
+                if cs_attach.get("feature_name") and attach_body:
+                    cs_inline["attachment_support"] = {"object_name": attach_body}
+
             geo_result = await create_sketch_geometry(  # type: ignore[name-defined]
                 sketch=sk_spec.sketch,
-                coordinate_system=(
-                    sk_spec.coordinate_system.to_dict()
-                    if sk_spec.coordinate_system
-                    else None
-                ),
+                coordinate_system=cs_inline,
                 coordinate_system_name=cs_name_ref,
                 attachment_support=sk_spec.attachment_support,
+                body_name=attach_body,
                 sketch_name=sk_spec.sketch_name,
                 doc_name=doc_name,
             )
@@ -3686,9 +3724,37 @@ _result_ = {{
                 )
                 steps_completed += 1
 
-        # Step 3: Features
-        object_name_map: dict[str, str] = {}
+        deferred_by_trigger: dict[str, list[Any]] = {}
+        immediate_sketches: list[Any] = []
+        for sk_spec in fab_plan.sketches:
+            trigger = sk_spec.attach_after_feature
+            if trigger:
+                deferred_by_trigger.setdefault(trigger, []).append(sk_spec)
+            else:
+                immediate_sketches.append(sk_spec)
 
+        async def _flush_deferred_sketches(trigger: str) -> None:
+            pending = deferred_by_trigger.pop(trigger, [])
+            for sk_spec in pending:
+                await _create_sketch_from_spec(sk_spec)
+
+        # Step 1: Coordinate systems
+        for cs_spec in fab_plan.coordinate_systems:
+            result = await create_coordinate_system(  # type: ignore[name-defined]
+                euler_angles=cs_spec.euler_angles,
+                translation=cs_spec.translation,
+                name=cs_spec.name,
+                doc_name=doc_name,
+            )
+            if cs_spec.name:
+                cs_map[cs_spec.name] = result["cs_name"]
+            steps_completed += 1
+
+        # Step 2: Immediate sketches (deferred sketches flush after features)
+        for sk_spec in immediate_sketches:
+            await _create_sketch_from_spec(sk_spec)
+
+        # Step 3: Features
         def _resolve_object_ref(_name: str | None) -> str | None:
             if _name is None:
                 return None
@@ -3722,6 +3788,10 @@ _result_ = {{
                     object_name_map[feat_spec.feature_name] = created_name
                 feature_names.append(created_name)
                 last_body_name = feat_result.get("body_name") or created_name
+                if feat_result.get("body_name"):
+                    partdesign_body_name = feat_result["body_name"]
+                if feat_spec.feature_name:
+                    await _flush_deferred_sketches(feat_spec.feature_name)
                 continue
             if feat_spec.type == "boolean":
                 operation = params.get("operation", feat_spec.operation)
@@ -3746,6 +3816,8 @@ _result_ = {{
                     object_name_map[feat_spec.feature_name] = created_name
                 feature_names.append(created_name)
                 last_body_name = created_name
+                if feat_spec.feature_name:
+                    await _flush_deferred_sketches(feat_spec.feature_name)
                 continue
             if feat_spec.type == "revolve":
                 if feat_spec.operation != "NewBody":

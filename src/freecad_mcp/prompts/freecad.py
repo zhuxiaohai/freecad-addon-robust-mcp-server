@@ -678,7 +678,11 @@ await create_connector(
 
 **Intent Model** (external — Cursor, skill/RAG, Policy 1) converts natural
 language into a structured **IntentSpec** (`template_name`, `slots`,
-`slot_bindings`, `placement`).
+`slot_bindings`, `placement`, optional `hole_groups`).
+
+**Intent expansion guide:** External Intent Models should read
+`docs/guide/l-connector-intent-expansion/index.md` (and linked references) before
+building IntentSpec JSON (CADDesigner-style L3 specification).
 
 **Layer 2** (domain templates in tools/templates/) compiles IntentSpec into a
 FabricationPlan **deterministically** — no LLM at this stage.  Use
@@ -816,12 +820,31 @@ intent = {
     "template_name": "l_connector",
     "slots": {"arm_x_length": 50, "arm_y_length": 80, "width": 30},
     "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
+    "hole_groups": [
+        {
+            "face_id": "arm_x_top",
+            "count_u": 2,
+            "count_v": 2,
+            "pitch_u": 15,
+            "pitch_v": 15,
+            "diameter": 5,
+            "margin_u": 10,
+            "margin_v": 10,
+        }
+    ],
 }
 plan = await resolve_template(intent)
 result = await execute_fabrication_plan(plan)
 # → result["tunable_params"] for frontend slider panel
 # → result["bounding_box"] for downstream assembly
 ```
+
+## L-Connector Hole Arrays
+
+Nine semantic `face_id` values (`arm_x_top`, `arm_y_top`, `bottom`, …).
+Each `hole_groups` entry compiles to: face-aligned coordinate system → hole
+sketch (circles) → extrude tool solid → boolean Cut. See
+`tools/templates/face_catalog.py` and `hole_arrays.py`.
 """,
         }
 

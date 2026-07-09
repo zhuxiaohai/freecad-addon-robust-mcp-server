@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from freecad_mcp.intent.schema import IntentSpec, apply_slot_bindings
+from freecad_mcp.intent.schema import HoleArraySpec, IntentSpec, apply_slot_bindings
+from freecad_mcp.intent.schema import validate_hole_array_spec as _validate_hole_spec
+from freecad_mcp.tools.templates.face_catalog import L_CONNECTOR_EXTERIOR_FACE_IDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -21,11 +23,13 @@ class SlotSchema:
         required: Slot names that must be present after binding resolution.
         defaults: Default values applied before explicit slots.
         auto_bindings: Bindings applied when width is given without arm widths.
+        allowed_face_ids: Valid semantic face keys for hole_groups (if supported).
     """
 
     required: list[str]
     defaults: dict[str, float] = field(default_factory=dict)
     auto_bindings: list[str] = field(default_factory=list)
+    allowed_face_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 TEMPLATE_SLOT_SCHEMAS: dict[str, SlotSchema] = {
@@ -33,8 +37,41 @@ TEMPLATE_SLOT_SCHEMAS: dict[str, SlotSchema] = {
         required=["arm_x_length", "arm_y_length", "arm_x_width", "arm_y_width"],
         defaults={"thickness": 10.0},
         auto_bindings=["arm_x_width = width", "arm_y_width = width"],
+        allowed_face_ids=L_CONNECTOR_EXTERIOR_FACE_IDS,
     ),
 }
+
+
+def validate_hole_groups_for_template(
+    template_name: str,
+    hole_groups: list[HoleArraySpec],
+) -> None:
+    """Validate hole group specifications for a registered template.
+
+    Args:
+        template_name: Template registry key.
+        hole_groups: Hole arrays from IntentSpec.
+
+    Raises:
+        ValueError: If face IDs are unknown or hole specs are invalid.
+    """
+    schema = TEMPLATE_SLOT_SCHEMAS.get(template_name)
+    if schema is None or not schema.allowed_face_ids:
+        if hole_groups:
+            msg = f"Template {template_name!r} does not support hole_groups"
+            raise ValueError(msg)
+        return
+
+    allowed = set(schema.allowed_face_ids)
+    for group in hole_groups:
+        _validate_hole_spec(group)
+        if group.face_id not in allowed:
+            known = ", ".join(schema.allowed_face_ids)
+            msg = (
+                f"Unknown face_id {group.face_id!r} for template "
+                f"{template_name!r}. Known: {known}"
+            )
+            raise ValueError(msg)
 
 
 def _build_l_connector_from_intent(intent: IntentSpec) -> FabricationPlan:
@@ -57,9 +94,12 @@ def _build_l_connector_from_intent(intent: IntentSpec) -> FabricationPlan:
         msg = f"Missing required slots for l_connector: {', '.join(missing)}"
         raise ValueError(msg)
 
+    validate_hole_groups_for_template("l_connector", intent.hole_groups)
+
     plan = build_l_connector_plan(
         slots=resolved,
         plane=intent.placement,
+        hole_groups=intent.hole_groups or None,
     )
     plan.metadata["intent_spec"] = intent.to_dict()
     plan.metadata["assumptions"] = list(intent.assumptions)
@@ -84,6 +124,8 @@ def validate_intent(intent: IntentSpec) -> None:
         known = ", ".join(sorted(TEMPLATE_BUILDERS))
         msg = f"Unknown template: {intent.template_name!r}. Known: {known}"
         raise ValueError(msg)
+
+    validate_hole_groups_for_template(intent.template_name, intent.hole_groups)
 
     # Dry-run resolution to surface missing slots early.
     resolve_intent_to_plan(intent)

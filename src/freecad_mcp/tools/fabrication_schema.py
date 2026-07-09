@@ -25,8 +25,15 @@ class CoordinateSystemSpec:
             applied as the active local-to-world rotation
             R = Rx(a) * Ry(b) * Rz(g) (HistCAD / Fusion 360 adapter
             convention).
-        translation: Origin [x, y, z] in millimetres in the world frame.
+        translation: Default attachment offset origin [x, y, z] in millimetres
+            in the reference object's local frame (HistCAD ``Translation Vector``).
         name: Optional label used to reference this CS in SketchSpec.
+        attachment_support: Optional attachment to a reference solid.
+            Use ``{"feature_name": "L_Connector_Solid"}`` in plans; Layer 1
+            resolves to ``{"object_name": "<FreeCADName>"}`` at execution.
+        offset_expressions: FreeCAD expressions on ``AttachmentOffset`` (or
+            ``Placement`` when unattached).  Layer 2 supplies these; Layer 1
+            applies them as-is.
 
     Example:
         >>> cs = CoordinateSystemSpec(
@@ -39,22 +46,41 @@ class CoordinateSystemSpec:
     euler_angles: list[float]
     translation: list[float]
     name: str | None = None
+    attachment_support: dict[str, Any] = field(default_factory=dict)
+    offset_expressions: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to plain dict for JSON transport."""
-        return {
+        d: dict[str, Any] = {
             "euler_angles": self.euler_angles,
             "translation": self.translation,
             "name": self.name,
         }
+        if self.attachment_support:
+            d["attachment_support"] = dict(self.attachment_support)
+        if self.offset_expressions:
+            d["offset_expressions"] = dict(self.offset_expressions)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CoordinateSystemSpec:
         """Deserialise from plain dict."""
+        raw_attach = d.get("attachment_support", {})
+        raw_exprs = d.get("offset_expressions", d.get("placement_expressions", {}))
+        offset_expressions: dict[str, str] = {}
+        for key, value in raw_exprs.items():
+            prop = str(key)
+            if prop.startswith("Placement."):
+                prop = "AttachmentOffset." + prop.removeprefix("Placement.")
+            offset_expressions[prop] = str(value)
         return cls(
             euler_angles=d["euler_angles"],
             translation=d["translation"],
             name=d.get("name"),
+            attachment_support={
+                str(k): v for k, v in raw_attach.items() if v is not None
+            },
+            offset_expressions=offset_expressions,
         )
 
 
@@ -79,6 +105,11 @@ class SketchSpec:
             ``{"near_point": [x, y, z]}`` — adapter resolves to the nearest
             face; ``{"face_name": "TopFace"}`` for a known face name.
         sketch_name: Explicit sketch object name. Auto-generated if None.
+        attach_after_feature: When set, the sketch is created only after this
+            feature (by ``feature_name``) has been executed — required for
+            face-attached hole sketches on an existing solid.
+        attach_body_feature: Body object used for face attachment. Defaults to
+            ``attach_after_feature`` when omitted.
 
     Example:
         >>> spec = SketchSpec(
@@ -95,6 +126,8 @@ class SketchSpec:
     coordinate_system_name: str | None = None
     attachment_support: dict[str, Any] | None = None
     sketch_name: str | None = None
+    attach_after_feature: str | None = None
+    attach_body_feature: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to plain dict."""
@@ -110,6 +143,10 @@ class SketchSpec:
             d["attachment_support"] = self.attachment_support
         if self.sketch_name is not None:
             d["sketch_name"] = self.sketch_name
+        if self.attach_after_feature is not None:
+            d["attach_after_feature"] = self.attach_after_feature
+        if self.attach_body_feature is not None:
+            d["attach_body_feature"] = self.attach_body_feature
         return d
 
     @classmethod
@@ -125,6 +162,8 @@ class SketchSpec:
             coordinate_system_name=d.get("coordinate_system_name"),
             attachment_support=d.get("attachment_support"),
             sketch_name=d.get("sketch_name"),
+            attach_after_feature=d.get("attach_after_feature"),
+            attach_body_feature=d.get("attach_body_feature"),
         )
 
 

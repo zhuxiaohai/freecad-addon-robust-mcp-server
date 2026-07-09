@@ -123,5 +123,6 @@ Thumbs.db
 .mcp.json
 .claude
 .cursor/mcp.json
+.cursor/skills/
 .codex/
 .agents/

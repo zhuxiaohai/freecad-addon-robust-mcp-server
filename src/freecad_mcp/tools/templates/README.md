@@ -11,7 +11,7 @@ User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
           │
           ▼
    Intent Model (external — Cursor, skill/RAG, Policy 1)
-   NL → IntentSpec { template_name, slots, slot_bindings, placement }
+   NL → IntentSpec { template_name, slots, slot_bindings, placement, hole_groups? }
           │
           ▼
    Layer 2 Template Tool  [deterministic, no LLM]
@@ -39,13 +39,42 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
     "thickness": 10
   },
   "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
-  "assumptions": ["unit=mm", "width applies to both arms"]
+  "assumptions": ["unit=mm", "width applies to both arms"],
+  "hole_groups": [
+    {
+      "face_id": "arm_x_top",
+      "count_u": 2,
+      "count_v": 2,
+      "pitch_u": 15,
+      "pitch_v": 15,
+      "diameter": 5,
+      "margin_u": 10,
+      "margin_v": 10
+    }
+  ]
 }
 ```
 
 - ``slot_bindings``: semantic slot coupling — compiled by the template, **not**
   passed through to FabricationPlan geometric constraints.
 - ``placement``: optional sketch-plane placement — passed through as ``plane``.
+- ``hole_groups``: optional per-face rectangular hole arrays (see
+  ``face_catalog.py`` for nine exterior ``face_id`` values).
+
+## L-Connector Modules
+
+| Module | Role |
+| ------ | ---- |
+| `connectors.py` | L profile + extrude + optional holes |
+| `face_catalog.py` | Semantic face UV frames and `near_point` |
+| `hole_arrays.py` | Compile `hole_groups` → sketches + boolean cuts |
+
+## Intent Expansion Guide
+
+External Intent Models (separate agent projects) should use
+`docs/guide/l-connector-intent-expansion/` as the canonical reference for
+converting natural language to IntentSpec. This repo does not depend on
+IDE-specific skill paths.
 
 ## Adding a New Domain Template
 
@@ -55,6 +84,8 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
 tools/templates/
 ├── __init__.py          ← register resolve_template + domain tools
 ├── connectors.py        ← connector domain (example)
+├── face_catalog.py      ← L-connector semantic face frames
+├── hole_arrays.py       ← hole_groups → plan fragments
 └── README.md            ← this file
 ```
 

@@ -46,7 +46,12 @@ Entities in the ``sketch`` dict use prefixed names:
 - ``elliptical_arc_N``: ``{"start":[x1,y1],"end":[x2,y2],"major":r1,"minor":r2,
   "angle":deg,"large_arc":false,"sweep":true}``
 - ``nurbs_N``: ``{"degree":int,"periodic":bool,"controls":[[x,y],...],
-  "weights":[...],"knots":[...]}``
+  "weights":[...],"knots":[...]}``  (semantic start/end = first/last control)
+
+At sketch creation, ``endpoint_map`` binds each entity's semantic
+``start``/``end`` labels to FreeCAD ``PointPos`` values.  Constraints
+resolve ``line_1.start`` through that map — never by re-matching coordinates
+after the solver moves geometry.
 
 HistCAD constraint types (19 total)
 ------------------------------------
@@ -79,14 +84,67 @@ _SPREADSHEET_NAME = "FabricationParams"
 _SKETCH_ENTITY_CODE = r"""
 import Part, Sketcher
 
+def _endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end):
+    # Bind JSON/NLT semantic start/end to FreeCAD PointPos once at sketch creation.
+    # After binding, constraints always use the cached map — never re-derive from
+    # current coordinates (the solver may move or flip geometry later).
+    START, END, MID = 1, 2, 3
+
+    def _dist2d(point, coords):
+        return ((point.x - coords[0]) ** 2 + (point.y - coords[1]) ** 2) ** 0.5
+
+    sp = sketch_obj.getPoint(geo_idx, START)
+    ep = sketch_obj.getPoint(geo_idx, END)
+    direct = max(_dist2d(sp, json_start), _dist2d(ep, json_end))
+    swapped = max(_dist2d(sp, json_end), _dist2d(ep, json_start))
+    if direct <= swapped:
+        return {"start": START, "end": END, "center": MID, "middle": MID}
+    return {"start": END, "end": START, "center": MID, "middle": MID}
+
+
+def _arc_endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end):
+    # Backward-compatible alias for arc-only call sites.
+    return _endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end)
+
+
+def _json_endpoints_for_entity(name, spec):
+    if name.startswith("nurbs_"):
+        controls = spec.get("controls") or []
+        if len(controls) < 2:
+            return None
+        return controls[0], controls[-1]
+    if "start" in spec and "end" in spec:
+        return spec["start"], spec["end"]
+    return None
+
+
+def _rebuild_endpoint_map(sketch_obj, idx_map, entity_dict):
+    endpoint_map = {}
+    for name, spec in entity_dict.items():
+        endpoints = _json_endpoints_for_entity(name, spec)
+        if endpoints is None:
+            continue
+        gi = idx_map.get(name)
+        if gi is None or gi >= len(sketch_obj.Geometry):
+            continue
+        js, je = endpoints
+        endpoint_map[name] = _endpoint_map_for_geometry(sketch_obj, gi, js, je)
+    return endpoint_map
+
+
+def _rebuild_arc_endpoint_map(sketch_obj, idx_map, entity_dict):
+    return _rebuild_endpoint_map(sketch_obj, idx_map, entity_dict)
+
+
 def _build_sketch_entities(sketch_obj, entity_dict):
     # Add HistCAD geometry entities to a Sketcher object.
-    # Returns entity_index_map: {name -> geom_idx}.
+    # Returns (entity_index_map, endpoint_map).
     #
     # Y-axis convention: coordinates are used exactly as written in the
     # HistCAD JSON coordinates (no sign change).  Arc centers and downstream
     # observations use the same sketch-local frame as the Fusion 360 adapter.
     idx_map = {}
+    endpoint_map = {}
     for name, spec in entity_dict.items():
         if name.startswith("line_"):
             geo = Part.LineSegment(
@@ -150,14 +208,26 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             continue
         idx = sketch_obj.addGeometry(geo, False)
         idx_map[name] = idx
-    return idx_map
+        endpoints = _json_endpoints_for_entity(name, spec)
+        if endpoints is not None:
+            js, je = endpoints
+            endpoint_map[name] = _endpoint_map_for_geometry(
+                sketch_obj, idx, js, je,
+            )
+    return idx_map, endpoint_map
 """
 
 _SKETCH_CONSTRAINT_CODE = r"""
-def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
+def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map, endpoint_map=None, arc_endpoint_map=None):
     # Apply HistCAD constraints to a Sketcher object.
     # Returns {"redundant": [...], "dimension_bindings": [...]}.
+    #
+    # endpoint_map binds JSON/NLT start/end labels to FreeCAD PointPos at sketch
+    # creation; constraints resolve refs through the map, not live coordinates.
     import Sketcher
+
+    if endpoint_map is None:
+        endpoint_map = arc_endpoint_map or {}
 
     # FreeCAD 1.1 removed Sketcher.PointPos; use integer PointPos values directly.
     # 0 = none, 1 = start, 2 = end, 3 = middle
@@ -166,25 +236,34 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
     END   = 2
     MID   = 3
 
+    _pos_map = {"start": START, "end": END, "center": MID, "middle": MID}
+
     def _resolve_entity(ref):
         # 'line_1' -> (idx, NONE)
         idx = idx_map[ref]
         return idx, NONE
 
     def _resolve_point(ref):
-        # 'line_1.start' -> (idx, START)
+        # 'line_1.start' -> (idx, PointPos); endpoint_map when cached at creation.
         if ref == "origin":
             return -1, START
         if "." not in ref:
             return idx_map[ref], NONE
         name, point = ref.split(".", 1)
         idx = idx_map[name]
-        mapping = {
-            "start": START, "end": END,
-            "center": MID, "middle": MID,
-        }
-        pos = mapping.get(point, NONE)
+        if name in endpoint_map:
+            mapped = endpoint_map[name].get(point)
+            if mapped is not None:
+                return idx, mapped
+        pos = _pos_map.get(point, NONE)
         return idx, pos
+
+    def _json_pos_to_sketch_pos(entity_name, point_label):
+        if entity_name in endpoint_map:
+            return endpoint_map[entity_name].get(
+                point_label, _pos_map.get(point_label, NONE),
+            )
+        return _pos_map.get(point_label, NONE)
 
     def _parse_length(val):
         # '10 mm' -> 10.0  (already in mm, FreeCAD uses mm internally)
@@ -259,8 +338,6 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
             _coinc_map[(_n1, _p1)] = (_n2, _p2)
             _coinc_map[(_n2, _p2)] = (_n1, _p1)
 
-    _pos_map = {"start": START, "end": END, "center": MID, "middle": MID}
-
     added = []
     dimension_bindings = []
     for ctype, entries in constraint_dict.items():
@@ -303,12 +380,10 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     _ref1, _ref2 = entry[0], entry[1]
                     _has_pt1, _has_pt2 = "." in _ref1, "." in _ref2
                     if _has_pt1 and _has_pt2:
-                        # Both refs include an explicit point → use 4-arg form
                         _ti1, _tp1 = _resolve_point(_ref1)
                         _ti2, _tp2 = _resolve_point(_ref2)
                         c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
                     elif not _has_pt1 and not _has_pt2:
-                        # Entity-level refs: look up shared endpoint via Coincident map
                         _shared = None
                         for _pn in ("start", "end"):
                             _k = (_ref1, _pn)
@@ -323,17 +398,15 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                                     break
                         if _shared is not None:
                             _ti1 = idx_map[_ref1]
-                            _tp1 = _pos_map.get(_shared[0], NONE)
+                            _tp1 = _json_pos_to_sketch_pos(_ref1, _shared[0])
                             _ti2 = idx_map[_ref2]
-                            _tp2 = _pos_map.get(_shared[1], NONE)
+                            _tp2 = _json_pos_to_sketch_pos(_ref2, _shared[1])
                             c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
                         else:
-                            # No shared point found → fall back to 2-arg form
                             _ti1, _ = _resolve_entity(_ref1)
                             _ti2, _ = _resolve_entity(_ref2)
                             c = Sketcher.Constraint("Tangent", _ti1, _ti2)
                     else:
-                        # One ref has a point, the other doesn't → 2-arg fallback
                         _ti1, _ = _resolve_entity(_ref1.split(".")[0])
                         _ti2, _ = _resolve_entity(_ref2.split(".")[0])
                         c = Sketcher.Constraint("Tangent", _ti1, _ti2)
@@ -354,7 +427,6 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     c = Sketcher.Constraint("Block", i, p)
                 elif ctype == "Midpoint":
                     if isinstance(entry[1], list):
-                        # Format A: [mid_point_ref, [point_ref_a, point_ref_b]]
                         i_mid, p_mid = _resolve_point(entry[0])
                         i_a, p_a = _resolve_point(entry[1][0])
                         i_b, p_b = _resolve_point(entry[1][1])
@@ -362,22 +434,12 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                             "Symmetric", i_a, p_a, i_b, p_b, i_mid, p_mid,
                         )
                     else:
-                        # Format B: [point_ref, entity_ref] — point at line midpoint
                         i_pt, p_pt = _resolve_point(entry[0])
                         i_ln, _ = _resolve_entity(entry[1])
                         c = Sketcher.Constraint(
                             "Symmetric", i_ln, START, i_ln, END, i_pt, p_pt,
                         )
                 elif ctype == "Mirror":
-                    # HistCAD Mirror: [source, axis_line, target]
-                    # axis (entry[1]) is always a line entity ref (no ".").
-                    # source/target can be either:
-                    #   • point-pair format: "line_14.end"  (contains ".")
-                    #     → one Symmetric constraint, same as Fusion addSymmetry(pt, pt, ax)
-                    #   • entity format:     "line_10"      (no ".")
-                    #     → two Symmetric constraints (START-START + END-END),
-                    #       exactly how FreeCAD implements entity-entity symmetry
-                    #       internally (see FreeCAD PR #25525).
                     i_ax, _ = _resolve_entity(entry[1])
                     if "." in str(entry[0]) and "." in str(entry[2]):
                         i_src, p_src = _resolve_point(entry[0])
@@ -388,7 +450,7 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     else:
                         i_src, _ = _resolve_entity(entry[0])
                         i_dst, _ = _resolve_entity(entry[2])
-                        sk.addConstraint([Sketcher.Constraint(
+                        sketch_obj.addConstraint([Sketcher.Constraint(
                             "Symmetric", i_src, START, i_dst, START, i_ax,
                         )])
                         c = Sketcher.Constraint(
@@ -456,13 +518,13 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map):
                     )
                     dimension_bindings.append(binding)
                 added.append(ctype)
-            except Exception as _ce:
+            except Exception:
                 pass  # redundant or conflicting constraints are silently skipped
 
     # Collect redundant constraint names from solver state
     redundant = []
     try:
-        state_list = sketch_obj.solve()
+        sketch_obj.solve()
         if hasattr(sketch_obj, "RedundantConstraints"):
             for r_idx in sketch_obj.RedundantConstraints:
                 if 0 <= r_idx < len(sketch_obj.Constraints):
@@ -871,7 +933,7 @@ try:
     doc.recompute()
 
     # Add geometry entities
-    idx_map = _build_sketch_entities(sk, sketch_dict)
+    idx_map, endpoint_map = _build_sketch_entities(sk, sketch_dict)
 
     doc.recompute()
 
@@ -884,8 +946,11 @@ try:
         _main._sketch_geometry_cache = {{}}
     if not hasattr(_main, "_sketch_idx_map_cache"):
         _main._sketch_idx_map_cache = {{}}
+    if not hasattr(_main, "_sketch_endpoint_map_cache"):
+        _main._sketch_endpoint_map_cache = {{}}
     _main._sketch_geometry_cache[sk.Name] = sketch_dict
     _main._sketch_idx_map_cache[sk.Name] = idx_map
+    _main._sketch_endpoint_map_cache[sk.Name] = endpoint_map
     try:
         if hasattr(sk, "setDocumentData"):
             sk.setDocumentData("entity_index_map", str(idx_map))
@@ -1360,12 +1425,24 @@ constraints_in = {constraints!r}
 # Retrieve entity index map: __main__ cache → setDocumentData → rebuild from geometry
 import __main__ as _m_idx
 idx_map = getattr(_m_idx, "_sketch_idx_map_cache", {{}}).get(sk.Name)
+endpoint_map = getattr(_m_idx, "_sketch_endpoint_map_cache", {{}}).get(sk.Name)
+if not endpoint_map:
+    endpoint_map = getattr(_m_idx, "_sketch_arc_endpoint_map_cache", {{}}).get(sk.Name)
+ground_truth = getattr(_m_idx, "_sketch_geometry_cache", {{}}).get(sk.Name)
 if not idx_map:
     try:
         stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
         idx_map = eval(stored) if stored else {{}}
     except Exception:
         idx_map = {{}}
+
+if not ground_truth:
+    try:
+        import json as _json_gt
+        stored_gt = sk.getDocumentData("sketch_geometry_json") if hasattr(sk, "getDocumentData") else None
+        ground_truth = _json_gt.loads(stored_gt) if stored_gt else {{}}
+    except Exception:
+        ground_truth = {{}}
 
 if not idx_map:
     line_c = circle_c = arc_c = ellipse_c = nurbs_c = 0
@@ -1382,12 +1459,20 @@ if not idx_map:
         elif "BSpline" in tid:
             nurbs_c += 1; idx_map[f"nurbs_{{nurbs_c}}"] = i
 
+if not endpoint_map and ground_truth:
+    endpoint_map = _rebuild_endpoint_map(sk, idx_map, ground_truth)
+
 dof_before = getattr(sk, "DoF", -1)
 
 doc.openTransaction("Apply Sketch Constraints")
 try:
     applied_before = len(sk.Constraints) if hasattr(sk, "Constraints") else 0
-    constraint_result = _apply_histcad_constraints(sk, constraints_in, idx_map)
+    constraint_result = _apply_histcad_constraints(
+        sk,
+        constraints_in,
+        idx_map,
+        endpoint_map=endpoint_map,
+    )
     redundant = constraint_result.get("redundant", [])
     dimension_bindings = constraint_result.get("dimension_bindings", [])
     applied_after = len(sk.Constraints) if hasattr(sk, "Constraints") else applied_before
@@ -1504,37 +1589,39 @@ try:
         pass
 
     # Geometry drift vs the ground-truth coordinates cached at creation time.
-    # A contradictory-but-solvable constraint (e.g. Distance 25 on a 20 mm
-    # line) makes the solver move geometry silently: solve_status stays 0 and
-    # nothing is reported as conflicting.  Drift is the only observation that
-    # catches constraints inconsistent with the stated coordinates.
     _drift = None
     try:
-        import __main__ as _m_gt
-        _gt = getattr(_m_gt, "_sketch_geometry_cache", {{}}).get(sk.Name)
-        if _gt:
+        if ground_truth:
             def _dist2d(_p, _q):
                 return ((_p.x - _q[0]) ** 2 + (_p.y - _q[1]) ** 2) ** 0.5
             _max_d = 0.0
             _drifted = []
-            for _nm, _sp in _gt.items():
+            for _nm, _sp in ground_truth.items():
                 _gi = idx_map.get(_nm)
                 if _gi is None or _gi >= len(sk.Geometry):
                     continue
                 _g = sk.Geometry[_gi]
                 _d = None
-                if _nm.startswith("line_"):
-                    _d = max(_dist2d(_g.StartPoint, _sp["start"]),
-                             _dist2d(_g.EndPoint,   _sp["end"]))
-                elif _nm.startswith("arc_"):
-                    # Sketcher may normalise arc direction; accept either
-                    # endpoint order.
-                    _d = min(
-                        max(_dist2d(_g.StartPoint, _sp["start"]),
-                            _dist2d(_g.EndPoint,   _sp["end"])),
-                        max(_dist2d(_g.StartPoint, _sp["end"]),
-                            _dist2d(_g.EndPoint,   _sp["start"])),
-                    )
+                if (
+                    _nm.startswith("line_")
+                    or _nm.startswith("arc_")
+                    or _nm.startswith("elliptical_arc_")
+                ):
+                    _ep = endpoint_map.get(_nm, {{}})
+                    _start_pos = _ep.get("start", 1)
+                    _end_pos = _ep.get("end", 2)
+                    _pt_start = sk.getPoint(_gi, _start_pos)
+                    _pt_end = sk.getPoint(_gi, _end_pos)
+                    _d = max(_dist2d(_pt_start, _sp["start"]),
+                             _dist2d(_pt_end, _sp["end"]))
+                elif _nm.startswith("nurbs_"):
+                    _controls = _sp.get("controls") or []
+                    if len(_controls) >= 2 and _nm in endpoint_map:
+                        _ep = endpoint_map[_nm]
+                        _pt_start = sk.getPoint(_gi, _ep.get("start", 1))
+                        _pt_end = sk.getPoint(_gi, _ep.get("end", 2))
+                        _d = max(_dist2d(_pt_start, _controls[0]),
+                                 _dist2d(_pt_end, _controls[-1]))
                 elif _nm.startswith("circle_"):
                     _d = max(_dist2d(_g.Center, _sp["center"]),
                              abs(_g.Radius - _sp["radius"]))

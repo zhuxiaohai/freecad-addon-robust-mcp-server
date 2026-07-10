@@ -946,6 +946,20 @@ class TestFabricationSourceConventions:
         assert "i_src, p_src = _resolve_point(entry[0])" in source
         assert "i_dst, p_dst = _resolve_point(entry[2])" in source
 
+    def test_endpoint_map_binds_semantic_start_end_at_creation(self) -> None:
+        """Start/end labels bind to PointPos once at sketch creation."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_endpoint_map_for_geometry" in source
+        assert "sketch_obj.getPoint(geo_idx, START)" in source
+        assert "endpoint_map[name] = _endpoint_map_for_geometry" in source
+        assert "_sketch_endpoint_map_cache" in source
+        assert "if name in endpoint_map:" in source
+        assert "_json_endpoints_for_entity(name, spec)" in source
+
     def test_coordinate_system_key_normalization(self) -> None:
         """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
         from pathlib import Path

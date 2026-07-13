@@ -236,7 +236,31 @@ class TestFabricationTools:
                 "fully_constrained": False,
                 "solve_status": 0,
                 "applied_count": 2,
-                "redundant_constraints": ["Horizontal"],
+                "input_constraint_count": 1,
+                "constraint_catalog": [
+                    {
+                        "freecad_index": 1,
+                        "freecad_type": "Horizontal",
+                        "redundant": True,
+                        "conflicting": False,
+                        "input": {
+                            "type": "Horizontal",
+                            "entry_index": 0,
+                            "entry": "line_1",
+                        },
+                        "entity_refs": ["line_1"],
+                        "source": "input",
+                    }
+                ],
+                "redundant": [
+                    {
+                        "freecad_index": 1,
+                        "freecad_type": "Horizontal",
+                        "redundant": True,
+                    }
+                ],
+                "conflicting": [],
+                "redundant_constraints": [1],
                 "conflicting_constraints": [],
                 "profile": {
                     "loops": 1,
@@ -256,7 +280,8 @@ class TestFabricationTools:
             constraints={"Horizontal": ["line_1", "line_1"]},
         )
         assert result["dof_after"] == -1
-        assert "Horizontal" in result["redundant_constraints"]
+        assert result["redundant_constraints"] == [1]
+        assert result["redundant"][0]["freecad_index"] == 1
         assert result["geometry_drift"]["max_mm"] > 0
         assert "line_1" in result["geometry_drift"]["drifted_entities"]
 
@@ -1026,7 +1051,38 @@ class TestFabricationSourceConventions:
         assert "_load_sketch_maps" in parse_block
         assert "geo.StartPoint" not in parse_block
 
+    def test_entity_kind_inferred_from_spec_not_name(self) -> None:
+        """Sketch entities use spec fields; names like 'left_edge' are allowed."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_entity_kind_from_spec" in source
+        assert 'if kind == "line":' in source
+
+    def test_constraint_catalog_in_apply_sketch_constraints(self) -> None:
+        """apply_sketch_constraints returns mapped constraint_catalog rows."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert '"constraint_catalog":      _catalog' in source
+        assert '"redundant":               _redundant_entries' in source
+        assert '"applied_log"' in source
+
     def test_coordinate_system_key_normalization(self) -> None:
+        """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert '"Euler Angles"' in source
+        assert '"Translation Vector"' in source
+        assert '"euler_angles"' in source
+        assert '"translation"' in source
         """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
         from pathlib import Path
 

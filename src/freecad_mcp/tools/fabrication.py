@@ -111,14 +111,35 @@ def _arc_endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end):
     return _endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end)
 
 
+def _entity_kind_from_spec(spec):
+    # Infer geometry kind from fields — entity names are arbitrary (NLT / agent).
+    if not isinstance(spec, dict):
+        return None
+    if spec.get("controls"):
+        return "nurbs"
+    if "middle" in spec and "start" in spec and "end" in spec:
+        return "arc"
+    if "start" in spec and "end" in spec:
+        if "major" in spec and "minor" in spec:
+            return "elliptical_arc"
+        return "line"
+    if "center" in spec and "radius" in spec:
+        return "circle"
+    if "center" in spec and "major" in spec and "minor" in spec:
+        return "ellipse"
+    return None
+
+
 def _json_endpoints_for_entity(name, spec):
-    if name.startswith("nurbs_"):
+    kind = _entity_kind_from_spec(spec)
+    if kind == "nurbs":
         controls = spec.get("controls") or []
         if len(controls) < 2:
             return None
         return controls[0], controls[-1]
-    if "start" in spec and "end" in spec:
-        return spec["start"], spec["end"]
+    if kind in ("line", "arc", "elliptical_arc"):
+        if "start" in spec and "end" in spec:
+            return spec["start"], spec["end"]
     return None
 
 
@@ -150,23 +171,24 @@ def _build_sketch_entities(sketch_obj, entity_dict):
     idx_map = {}
     endpoint_map = {}
     for name, spec in entity_dict.items():
-        if name.startswith("line_"):
+        kind = _entity_kind_from_spec(spec)
+        if kind == "line":
             geo = Part.LineSegment(
                 FreeCAD.Vector(spec["start"][0], spec["start"][1], 0),
                 FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0),
             )
-        elif name.startswith("circle_"):
+        elif kind == "circle":
             geo = Part.Circle(
                 FreeCAD.Vector(spec["center"][0], spec["center"][1], 0),
                 FreeCAD.Vector(0, 0, 1),
                 spec["radius"],
             )
-        elif name.startswith("arc_"):
+        elif kind == "arc":
             s = FreeCAD.Vector(spec["start"][0],  spec["start"][1],  0)
             m = FreeCAD.Vector(spec["middle"][0], spec["middle"][1], 0)
             e = FreeCAD.Vector(spec["end"][0],    spec["end"][1],    0)
             geo = Part.ArcOfCircle(s, m, e)
-        elif name.startswith("ellipse_"):
+        elif kind == "ellipse":
             cx, cy = spec["center"]
             geo = Part.Ellipse(
                 FreeCAD.Vector(cx, cy, 0),
@@ -176,7 +198,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             import math
             angle_rad = math.radians(spec.get("angle", 0.0))
             geo.AngleXU = angle_rad
-        elif name.startswith("elliptical_arc_"):
+        elif kind == "elliptical_arc":
             s = FreeCAD.Vector(spec["start"][0], spec["start"][1], 0)
             e = FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0)
             cx = (s.x + e.x) / 2
@@ -190,7 +212,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             angle_rad = math.radians(spec.get("angle", 0.0))
             base_ellipse.AngleXU = angle_rad
             geo = Part.ArcOfEllipse(base_ellipse, 0, math.pi)
-        elif name.startswith("nurbs_"):
+        elif kind == "nurbs":
             geo = Part.BSplineCurve()
             poles = [FreeCAD.Vector(p[0], p[1], 0) for p in spec["controls"]]
             weights = spec.get("weights", [1.0] * len(poles))
@@ -473,7 +495,7 @@ def _apply_histcad_constraints(
         if not ground_truth:
             return entries
         for name, spec in ground_truth.items():
-            if not name.startswith("line_") or name not in idx_map:
+            if _entity_kind_from_spec(spec) != "line" or name not in idx_map:
                 continue
             js = spec.get("start")
             je = spec.get("end")
@@ -578,8 +600,46 @@ def _apply_histcad_constraints(
 
     added = []
     dimension_bindings = []
+    applied_log = []
 
-    def _apply_distance_entry(entry):
+    def _entity_refs_from_entry(ctype, entry):
+        refs = []
+        if isinstance(entry, str):
+            return [entry]
+        if isinstance(entry, list):
+            for item in entry:
+                if isinstance(item, str) and ("." in item or item in idx_map):
+                    refs.append(item)
+        return refs
+
+    def _log_applied(before_count, *, source, input_type, entry_index, entry, entity_refs):
+        applied_log.append(
+            {
+                "freecad_index": before_count + 1,
+                "source": source,
+                "input": (
+                    {
+                        "type": input_type,
+                        "entry_index": entry_index,
+                        "entry": entry,
+                    }
+                    if source == "input"
+                    else None
+                ),
+                "entity_refs": entity_refs,
+                "adapter_reason": (
+                    "axis_aligned_orientation" if source == "adapter" else None
+                ),
+            }
+        )
+
+    def _apply_distance_entry(
+        entry,
+        *,
+        source="input",
+        input_type="Distance",
+        entry_index=None,
+    ):
         dim_meta = None
         i1, p1 = _resolve_point(entry[0])
         i2, p2 = _resolve_point(entry[1])
@@ -597,6 +657,14 @@ def _apply_histcad_constraints(
             c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
         before_count = len(sketch_obj.Constraints)
         sketch_obj.addConstraint(c)
+        _log_applied(
+            before_count,
+            source=source,
+            input_type=input_type,
+            entry_index=entry_index,
+            entry=entry,
+            entity_refs=[str(entry[0]), str(entry[1])],
+        )
         if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
             binding = dict(dim_meta)
             binding.update(
@@ -609,7 +677,7 @@ def _apply_histcad_constraints(
             dimension_bindings.append(binding)
         added.append("Distance")
 
-    def _apply_constraint_entry(ctype, entry):
+    def _apply_constraint_entry(ctype, entry, entry_index=None):
         dim_meta = None
         if ctype == "Coincident":
             i1, p1 = _resolve_point(entry[0])
@@ -717,9 +785,18 @@ def _apply_histcad_constraints(
             else:
                 i_src, _ = _resolve_entity(entry[0])
                 i_dst, _ = _resolve_entity(entry[2])
+                before_first = len(sketch_obj.Constraints)
                 sketch_obj.addConstraint([Sketcher.Constraint(
                     "Symmetric", i_src, START, i_dst, START, i_ax,
                 )])
+                _log_applied(
+                    before_first,
+                    source="input",
+                    input_type="Mirror",
+                    entry_index=entry_index,
+                    entry=entry,
+                    entity_refs=_entity_refs_from_entry("Mirror", entry),
+                )
                 c = Sketcher.Constraint(
                     "Symmetric", i_src, END, i_dst, END, i_ax,
                 )
@@ -756,12 +833,25 @@ def _apply_histcad_constraints(
             val = dim_meta["value"]
             c = Sketcher.Constraint("Distance", i, val)
         elif ctype == "Distance":
-            _apply_distance_entry(entry)
+            _apply_distance_entry(
+                entry,
+                source="input",
+                input_type="Distance",
+                entry_index=entry_index,
+            )
             return
         else:
             return
         before_count = len(sketch_obj.Constraints)
         sketch_obj.addConstraint(c)
+        _log_applied(
+            before_count,
+            source="input",
+            input_type=ctype,
+            entry_index=entry_index,
+            entry=entry,
+            entity_refs=_entity_refs_from_entry(ctype, entry),
+        )
         if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
             binding = dict(dim_meta)
             binding.update(
@@ -776,26 +866,31 @@ def _apply_histcad_constraints(
 
     # Phase 1: topology (Coincident / Concentric) before directed dimensions.
     for ctype in ("Coincident", "Concentric"):
-        for entry in constraint_dict.get(ctype, []):
+        for entry_index, entry in enumerate(constraint_dict.get(ctype, [])):
             try:
-                _apply_constraint_entry(ctype, entry)
+                _apply_constraint_entry(ctype, entry, entry_index=entry_index)
             except Exception:
                 pass
 
     # Phase 2: axis-aligned orientation from ground truth (breaks segment flip).
     for orient_entry in _orientation_entries_from_ground_truth():
         try:
-            _apply_distance_entry(orient_entry)
+            _apply_distance_entry(
+                orient_entry,
+                source="adapter",
+                input_type=None,
+                entry_index=None,
+            )
         except Exception:
             pass
 
-    # Phase 3: remaining constraints in JSON order.
+    # Phase 3: remaining constraints in input order.
     for ctype, entries in constraint_dict.items():
         if ctype in ("Coincident", "Concentric"):
             continue
-        for entry in entries:
+        for entry_index, entry in enumerate(entries):
             try:
-                _apply_constraint_entry(ctype, entry)
+                _apply_constraint_entry(ctype, entry, entry_index=entry_index)
             except Exception:
                 pass
 
@@ -809,7 +904,11 @@ def _apply_histcad_constraints(
                     redundant.append(sketch_obj.Constraints[r_idx].Name or str(r_idx))
     except Exception:
         pass
-    return {"redundant": redundant, "dimension_bindings": dimension_bindings}
+    return {
+        "redundant": redundant,
+        "dimension_bindings": dimension_bindings,
+        "applied_log": applied_log,
+    }
 """
 
 
@@ -1262,14 +1361,27 @@ try:
         }}
     except Exception:
         pass
+    _entity_rows = []
+    for _ename, _eidx in idx_map.items():
+        _espec = sketch_dict.get(_ename, {{}})
+        _entity_rows.append({{
+            "name": _ename,
+            "kind": _entity_kind_from_spec(_espec),
+            "freecad_geometry_index": _eidx,
+        }})
+    _kind_counts = {{}}
+    for _row in _entity_rows:
+        _k = _row.get("kind") or "unknown"
+        _kind_counts[_k] = _kind_counts.get(_k, 0) + 1
     _result_ = {{
         "sketch_name": sk.Name,
         "cs_name": _auto_lcs_name,
+        "entities": _entity_rows,
         "geometry_count": {{
             "total":   _n_total,
-            "lines":   _n_lines,
-            "arcs":    _n_arcs,
-            "circles": _n_circles,
+            "lines":   _kind_counts.get("line", 0),
+            "arcs":    _kind_counts.get("arc", 0),
+            "circles": _kind_counts.get("circle", 0),
         }},
         "profile":           _profile,
         "dof_remaining":     dof_real,
@@ -1646,10 +1758,14 @@ _result_ = {{
                 - fully_constrained: ``True`` when ``dof_after == 0``.
                 - solve_status: Sketcher solver return code (0 = solved).
                 - applied_count: Number of constraints successfully applied.
-                - redundant_constraints: Constraint type names reported
-                  redundant (by the adapter or the solver).
-                - conflicting_constraints: Constraint type names the solver
-                  reports as conflicting (unsatisfiable together).
+                - input_constraint_count: Number of entries in the input
+                  constraints dict (before adapter additions).
+                - constraint_catalog: Per-constraint rows mapping FreeCAD
+                  indices to input constraint entries and entity refs.
+                - redundant: Catalog rows flagged redundant by the solver.
+                - conflicting: Catalog rows flagged conflicting by the solver.
+                - redundant_constraints: 1-based FreeCAD indices (legacy shorthand).
+                - conflicting_constraints: 1-based FreeCAD indices (legacy).
                 - profile: ``{loops, closed_loops, open_loops, closed}`` after
                   solving — the solver can open a previously closed loop when
                   it moves geometry.
@@ -1727,6 +1843,7 @@ try:
         ground_truth=ground_truth,
     )
     redundant = constraint_result.get("redundant", [])
+    applied_log = constraint_result.get("applied_log", [])
     dimension_bindings = constraint_result.get("dimension_bindings", [])
     applied_after = len(sk.Constraints) if hasattr(sk, "Constraints") else applied_before
     applied_count = applied_after - applied_before
@@ -1806,8 +1923,61 @@ try:
     solve_status = sk.solve() if hasattr(sk, "solve") else -1
     fully_constrained = getattr(sk, "FullyConstrained", False)
 
+    def _inv_idx_map(_m):
+        return {{int(v): k for k, v in _m.items()}}
+
+    def _pos_label(_p):
+        return {{1: "start", 2: "end", 3: "middle"}}.get(int(_p))
+
+    def _refs_from_fc_constraint(_c, _inv):
+        _refs = []
+        _f, _fp = int(_c.First), int(_c.FirstPos)
+        if _f >= 0 and _f in _inv:
+            _lbl = _pos_label(_fp)
+            _refs.append(f"{{_inv[_f]}}.{{_lbl}}" if _lbl else _inv[_f])
+        _s = int(_c.Second)
+        if _s >= 0 and _s in _inv:
+            _sp = int(_c.SecondPos)
+            _lbl = _pos_label(_sp)
+            _refs.append(f"{{_inv[_s]}}.{{_lbl}}" if _lbl else _inv[_s])
+        return _refs
+
+    _inv = _inv_idx_map(idx_map)
+    _redundant_set = set(int(_x) for _x in (getattr(sk, "RedundantConstraints", []) or []))
+    _conflicting_set = set(int(_x) for _x in (getattr(sk, "ConflictingConstraints", []) or []))
+
+    _catalog = []
+    for _i, _c in enumerate(sk.Constraints):
+        _n = _i + 1
+        _base = applied_log[_i] if _i < len(applied_log) else {{
+            "source": "unknown",
+            "input": None,
+            "entity_refs": [],
+            "adapter_reason": None,
+        }}
+        _val = None
+        try:
+            _val = round(float(_c.Value), 6)
+        except Exception:
+            pass
+        _catalog.append({{
+            "freecad_index": _n,
+            "freecad_type": _c.Type,
+            "freecad_value": _val,
+            "entity_refs": _base.get("entity_refs")
+            or _refs_from_fc_constraint(_c, _inv),
+            "input": _base.get("input"),
+            "source": _base.get("source", "unknown"),
+            "adapter_reason": _base.get("adapter_reason"),
+            "redundant": _n in _redundant_set,
+            "conflicting": _n in _conflicting_set,
+        }})
+
+    _redundant_entries = [_row for _row in _catalog if _row["redundant"]]
+    _conflicting_entries = [_row for _row in _catalog if _row["conflicting"]]
+
     def _constraint_names(_idxs):
-        # Sketcher reports RedundantConstraints/ConflictingConstraints 1-based.
+        # Legacy helper — prefer constraint_catalog for agent debugging.
         _out = []
         for _ci in _idxs:
             try:
@@ -1855,11 +2025,17 @@ try:
                     continue
                 _g = sk.Geometry[_gi]
                 _d = None
-                if (
-                    _nm.startswith("line_")
-                    or _nm.startswith("arc_")
-                    or _nm.startswith("elliptical_arc_")
-                ):
+                _kind = None
+                if isinstance(_sp, dict):
+                    if "middle" in _sp and "start" in _sp:
+                        _kind = "arc"
+                    elif "start" in _sp and "end" in _sp and "major" in _sp:
+                        _kind = "elliptical_arc"
+                    elif "start" in _sp and "end" in _sp:
+                        _kind = "line"
+                    elif "center" in _sp and "radius" in _sp:
+                        _kind = "circle"
+                if _kind in ("line", "arc", "elliptical_arc"):
                     _ep = endpoint_map.get(_nm, {{}})
                     _start_pos = _ep.get("start", 1)
                     _end_pos = _ep.get("end", 2)
@@ -1867,7 +2043,9 @@ try:
                     _pt_end = sk.getPoint(_gi, _end_pos)
                     _d = max(_dist2d(_pt_start, _sp["start"]),
                              _dist2d(_pt_end, _sp["end"]))
-                elif _nm.startswith("nurbs_"):
+                elif _kind == "nurbs" or (
+                    isinstance(_sp, dict) and _sp.get("controls")
+                ):
                     _controls = _sp.get("controls") or []
                     if len(_controls) >= 2 and _nm in endpoint_map:
                         _ep = endpoint_map[_nm]
@@ -1875,7 +2053,12 @@ try:
                         _pt_end = sk.getPoint(_gi, _ep.get("end", 2))
                         _d = max(_dist2d(_pt_start, _controls[0]),
                                  _dist2d(_pt_end, _controls[-1]))
-                elif _nm.startswith("circle_"):
+                elif _kind == "circle" or (
+                    isinstance(_sp, dict)
+                    and "center" in _sp
+                    and "radius" in _sp
+                    and "start" not in _sp
+                ):
                     _d = max(_dist2d(_g.Center, _sp["center"]),
                              abs(_g.Radius - _sp["radius"]))
                 if _d is None:
@@ -1894,8 +2077,12 @@ try:
         "fully_constrained":       fully_constrained,
         "solve_status":            solve_status,
         "applied_count":           applied_count,
-        "redundant_constraints":   redundant + solver_redundant,
-        "conflicting_constraints": conflicting,
+        "input_constraint_count":  sum(len(v) for v in constraints_in.values()),
+        "constraint_catalog":      _catalog,
+        "redundant":               _redundant_entries,
+        "conflicting":             _conflicting_entries,
+        "redundant_constraints":   [_row["freecad_index"] for _row in _redundant_entries],
+        "conflicting_constraints": [_row["freecad_index"] for _row in _conflicting_entries],
         "profile":                 _profile,
         "geometry_drift":          _drift,
         "bound_params":            bound_params,

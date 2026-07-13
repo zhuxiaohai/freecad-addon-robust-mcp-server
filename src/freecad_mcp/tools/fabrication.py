@@ -51,7 +51,11 @@ Entities in the ``sketch`` dict use prefixed names:
 At sketch creation, ``endpoint_map`` binds each entity's semantic
 ``start``/``end`` labels to FreeCAD ``PointPos`` values.  Constraints
 resolve ``line_1.start`` through that map — never by re-matching coordinates
-after the solver moves geometry.
+after the solver moves geometry.  Maps are persisted on the sketch object
+(``HistCADMaps`` / ``HistCADGeometry`` properties) for cross-MCP-call reuse.
+Directed ``Distance`` constraints with ``HORIZONTAL``/``VERTICAL`` use signed
+deltas from the persisted ground-truth geometry to break segment-flip ambiguity
+without ``Fix`` on profile entities.
 
 HistCAD constraint types (19 total)
 ------------------------------------
@@ -215,10 +219,119 @@ def _build_sketch_entities(sketch_obj, entity_dict):
                 sketch_obj, idx, js, je,
             )
     return idx_map, endpoint_map
+
+
+def _persist_sketch_maps(sketch_obj, idx_map, endpoint_map, sketch_dict):
+    # Persist maps on the sketch and in __main__ so MCP calls survive process reuse.
+    import json
+    import __main__ as _main
+
+    if not hasattr(_main, "_sketch_geometry_cache"):
+        _main._sketch_geometry_cache = {}
+    if not hasattr(_main, "_sketch_idx_map_cache"):
+        _main._sketch_idx_map_cache = {}
+    if not hasattr(_main, "_sketch_endpoint_map_cache"):
+        _main._sketch_endpoint_map_cache = {}
+    _main._sketch_geometry_cache[sketch_obj.Name] = sketch_dict
+    _main._sketch_idx_map_cache[sketch_obj.Name] = idx_map
+    _main._sketch_endpoint_map_cache[sketch_obj.Name] = endpoint_map
+    try:
+        payload = json.dumps({"idx_map": idx_map, "endpoint_map": endpoint_map})
+        if not hasattr(sketch_obj, "HistCADMaps"):
+            sketch_obj.addProperty(
+                "App::PropertyString",
+                "HistCADMaps",
+                "HistCAD",
+                "Persisted HistCAD entity and endpoint maps",
+            )
+        sketch_obj.HistCADMaps = payload
+        if not hasattr(sketch_obj, "HistCADGeometry"):
+            sketch_obj.addProperty(
+                "App::PropertyString",
+                "HistCADGeometry",
+                "HistCAD",
+                "Ground-truth HistCAD sketch geometry JSON",
+            )
+        sketch_obj.HistCADGeometry = json.dumps(sketch_dict)
+    except Exception:
+        pass
+
+
+def _load_sketch_maps(sketch_obj):
+    # Load persisted maps; never re-derive endpoint_map from live geometry.
+    import json
+    import __main__ as _main
+
+    idx_map = getattr(_main, "_sketch_idx_map_cache", {}).get(sketch_obj.Name)
+    endpoint_map = getattr(_main, "_sketch_endpoint_map_cache", {}).get(
+        sketch_obj.Name,
+    )
+    ground_truth = getattr(_main, "_sketch_geometry_cache", {}).get(sketch_obj.Name)
+    try:
+        if hasattr(sketch_obj, "HistCADMaps") and sketch_obj.HistCADMaps:
+            payload = json.loads(sketch_obj.HistCADMaps)
+            idx_map = payload.get("idx_map") or idx_map
+            endpoint_map = payload.get("endpoint_map") or endpoint_map
+        if hasattr(sketch_obj, "HistCADGeometry") and sketch_obj.HistCADGeometry:
+            ground_truth = json.loads(sketch_obj.HistCADGeometry)
+    except Exception:
+        pass
+    idx_map = idx_map or {}
+    endpoint_map = endpoint_map or {}
+    ground_truth = ground_truth or {}
+    if idx_map and not endpoint_map and ground_truth:
+        endpoint_map = {
+            name: {"start": 1, "end": 2, "center": 3, "middle": 3}
+            for name in idx_map
+            if isinstance(ground_truth.get(name), dict)
+            and "start" in ground_truth[name]
+            and "end" in ground_truth[name]
+        }
+    if idx_map:
+        _main._sketch_idx_map_cache[sketch_obj.Name] = idx_map
+    if endpoint_map:
+        _main._sketch_endpoint_map_cache[sketch_obj.Name] = endpoint_map
+    if ground_truth:
+        _main._sketch_geometry_cache[sketch_obj.Name] = ground_truth
+    return idx_map, endpoint_map, ground_truth
+
+
+def _semantic_line_endpoints(sketch_obj, geo_idx, endpoint_map_entry):
+    START, END = 1, 2
+    sp = endpoint_map_entry.get("start", START)
+    ep = endpoint_map_entry.get("end", END)
+    p_start = sketch_obj.getPoint(geo_idx, sp)
+    p_end = sketch_obj.getPoint(geo_idx, ep)
+    return [p_start.x, p_start.y], [p_end.x, p_end.y]
+
+
+def _semantic_arc_points(sketch_obj, geo_idx, endpoint_map_entry, geo):
+    START, END, MID = 1, 2, 3
+    sp = endpoint_map_entry.get("start", START)
+    ep = endpoint_map_entry.get("end", END)
+    p_start = sketch_obj.getPoint(geo_idx, sp)
+    p_end = sketch_obj.getPoint(geo_idx, ep)
+    mid_param = (geo.FirstParameter + geo.LastParameter) / 2
+    try:
+        mid_pt = geo.value(mid_param)
+    except Exception:
+        mid_pt = geo.Center
+    return (
+        [p_start.x, p_start.y],
+        [mid_pt.x, mid_pt.y],
+        [p_end.x, p_end.y],
+    )
 """
 
 _SKETCH_CONSTRAINT_CODE = r"""
-def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map, endpoint_map=None, arc_endpoint_map=None):
+def _apply_histcad_constraints(
+    sketch_obj,
+    constraint_dict,
+    idx_map,
+    endpoint_map=None,
+    arc_endpoint_map=None,
+    ground_truth=None,
+):
     # Apply HistCAD constraints to a Sketcher object.
     # Returns {"redundant": [...], "dimension_bindings": [...]}.
     #
@@ -228,6 +341,8 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map, endpoint_ma
 
     if endpoint_map is None:
         endpoint_map = arc_endpoint_map or {}
+    if ground_truth is None:
+        ground_truth = {}
 
     # FreeCAD 1.1 removed Sketcher.PointPos; use integer PointPos values directly.
     # 0 = none, 1 = start, 2 = end, 3 = middle
@@ -264,6 +379,129 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map, endpoint_ma
                 point_label, _pos_map.get(point_label, NONE),
             )
         return _pos_map.get(point_label, NONE)
+
+    def _ground_truth_xy(ref):
+        if not ground_truth or "." not in str(ref):
+            return None
+        name, point = str(ref).split(".", 1)
+        spec = ground_truth.get(name)
+        if not isinstance(spec, dict):
+            return None
+        if point == "start":
+            return spec.get("start")
+        if point == "end":
+            return spec.get("end")
+        if point in ("center", "middle"):
+            return spec.get("center") or spec.get("middle")
+        return None
+
+    def _directed_axis_distance(ref_a, ref_b, axis_index, magnitude):
+        # FreeCAD DistanceX/Y use coord(ref_b) - coord(ref_a) on the axis.
+        # Ground-truth coordinates supply the sign for VERTICAL/HORIZONTAL dims.
+        pa = _ground_truth_xy(ref_a)
+        pb = _ground_truth_xy(ref_b)
+        if pa is None or pb is None:
+            return magnitude
+        delta = float(pb[axis_index]) - float(pa[axis_index])
+        if abs(abs(delta) - float(magnitude)) <= max(1e-3, 1e-3 * abs(magnitude)):
+            return delta
+        return magnitude
+
+    def _fix_constraint(geo_idx, point_pos=None):
+        # HistCAD Fix: entity_ref -> Block(geo); point_ref -> Lock/Block point.
+        # FreeCAD 1.1 Block(geo, point) is invalid; whole-entity uses Block(geo).
+        if point_pos is None or point_pos == MID:
+            return Sketcher.Constraint("Block", geo_idx)
+        for factory in (
+            lambda: Sketcher.Constraint("Lock", geo_idx, point_pos),
+            lambda: Sketcher.Constraint("Block", geo_idx, point_pos),
+        ):
+            try:
+                return factory()
+            except (TypeError, ValueError):
+                continue
+        return Sketcher.Constraint("Block", geo_idx)
+
+    def _primitive_from_ref(ref):
+        text = str(ref)
+        return text.split(".", 1)[0] if "." in text else text
+
+    def _orientation_covered_by_json_constraints(line_name, orient_direction):
+        # Skip auto-orientation when JSON already fixes segment direction via
+        # directed Distance / Horizontal / Vertical. Extra orientation constraints
+        # are invisible to editability preserved-constraint checks but still
+        # fight parametric edits (hurts cPCSR / OES).
+        wanted = str(orient_direction).upper()
+        for entry in constraint_dict.get("Vertical", []):
+            if entry == line_name:
+                return True
+            if isinstance(entry, list) and len(entry) >= 2:
+                if {_primitive_from_ref(entry[0]), _primitive_from_ref(entry[1])} == {
+                    line_name
+                }:
+                    return True
+        for entry in constraint_dict.get("Horizontal", []):
+            if entry == line_name:
+                return True
+            if isinstance(entry, list) and len(entry) >= 2:
+                if {_primitive_from_ref(entry[0]), _primitive_from_ref(entry[1])} == {
+                    line_name
+                }:
+                    return True
+        for entry in constraint_dict.get("Distance", []):
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            extra = entry[2] if len(entry) > 2 else {}
+            if not isinstance(extra, dict):
+                continue
+            direction = str(extra.get("direction", "")).upper()
+            if direction != wanted:
+                continue
+            primitives = {
+                _primitive_from_ref(ref)
+                for ref in entry[:2]
+                if isinstance(ref, str) and "." in ref
+            }
+            if line_name in primitives:
+                return True
+        return False
+
+    def _orientation_entries_from_ground_truth():
+        # Break flip ambiguity on axis-aligned segments using signed deltas from
+        # JSON geometry — only when JSON lacks directed constraints on that line.
+        entries = []
+        if not ground_truth:
+            return entries
+        for name, spec in ground_truth.items():
+            if not name.startswith("line_") or name not in idx_map:
+                continue
+            js = spec.get("start")
+            je = spec.get("end")
+            if js is None or je is None:
+                continue
+            dx = float(je[0]) - float(js[0])
+            dy = float(je[1]) - float(js[1])
+            if abs(dx) < 1e-6 and abs(dy) > 1e-6:
+                if _orientation_covered_by_json_constraints(name, "VERTICAL"):
+                    continue
+                entries.append(
+                    [
+                        f"{name}.start",
+                        f"{name}.end",
+                        {"direction": "VERTICAL", "length": dy},
+                    ]
+                )
+            elif abs(dy) < 1e-6 and abs(dx) > 1e-6:
+                if _orientation_covered_by_json_constraints(name, "HORIZONTAL"):
+                    continue
+                entries.append(
+                    [
+                        f"{name}.start",
+                        f"{name}.end",
+                        {"direction": "HORIZONTAL", "length": dx},
+                    ]
+                )
+        return entries
 
     def _parse_length(val):
         # '10 mm' -> 10.0  (already in mm, FreeCAD uses mm internally)
@@ -340,186 +578,226 @@ def _apply_histcad_constraints(sketch_obj, constraint_dict, idx_map, endpoint_ma
 
     added = []
     dimension_bindings = []
+
+    def _apply_distance_entry(entry):
+        dim_meta = None
+        i1, p1 = _resolve_point(entry[0])
+        i2, p2 = _resolve_point(entry[1])
+        extra = entry[2] if len(entry) > 2 else {}
+        dim_meta = _dimension_meta(extra)
+        val = dim_meta["value"]
+        direction = extra.get("direction", "")
+        if direction == "HORIZONTAL":
+            val = _directed_axis_distance(entry[0], entry[1], 0, val)
+            c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
+        elif direction == "VERTICAL":
+            val = _directed_axis_distance(entry[0], entry[1], 1, val)
+            c = Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)
+        else:
+            c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
+        before_count = len(sketch_obj.Constraints)
+        sketch_obj.addConstraint(c)
+        if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
+            binding = dict(dim_meta)
+            binding.update(
+                {
+                    "constraint_index": before_count,
+                    "constraint_type": "Distance",
+                    "property": f"Constraints[{before_count}]",
+                }
+            )
+            dimension_bindings.append(binding)
+        added.append("Distance")
+
+    def _apply_constraint_entry(ctype, entry):
+        dim_meta = None
+        if ctype == "Coincident":
+            i1, p1 = _resolve_point(entry[0])
+            i2, p2 = _resolve_point(entry[1])
+            c = Sketcher.Constraint("Coincident", i1, p1, i2, p2)
+        elif ctype == "Horizontal":
+            if isinstance(entry, str):
+                i, _ = _resolve_entity(entry)
+                c = Sketcher.Constraint("Horizontal", i)
+            else:
+                i1, p1 = _resolve_point(entry[0])
+                i2, p2 = _resolve_point(entry[1])
+                c = Sketcher.Constraint("Horizontal", i1, p1, i2, p2)
+        elif ctype == "Vertical":
+            if isinstance(entry, str):
+                i, _ = _resolve_entity(entry)
+                c = Sketcher.Constraint("Vertical", i)
+            else:
+                i1, p1 = _resolve_point(entry[0])
+                i2, p2 = _resolve_point(entry[1])
+                c = Sketcher.Constraint("Vertical", i1, p1, i2, p2)
+        elif ctype == "Perpendicular":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            c = Sketcher.Constraint("Perpendicular", i1, i2)
+        elif ctype == "Parallel":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            c = Sketcher.Constraint("Parallel", i1, i2)
+        elif ctype == "Equal":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            c = Sketcher.Constraint("Equal", i1, i2)
+        elif ctype == "Tangent":
+            _ref1, _ref2 = entry[0], entry[1]
+            _has_pt1, _has_pt2 = "." in _ref1, "." in _ref2
+            if _has_pt1 and _has_pt2:
+                _ti1, _tp1 = _resolve_point(_ref1)
+                _ti2, _tp2 = _resolve_point(_ref2)
+                c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
+            elif not _has_pt1 and not _has_pt2:
+                _shared = None
+                for _pn in ("start", "end"):
+                    _k = (_ref1, _pn)
+                    if _k in _coinc_map and _coinc_map[_k][0] == _ref2:
+                        _shared = (_pn, _coinc_map[_k][1])
+                        break
+                if _shared is None:
+                    for _pn in ("start", "end"):
+                        _k = (_ref2, _pn)
+                        if _k in _coinc_map and _coinc_map[_k][0] == _ref1:
+                            _shared = (_coinc_map[_k][1], _pn)
+                            break
+                if _shared is not None:
+                    _ti1 = idx_map[_ref1]
+                    _tp1 = _json_pos_to_sketch_pos(_ref1, _shared[0])
+                    _ti2 = idx_map[_ref2]
+                    _tp2 = _json_pos_to_sketch_pos(_ref2, _shared[1])
+                    c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
+                else:
+                    _ti1, _ = _resolve_entity(_ref1)
+                    _ti2, _ = _resolve_entity(_ref2)
+                    c = Sketcher.Constraint("Tangent", _ti1, _ti2)
+            else:
+                _ti1, _ = _resolve_entity(_ref1.split(".")[0])
+                _ti2, _ = _resolve_entity(_ref2.split(".")[0])
+                c = Sketcher.Constraint("Tangent", _ti1, _ti2)
+        elif ctype == "Normal":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            c = Sketcher.Constraint("Perpendicular", i1, i2)
+        elif ctype == "Concentric":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            c = Sketcher.Constraint("Coincident", i1, MID, i2, MID)
+        elif ctype == "Fix":
+            if "." in entry:
+                i, p = _resolve_point(entry)
+            else:
+                i, _ = _resolve_entity(entry)
+                p = None
+            c = _fix_constraint(i, p)
+        elif ctype == "Midpoint":
+            if isinstance(entry[1], list):
+                i_mid, p_mid = _resolve_point(entry[0])
+                i_a, p_a = _resolve_point(entry[1][0])
+                i_b, p_b = _resolve_point(entry[1][1])
+                c = Sketcher.Constraint(
+                    "Symmetric", i_a, p_a, i_b, p_b, i_mid, p_mid,
+                )
+            else:
+                i_pt, p_pt = _resolve_point(entry[0])
+                i_ln, _ = _resolve_entity(entry[1])
+                c = Sketcher.Constraint(
+                    "Symmetric", i_ln, START, i_ln, END, i_pt, p_pt,
+                )
+        elif ctype == "Mirror":
+            i_ax, _ = _resolve_entity(entry[1])
+            if "." in str(entry[0]) and "." in str(entry[2]):
+                i_src, p_src = _resolve_point(entry[0])
+                i_dst, p_dst = _resolve_point(entry[2])
+                c = Sketcher.Constraint(
+                    "Symmetric", i_src, p_src, i_dst, p_dst, i_ax,
+                )
+            else:
+                i_src, _ = _resolve_entity(entry[0])
+                i_dst, _ = _resolve_entity(entry[2])
+                sketch_obj.addConstraint([Sketcher.Constraint(
+                    "Symmetric", i_src, START, i_dst, START, i_ax,
+                )])
+                c = Sketcher.Constraint(
+                    "Symmetric", i_src, END, i_dst, END, i_ax,
+                )
+        elif ctype == "Angle":
+            i1, _ = _resolve_entity(entry[0])
+            i2, _ = _resolve_entity(entry[1])
+            import math
+            dim_meta = _angle_meta(entry[2])
+            angle_rad = math.radians(float(dim_meta["value"]))
+            c = Sketcher.Constraint("Angle", i1, i2, angle_rad)
+        elif ctype == "Diameter":
+            i, _ = _resolve_entity(entry[0])
+            dim_meta = _dimension_meta(entry[1], value_key="diameter")
+            val = dim_meta["value"]
+            c = Sketcher.Constraint("Radius", i, val / 2.0)
+        elif ctype == "Radius":
+            i, _ = _resolve_entity(entry[0])
+            dim_meta = _dimension_meta(entry[1], value_key="radius")
+            val = dim_meta["value"]
+            c = Sketcher.Constraint("Radius", i, val)
+        elif ctype == "MajorRadius":
+            i, _ = _resolve_entity(entry[0])
+            dim_meta = _dimension_meta(entry[1])
+            val = dim_meta["value"]
+            c = Sketcher.Constraint("Radius", i, val)
+        elif ctype == "MinorRadius":
+            i, _ = _resolve_entity(entry[0])
+            dim_meta = _dimension_meta(entry[1])
+            val = dim_meta["value"]
+            c = Sketcher.Constraint("Radius", i, val)
+        elif ctype == "Length":
+            i, _ = _resolve_entity(entry[0])
+            dim_meta = _dimension_meta(entry[1])
+            val = dim_meta["value"]
+            c = Sketcher.Constraint("Distance", i, val)
+        elif ctype == "Distance":
+            _apply_distance_entry(entry)
+            return
+        else:
+            return
+        before_count = len(sketch_obj.Constraints)
+        sketch_obj.addConstraint(c)
+        if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
+            binding = dict(dim_meta)
+            binding.update(
+                {
+                    "constraint_index": before_count,
+                    "constraint_type": ctype,
+                    "property": f"Constraints[{before_count}]",
+                }
+            )
+            dimension_bindings.append(binding)
+        added.append(ctype)
+
+    # Phase 1: topology (Coincident / Concentric) before directed dimensions.
+    for ctype in ("Coincident", "Concentric"):
+        for entry in constraint_dict.get(ctype, []):
+            try:
+                _apply_constraint_entry(ctype, entry)
+            except Exception:
+                pass
+
+    # Phase 2: axis-aligned orientation from ground truth (breaks segment flip).
+    for orient_entry in _orientation_entries_from_ground_truth():
+        try:
+            _apply_distance_entry(orient_entry)
+        except Exception:
+            pass
+
+    # Phase 3: remaining constraints in JSON order.
     for ctype, entries in constraint_dict.items():
+        if ctype in ("Coincident", "Concentric"):
+            continue
         for entry in entries:
             try:
-                dim_meta = None
-                if ctype == "Coincident":
-                    i1, p1 = _resolve_point(entry[0])
-                    i2, p2 = _resolve_point(entry[1])
-                    c = Sketcher.Constraint("Coincident", i1, p1, i2, p2)
-                elif ctype == "Horizontal":
-                    if isinstance(entry, str):
-                        i, _ = _resolve_entity(entry)
-                        c = Sketcher.Constraint("Horizontal", i)
-                    else:
-                        i1, p1 = _resolve_point(entry[0])
-                        i2, p2 = _resolve_point(entry[1])
-                        c = Sketcher.Constraint("Horizontal", i1, p1, i2, p2)
-                elif ctype == "Vertical":
-                    if isinstance(entry, str):
-                        i, _ = _resolve_entity(entry)
-                        c = Sketcher.Constraint("Vertical", i)
-                    else:
-                        i1, p1 = _resolve_point(entry[0])
-                        i2, p2 = _resolve_point(entry[1])
-                        c = Sketcher.Constraint("Vertical", i1, p1, i2, p2)
-                elif ctype == "Perpendicular":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("Perpendicular", i1, i2)
-                elif ctype == "Parallel":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("Parallel", i1, i2)
-                elif ctype == "Equal":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("Equal", i1, i2)
-                elif ctype == "Tangent":
-                    _ref1, _ref2 = entry[0], entry[1]
-                    _has_pt1, _has_pt2 = "." in _ref1, "." in _ref2
-                    if _has_pt1 and _has_pt2:
-                        _ti1, _tp1 = _resolve_point(_ref1)
-                        _ti2, _tp2 = _resolve_point(_ref2)
-                        c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
-                    elif not _has_pt1 and not _has_pt2:
-                        _shared = None
-                        for _pn in ("start", "end"):
-                            _k = (_ref1, _pn)
-                            if _k in _coinc_map and _coinc_map[_k][0] == _ref2:
-                                _shared = (_pn, _coinc_map[_k][1])
-                                break
-                        if _shared is None:
-                            for _pn in ("start", "end"):
-                                _k = (_ref2, _pn)
-                                if _k in _coinc_map and _coinc_map[_k][0] == _ref1:
-                                    _shared = (_coinc_map[_k][1], _pn)
-                                    break
-                        if _shared is not None:
-                            _ti1 = idx_map[_ref1]
-                            _tp1 = _json_pos_to_sketch_pos(_ref1, _shared[0])
-                            _ti2 = idx_map[_ref2]
-                            _tp2 = _json_pos_to_sketch_pos(_ref2, _shared[1])
-                            c = Sketcher.Constraint("Tangent", _ti1, _tp1, _ti2, _tp2)
-                        else:
-                            _ti1, _ = _resolve_entity(_ref1)
-                            _ti2, _ = _resolve_entity(_ref2)
-                            c = Sketcher.Constraint("Tangent", _ti1, _ti2)
-                    else:
-                        _ti1, _ = _resolve_entity(_ref1.split(".")[0])
-                        _ti2, _ = _resolve_entity(_ref2.split(".")[0])
-                        c = Sketcher.Constraint("Tangent", _ti1, _ti2)
-                elif ctype == "Normal":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("Perpendicular", i1, i2)
-                elif ctype == "Concentric":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    c = Sketcher.Constraint("Coincident", i1, MID, i2, MID)
-                elif ctype == "Fix":
-                    if "." in entry:
-                        i, p = _resolve_point(entry)
-                    else:
-                        i, p = _resolve_entity(entry)
-                        p = MID
-                    c = Sketcher.Constraint("Block", i, p)
-                elif ctype == "Midpoint":
-                    if isinstance(entry[1], list):
-                        i_mid, p_mid = _resolve_point(entry[0])
-                        i_a, p_a = _resolve_point(entry[1][0])
-                        i_b, p_b = _resolve_point(entry[1][1])
-                        c = Sketcher.Constraint(
-                            "Symmetric", i_a, p_a, i_b, p_b, i_mid, p_mid,
-                        )
-                    else:
-                        i_pt, p_pt = _resolve_point(entry[0])
-                        i_ln, _ = _resolve_entity(entry[1])
-                        c = Sketcher.Constraint(
-                            "Symmetric", i_ln, START, i_ln, END, i_pt, p_pt,
-                        )
-                elif ctype == "Mirror":
-                    i_ax, _ = _resolve_entity(entry[1])
-                    if "." in str(entry[0]) and "." in str(entry[2]):
-                        i_src, p_src = _resolve_point(entry[0])
-                        i_dst, p_dst = _resolve_point(entry[2])
-                        c = Sketcher.Constraint(
-                            "Symmetric", i_src, p_src, i_dst, p_dst, i_ax,
-                        )
-                    else:
-                        i_src, _ = _resolve_entity(entry[0])
-                        i_dst, _ = _resolve_entity(entry[2])
-                        sketch_obj.addConstraint([Sketcher.Constraint(
-                            "Symmetric", i_src, START, i_dst, START, i_ax,
-                        )])
-                        c = Sketcher.Constraint(
-                            "Symmetric", i_src, END, i_dst, END, i_ax,
-                        )
-                elif ctype == "Angle":
-                    i1, _ = _resolve_entity(entry[0])
-                    i2, _ = _resolve_entity(entry[1])
-                    import math
-                    dim_meta = _angle_meta(entry[2])
-                    angle_rad = math.radians(float(dim_meta["value"]))
-                    c = Sketcher.Constraint("Angle", i1, i2, angle_rad)
-                elif ctype == "Diameter":
-                    i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1], value_key="diameter")
-                    val = dim_meta["value"]
-                    c = Sketcher.Constraint("Radius", i, val / 2.0)
-                elif ctype == "Radius":
-                    i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1], value_key="radius")
-                    val = dim_meta["value"]
-                    c = Sketcher.Constraint("Radius", i, val)
-                elif ctype == "MajorRadius":
-                    i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1])
-                    val = dim_meta["value"]
-                    c = Sketcher.Constraint("Radius", i, val)
-                elif ctype == "MinorRadius":
-                    i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1])
-                    val = dim_meta["value"]
-                    c = Sketcher.Constraint("Radius", i, val)
-                elif ctype == "Length":
-                    i, _ = _resolve_entity(entry[0])
-                    dim_meta = _dimension_meta(entry[1])
-                    val = dim_meta["value"]
-                    c = Sketcher.Constraint("Distance", i, val)
-                elif ctype == "Distance":
-                    i1, p1 = _resolve_point(entry[0])
-                    i2, p2 = _resolve_point(entry[1])
-                    extra = entry[2] if len(entry) > 2 else {}
-                    dim_meta = _dimension_meta(extra)
-                    val = dim_meta["value"]
-                    direction = extra.get("direction", "")
-                    if direction == "HORIZONTAL":
-                        c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
-                    elif direction == "VERTICAL":
-                        c = Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)
-                    else:
-                        c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
-                else:
-                    continue
-                before_count = len(sketch_obj.Constraints)
-                sketch_obj.addConstraint(c)
-                if dim_meta and (
-                    dim_meta.get("alias") or dim_meta.get("expression")
-                ):
-                    binding = dict(dim_meta)
-                    binding.update(
-                        {
-                            "constraint_index": before_count,
-                            "constraint_type": ctype,
-                            "property": f"Constraints[{before_count}]",
-                        }
-                    )
-                    dimension_bindings.append(binding)
-                added.append(ctype)
+                _apply_constraint_entry(ctype, entry)
             except Exception:
-                pass  # redundant or conflicting constraints are silently skipped
+                pass
 
     # Collect redundant constraint names from solver state
     redundant = []
@@ -938,19 +1216,7 @@ try:
     doc.recompute()
 
     # Store entity map and original geometry for later retrieval.
-    # Primary: __main__ dict — works for any FreeCAD object in the same session.
-    # Secondary: setDocumentData — only available on App::FeaturePython objects,
-    # NOT on the built-in Sketcher::SketchObject (hasattr returns False there).
-    import __main__ as _main
-    if not hasattr(_main, "_sketch_geometry_cache"):
-        _main._sketch_geometry_cache = {{}}
-    if not hasattr(_main, "_sketch_idx_map_cache"):
-        _main._sketch_idx_map_cache = {{}}
-    if not hasattr(_main, "_sketch_endpoint_map_cache"):
-        _main._sketch_endpoint_map_cache = {{}}
-    _main._sketch_geometry_cache[sk.Name] = sketch_dict
-    _main._sketch_idx_map_cache[sk.Name] = idx_map
-    _main._sketch_endpoint_map_cache[sk.Name] = endpoint_map
+    _persist_sketch_maps(sk, idx_map, endpoint_map, sketch_dict)
     try:
         if hasattr(sk, "setDocumentData"):
             sk.setDocumentData("entity_index_map", str(idx_map))
@@ -1065,6 +1331,9 @@ except Exception as _e:
         bridge = await get_bridge()
         code = f"""
 import math
+import re
+
+{_SKETCH_ENTITY_CODE}
 
 doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
 if doc is None:
@@ -1084,8 +1353,6 @@ trans = pl.Base
 _col_x = rot.multVec(FreeCAD.Vector(1, 0, 0))
 _col_y = rot.multVec(FreeCAD.Vector(0, 1, 0))
 _col_z = rot.multVec(FreeCAD.Vector(0, 0, 1))
-# R = Rx(a)*Ry(b)*Rz(g) → m02 = sin(b), m12 = -sin(a)cos(b), m22 = cos(a)cos(b),
-# m01 = -cos(b)sin(g), m00 = cos(b)cos(g)
 _m02, _m12, _m22 = _col_z.x, _col_z.y, _col_z.z
 _m00, _m01 = _col_x.x, _col_y.x
 _m10, _m11 = _col_x.y, _col_y.y
@@ -1094,50 +1361,36 @@ if abs(_m02) < 1.0 - 1e-9:
     alpha_deg = math.degrees(math.atan2(-_m12, _m22))
     gamma_deg = math.degrees(math.atan2(-_m01, _m00))
 else:
-    # Gimbal lock: b = ±90°; conventionally set g = 0.
     beta_deg  = 90.0 if _m02 > 0 else -90.0
     gamma_deg = 0.0
     _sign = 1.0 if _m02 > 0 else -1.0
     alpha_deg = _sign * math.degrees(math.atan2(_m10, _m11))
 euler_out = [round(alpha_deg, 6), round(beta_deg, 6), round(gamma_deg, 6)]
 
+idx_map, endpoint_map, _ground_truth = _load_sketch_maps(sk)
+
+def _entity_sort_key(name):
+    match = re.match(r"(\\w+)_(\\d+)", name)
+    if match:
+        return (match.group(1), int(match.group(2)))
+    return (name, 0)
+
 sketch_dict = {{}}
-idx_map = {{}}
 
-line_cnt = circle_cnt = arc_cnt = ellipse_cnt = nurbs_cnt = 0
-
-for i, geo in enumerate(sk.Geometry):
-    type_id = geo.TypeId if hasattr(geo, "TypeId") else type(geo).__name__
+def _append_entity(name, gi, geo, type_id):
+    ep = endpoint_map.get(name, {{"start": 1, "end": 2, "center": 3, "middle": 3}})
     if "LineSegment" in type_id or "Line" in type_id:
-        line_cnt += 1
-        name = f"line_{{line_cnt}}"
-        sketch_dict[name] = {{
-            "start": [geo.StartPoint.x, geo.StartPoint.y],
-            "end":   [geo.EndPoint.x,   geo.EndPoint.y],
-        }}
+        s, e = _semantic_line_endpoints(sk, gi, ep)
+        sketch_dict[name] = {{"start": s, "end": e}}
     elif "ArcOfCircle" in type_id:
-        arc_cnt += 1
-        name = f"arc_{{arc_cnt}}"
-        mid_param = (geo.FirstParameter + geo.LastParameter) / 2
-        try:
-            mid_pt = geo.value(mid_param)
-        except Exception:
-            mid_pt = geo.Center
-        sketch_dict[name] = {{
-            "start":  [geo.StartPoint.x,  geo.StartPoint.y],
-            "middle": [mid_pt.x,          mid_pt.y],
-            "end":    [geo.EndPoint.x,    geo.EndPoint.y],
-        }}
+        s, m, e = _semantic_arc_points(sk, gi, ep, geo)
+        sketch_dict[name] = {{"start": s, "middle": m, "end": e}}
     elif "Circle" in type_id:
-        circle_cnt += 1
-        name = f"circle_{{circle_cnt}}"
         sketch_dict[name] = {{
             "center": [geo.Center.x, geo.Center.y],
             "radius": geo.Radius,
         }}
     elif "Ellipse" in type_id or "ArcOfEllipse" in type_id:
-        ellipse_cnt += 1
-        name = f"ellipse_{{ellipse_cnt}}"
         sketch_dict[name] = {{
             "center": [geo.Center.x, geo.Center.y],
             "major":  geo.MajorRadius,
@@ -1145,8 +1398,6 @@ for i, geo in enumerate(sk.Geometry):
             "angle":  math.degrees(getattr(geo, "AngleXU", 0.0)),
         }}
     elif "BSpline" in type_id:
-        nurbs_cnt += 1
-        name = f"nurbs_{{nurbs_cnt}}"
         poles = [[p.x, p.y] for p in geo.getPoles()]
         sketch_dict[name] = {{
             "degree":   geo.Degree,
@@ -1155,11 +1406,39 @@ for i, geo in enumerate(sk.Geometry):
             "weights":  list(geo.getWeights()),
             "knots":    list(geo.getKnots()),
         }}
-    else:
-        continue
-    idx_map[name] = i
 
-# Extract existing constraints
+if idx_map and endpoint_map:
+    for name in sorted(idx_map.keys(), key=_entity_sort_key):
+        gi = idx_map[name]
+        if gi >= len(sk.Geometry):
+            continue
+        geo = sk.Geometry[gi]
+        type_id = geo.TypeId if hasattr(geo, "TypeId") else type(geo).__name__
+        _append_entity(name, gi, geo, type_id)
+else:
+    line_cnt = circle_cnt = arc_cnt = ellipse_cnt = nurbs_cnt = 0
+    for i, geo in enumerate(sk.Geometry):
+        type_id = geo.TypeId if hasattr(geo, "TypeId") else type(geo).__name__
+        if "LineSegment" in type_id or "Line" in type_id:
+            line_cnt += 1
+            name = f"line_{{line_cnt}}"
+        elif "ArcOfCircle" in type_id:
+            arc_cnt += 1
+            name = f"arc_{{arc_cnt}}"
+        elif "Circle" in type_id:
+            circle_cnt += 1
+            name = f"circle_{{circle_cnt}}"
+        elif "Ellipse" in type_id or "ArcOfEllipse" in type_id:
+            ellipse_cnt += 1
+            name = f"ellipse_{{ellipse_cnt}}"
+        elif "BSpline" in type_id:
+            nurbs_cnt += 1
+            name = f"nurbs_{{nurbs_cnt}}"
+        else:
+            continue
+        idx_map[name] = i
+        _append_entity(name, i, geo, type_id)
+
 existing_constraints = []
 for c in sk.Constraints:
     existing_constraints.append(c.Type)
@@ -1173,9 +1452,6 @@ _result_ = {{
     "coordinate_system":    {{"euler_angles": euler_out,
                               "translation":  [trans.x, trans.y, trans.z]}},
     "sketch":               sketch_dict,
-    # entity_index_map (Sketcher internal integer indices) intentionally omitted:
-    # it is a FreeCAD-specific detail stored inside the sketch object and consumed
-    # by apply_sketch_constraints directly.  The LLM works with HistCAD names only.
     "dof_remaining":        dof,
     "fully_constrained":    fully_constrained,
     "sketch_normal_world":  [round(sk_normal.x, 6), round(sk_normal.y, 6), round(sk_normal.z, 6)],
@@ -1422,28 +1698,7 @@ if sk is None:
 
 constraints_in = {constraints!r}
 
-# Retrieve entity index map: __main__ cache → setDocumentData → rebuild from geometry
-import __main__ as _m_idx
-idx_map = getattr(_m_idx, "_sketch_idx_map_cache", {{}}).get(sk.Name)
-endpoint_map = getattr(_m_idx, "_sketch_endpoint_map_cache", {{}}).get(sk.Name)
-if not endpoint_map:
-    endpoint_map = getattr(_m_idx, "_sketch_arc_endpoint_map_cache", {{}}).get(sk.Name)
-ground_truth = getattr(_m_idx, "_sketch_geometry_cache", {{}}).get(sk.Name)
-if not idx_map:
-    try:
-        stored = sk.getDocumentData("entity_index_map") if hasattr(sk, "getDocumentData") else None
-        idx_map = eval(stored) if stored else {{}}
-    except Exception:
-        idx_map = {{}}
-
-if not ground_truth:
-    try:
-        import json as _json_gt
-        stored_gt = sk.getDocumentData("sketch_geometry_json") if hasattr(sk, "getDocumentData") else None
-        ground_truth = _json_gt.loads(stored_gt) if stored_gt else {{}}
-    except Exception:
-        ground_truth = {{}}
-
+idx_map, endpoint_map, ground_truth = _load_sketch_maps(sk)
 if not idx_map:
     line_c = circle_c = arc_c = ellipse_c = nurbs_c = 0
     for i, geo in enumerate(sk.Geometry):
@@ -1459,9 +1714,6 @@ if not idx_map:
         elif "BSpline" in tid:
             nurbs_c += 1; idx_map[f"nurbs_{{nurbs_c}}"] = i
 
-if not endpoint_map and ground_truth:
-    endpoint_map = _rebuild_endpoint_map(sk, idx_map, ground_truth)
-
 dof_before = getattr(sk, "DoF", -1)
 
 doc.openTransaction("Apply Sketch Constraints")
@@ -1472,6 +1724,7 @@ try:
         constraints_in,
         idx_map,
         endpoint_map=endpoint_map,
+        ground_truth=ground_truth,
     )
     redundant = constraint_result.get("redundant", [])
     dimension_bindings = constraint_result.get("dimension_bindings", [])

@@ -24,6 +24,7 @@ async def main() -> int:
     step0 = steps[0]
     sketch = step0["sketch"]
     constraints = step0["constraints"]
+    json_constraint_count = sum(len(v) for v in constraints.values())
     cs = step0["coordinate_system"]
 
     bridge = XmlRpcBridge()
@@ -51,6 +52,7 @@ sk.Placement = FreeCAD.Placement(FreeCAD.Vector(*trans), rot)
 
 sketch_dict = {json.dumps(sketch)}
 constraints_in = {json.dumps(constraints)}
+json_constraint_count = {json_constraint_count}
 
 idx_map, endpoint_map = _build_sketch_entities(sk, sketch_dict)
 doc.recompute()
@@ -84,6 +86,7 @@ constraint_result = _apply_histcad_constraints(
     constraints_in,
     idx_map,
     endpoint_map=endpoint_map,
+    ground_truth=sketch_dict,
 )
 doc.recompute()
 sk.solve()
@@ -152,6 +155,8 @@ _result_ = {{
   "pre_coincident_gaps": pre_gaps,
   "max_pre_gap_mm": max((g["gap_mm"] for g in pre_gaps), default=0.0),
   "applied_count": len(sk.Constraints),
+  "json_constraint_count": json_constraint_count,
+  "orientation_extra_count": max(0, len(sk.Constraints) - json_constraint_count),
   "constraint_steps_ok": len(sk.Constraints),
   "geometry_drift_max": constraint_result,
   "dof_after": getattr(sk, "DoF", -1),
@@ -174,7 +179,9 @@ _result_ = {{
     out = result.result
     print("=== 01000571 Step0 Live Test ===")
     print(f"Max pre-constraint coincident gap: {out['max_pre_gap_mm']:.4f} mm")
-    print(f"Constraints applied: {out['applied_count']} (JSON has 18 entries)")
+    print(f"Constraints applied: {out['applied_count']} (JSON has {out['json_constraint_count']} entries)")
+    if out.get("orientation_extra_count"):
+        print(f"  (+{out['orientation_extra_count']} auto orientation from ground truth)")
     print(f"DoF after: {out['dof_after']}")
     print(f"Profile closed after constraints: {out['profile_closed_after']}")
     print(f"Face valid: {out['face_valid']}")
@@ -204,9 +211,10 @@ _result_ = {{
 
     ok = (
         out["max_pre_gap_mm"] < 0.01
-        and out["applied_count"] == 18
+        and out["applied_count"] >= out["json_constraint_count"]
         and out["profile_closed_after"]
         and out["volume_mm3"] > 0
+        and out["geometry_matches_json"]
     )
     if not out["geometry_matches_json"]:
         print()

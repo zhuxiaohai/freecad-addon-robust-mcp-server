@@ -960,6 +960,72 @@ class TestFabricationSourceConventions:
         assert "if name in endpoint_map:" in source
         assert "_json_endpoints_for_entity(name, spec)" in source
 
+    def test_endpoint_map_persisted_on_sketch_object(self) -> None:
+        """Maps persist on sketch via HistCADMaps for cross-call reuse."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_persist_sketch_maps" in source
+        assert "_load_sketch_maps" in source
+        assert "HistCADMaps" in source
+        assert "HistCADGeometry" in source
+        assert "_rebuild_endpoint_map(sk, idx_map, ground_truth)" not in source
+
+    def test_fix_constraint_uses_block_for_whole_entity(self) -> None:
+        """HistCAD Fix on entity uses Block(geo_idx) for FreeCAD 1.1."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_fix_constraint" in source
+        assert 'Sketcher.Constraint("Block", geo_idx)' in source
+        assert (
+            "p = None"
+            in source.split('elif ctype == "Fix":')[1].split(
+                'elif ctype == "Midpoint":'
+            )[0]
+        )
+
+    def test_directed_vertical_distance_from_ground_truth(self) -> None:
+        """VERTICAL Distance uses signed delta from ground-truth coordinates."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_directed_axis_distance" in source
+        assert "_ground_truth_xy" in source
+        assert "ground_truth=ground_truth" in source
+
+    def test_orientation_stabilization_from_ground_truth(self) -> None:
+        """Axis-aligned lines get orientation only when JSON lacks directed dims."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_orientation_entries_from_ground_truth" in source
+        assert "_orientation_covered_by_json_constraints" in source
+        assert "Phase 1: topology" in source
+        assert "Phase 2: axis-aligned orientation" in source
+
+    def test_parse_freecad_sketch_uses_endpoint_map(self) -> None:
+        """parse_freecad_sketch reads start/end via endpoint_map."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        parse_block = source.split("async def parse_freecad_sketch", 1)[1].split(
+            "async def check_sketch_constraints", 1
+        )[0]
+        assert "_semantic_line_endpoints" in parse_block
+        assert "_load_sketch_maps" in parse_block
+        assert "geo.StartPoint" not in parse_block
+
     def test_coordinate_system_key_normalization(self) -> None:
         """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
         from pathlib import Path

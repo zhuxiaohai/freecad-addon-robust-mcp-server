@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
-from freecad_mcp.intent.registry import resolve_intent_to_plan, validate_intent
+from freecad_mcp.intent.registry import (
+    compile_intent_package,
+    describe_template,
+    list_template_catalog,
+    resolve_intent_to_plan,
+    validate_intent,
+)
 from freecad_mcp.intent.schema import HoleArraySpec, IntentSpec, apply_slot_bindings
 
 
@@ -135,3 +143,60 @@ class TestResolveIntentToPlan:
         intent = IntentSpec(template_name="nope", slots={})
         with pytest.raises(ValueError, match="Unknown template"):
             validate_intent(intent)
+
+    def test_resolve_intent_to_plan_is_deterministic(self) -> None:
+        """Same IntentSpec produces identical FabricationPlan dicts."""
+        intent = IntentSpec(
+            template_name="l_connector",
+            slots={
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "width": 30.0,
+            },
+        )
+
+        first = resolve_intent_to_plan(intent).to_dict()
+        second = resolve_intent_to_plan(intent).to_dict()
+
+        assert first == second
+
+
+class TestTemplateCatalog:
+    """Tests for machine-readable template catalog entries."""
+
+    def test_list_template_catalog_contains_l_connector(self) -> None:
+        """Catalog exposes L connector selection metadata."""
+        catalog = list_template_catalog()
+        names = {entry["template_name"] for entry in catalog}
+
+        assert "l_connector" in names
+        entry = cast("dict[str, Any]", describe_template("l_connector"))
+        assert "L型连接件" in entry["aliases"]
+        assert "arm_x_length" in entry["required_slots"]
+        assert "arm_x_top" in entry["valid_face_ids"]
+        assert entry["example_intent"]["template_name"] == "l_connector"
+
+    def test_describe_unknown_template_raises(self) -> None:
+        """Unknown catalog keys raise a clear error."""
+        with pytest.raises(ValueError, match="Unknown template"):
+            describe_template("not_a_template")
+
+    def test_compile_intent_package_preserves_provenance(self) -> None:
+        """compile_intent_package returns plan plus IntentSpec provenance."""
+        intent = IntentSpec(
+            template_name="l_connector",
+            slots={
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "width": 30.0,
+            },
+            assumptions=["unit=mm"],
+        )
+
+        package = cast("dict[str, Any]", compile_intent_package(intent))
+
+        assert package["intent_spec"]["template_name"] == "l_connector"
+        assert package["fabrication_plan"]["metadata"]["template"] == "l_connector"
+        assert package["assumptions"] == ["unit=mm"]
+        assert package["template_provenance"]["deterministic"] is True
+        assert package["compile_diagnostics"]["ok"] is True

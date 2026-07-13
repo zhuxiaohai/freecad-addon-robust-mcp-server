@@ -680,9 +680,9 @@ await create_connector(
 language into a structured **IntentSpec** (`template_name`, `slots`,
 `slot_bindings`, `placement`, optional `hole_groups`).
 
-**Intent expansion guide:** External Intent Models should read
-`docs/guide/l-connector-intent-expansion/index.md` (and linked references) before
-building IntentSpec JSON (CADDesigner-style L3 specification).
+Intent expansion is an upstream agent/skill concern.  Use the template catalog
+tools (`list_templates`, `describe_template`, `validate_intent`) to discover the
+machine-readable IntentSpec contract exposed by this MCP server.
 
 **Layer 2** (domain templates in tools/templates/) compiles IntentSpec into a
 FabricationPlan **deterministically** — no LLM at this stage.  Use

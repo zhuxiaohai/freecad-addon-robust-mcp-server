@@ -3,7 +3,9 @@
 ## Pipeline
 
 ```text
-resolve_template(intent)  →  FabricationPlan dict
+list_templates()/describe_template()  →  template contract
+validate_intent(intent)  →  structured diagnostics
+compile_intent(intent)  →  IntentSpec package with FabricationPlan
 execute_fabrication_plan(plan)  →  FreeCAD body
 ```
 
@@ -11,15 +13,21 @@ execute_fabrication_plan(plan)  →  FreeCAD body
 
 | Tool | Layer | Purpose |
 | ---- | ----- | ------- |
-| `resolve_template` | 2 | Compile IntentSpec → FabricationPlan |
-| `resolve_l_connector_template` | 2 | Shortcut with `slots` + optional `hole_groups` |
+| `list_templates` | Agent1 | Discover aliases, use cases, slots, features, face IDs |
+| `describe_template` | Agent1 | Inspect one template contract |
+| `validate_intent` | Agent1/repair | Validate IntentSpec without CAD execution |
+| `compile_intent` | 2 | Compile IntentSpec → package with provenance + FabricationPlan |
+| `resolve_template` | 2 | Compile IntentSpec → bare FabricationPlan |
+| `resolve_l_connector_template` | 2/debug | Shortcut with `slots` + optional `hole_groups` |
 | `execute_fabrication_plan` | 1 | Batch execute CS, sketches, extrude, boolean |
 | `validate_document` | — | Check object health after build |
 | `get_body_snapshot` | 1 | Edge/face samples for debugging |
 
 ## IntentSpec entry point
 
-Prefer `resolve_template` with full IntentSpec (includes `hole_groups`).
+Prefer `compile_intent` with full IntentSpec (includes `hole_groups`) when
+handoff or training logs need provenance. Use `resolve_template` only when a bare
+FabricationPlan is enough.
 
 Direct shortcut:
 

@@ -130,7 +130,6 @@ nav:
       - Robust MCP Bridge Workbench: guide/workbench.md
       - MCP Macro Tools: guide/macros.md
       - Tools Overview: guide/tools.md
-      - L-Connector Intent Expansion: guide/l-connector-intent-expansion/index.md
       - MCP Resources: guide/resources.md
       - Detailed User Guide: USER_GUIDE.md
       - Tools Reference: MCP_TOOLS_REFERENCE.md

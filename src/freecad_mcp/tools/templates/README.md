@@ -25,6 +25,44 @@ User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
 Natural language parsing is **not** done in this package.  The Intent Model
 produces structured slots; templates compile them deterministically.
 
+## Current Agent/MCP Boundary
+
+During early validation, Cursor may temporarily play both roles:
+
+- **Intent Agent**: read skills/docs/template catalog, expand natural language
+  into an ``IntentSpec``.
+- **Execution Agent**: call ``resolve_template`` / ``compile_intent``,
+  ``execute_fabrication_plan``, ``validate_document``, and
+  ``get_body_snapshot`` to execute and diagnose.
+
+This repository still treats those as separate stages.  Production agent code
+can move to a dedicated agent repo later without changing the contracts:
+
+```text
+NL / L3 prompt → IntentSpec
+IntentSpec → FabricationPlan
+FabricationPlan → FreeCAD model
+Execution feedback → IntentSpec repair
+```
+
+## Template Discovery Tools
+
+Intent Agents should choose templates through the catalog, not by treating every
+template shortcut as a separate primary action:
+
+| Tool | Intended user | Purpose |
+| ---- | ------------- | ------- |
+| ``list_templates`` | Intent Agent | List aliases, use cases, slots, features, face IDs, examples |
+| ``describe_template`` | Intent Agent | Inspect one template contract before slot filling |
+| ``validate_intent`` | Intent/repair loop | Validate IntentSpec and return structured failure attribution |
+| ``compile_intent`` | Handoff | Return IntentSpec + deterministic FabricationPlan package |
+| ``resolve_template`` | Compiler shortcut | Return only the FabricationPlan for an IntentSpec |
+| ``resolve_l_connector_template`` | Debug/manual | Bypass IntentSpec with resolved slots; not the main agent path |
+
+The underlying implementation is ordinary Python.  MCP tools are thin wrappers
+so Cursor, Codex, external agents, and future rollout runners can share the same
+contracts.
+
 ## IntentSpec Contract
 
 See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
@@ -61,6 +99,42 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
 - ``hole_groups``: optional per-face rectangular hole arrays (see
   ``face_catalog.py`` for nine exterior ``face_id`` values).
 
+## IntentSpec Package
+
+When an Intent Agent hands work to an Execution Agent, prefer a package rather
+than a bare FabricationPlan:
+
+```json
+{
+  "intent_spec": {},
+  "fabrication_plan": {},
+  "assumptions": [],
+  "template_provenance": {
+    "template_name": "l_connector",
+    "template_version": "v1",
+    "deterministic": true
+  },
+  "compile_diagnostics": {
+    "ok": true,
+    "stage": "intent_to_fabrication_plan",
+    "failure_attribution": null
+  }
+}
+```
+
+The model learns ``NL → IntentSpec``.  ``IntentSpec → FabricationPlan`` is
+deterministic post-processing, but the resulting plan is still included as the
+executable handoff payload.
+
+## Failure Attribution
+
+- IntentSpec schema cannot be parsed: Intent Agent schema error.
+- Unknown template, missing slot, invalid binding, or unknown ``face_id``:
+  Intent Agent template/slot/capability error.
+- Valid IntentSpec compiles to wrong geometry: template compiler bug.
+- Valid FabricationPlan fails in FreeCAD: Layer 1 adapter/execution bug.
+- Execution succeeds but violates user intent: repair the IntentSpec first.
+
 ## L-Connector Modules
 
 | Module | Role |
@@ -68,13 +142,6 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
 | `connectors.py` | L profile + extrude + optional holes |
 | `face_catalog.py` | Semantic face UV frames and `near_point` |
 | `hole_arrays.py` | Compile `hole_groups` → sketches + boolean cuts |
-
-## Intent Expansion Guide
-
-External Intent Models (separate agent projects) should use
-`docs/guide/l-connector-intent-expansion/` as the canonical reference for
-converting natural language to IntentSpec. This repo does not depend on
-IDE-specific skill paths.
 
 ## Adding a New Domain Template
 

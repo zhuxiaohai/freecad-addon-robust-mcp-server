@@ -1797,10 +1797,36 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                     "description": (
                         "Layer 2 domain template tools. Compile a structured IntentSpec "
                         "into a FabricationPlan deterministically. Natural language parsing "
-                        "happens upstream in the Intent Model — not here. Intent expansion "
-                        "guide: docs/guide/l-connector-intent-expansion/index.md"
+                        "happens upstream in the Intent Model — not here. Use "
+                        "list_templates and describe_template for the machine-readable "
+                        "template contract."
                     ),
                     "tools": [
+                        {
+                            "name": "list_templates",
+                            "description": (
+                                "Intent Agent discovery entry point. Returns machine-readable "
+                                "template catalog entries: aliases, use cases, slot contracts, "
+                                "supported features, valid face IDs, and example IntentSpec."
+                            ),
+                            "key_params": [],
+                        },
+                        {
+                            "name": "describe_template",
+                            "description": (
+                                "Return one template's machine-readable contract for template "
+                                "selection and slot filling."
+                            ),
+                            "key_params": ["template_name"],
+                        },
+                        {
+                            "name": "validate_intent",
+                            "description": (
+                                "Validate an IntentSpec without CAD execution and return "
+                                "structured failure attribution for repair workflows."
+                            ),
+                            "key_params": ["intent"],
+                        },
                         {
                             "name": "resolve_template",
                             "description": (
@@ -1810,12 +1836,21 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "key_params": ["intent"],
                         },
                         {
+                            "name": "compile_intent",
+                            "description": (
+                                "Compile an IntentSpec into a handoff package containing "
+                                "intent_spec, deterministic fabrication_plan, provenance, "
+                                "assumptions, and compile diagnostics."
+                            ),
+                            "key_params": ["intent"],
+                        },
+                        {
                             "name": "resolve_l_connector_template",
                             "description": (
                                 "Build an L connector FabricationPlan from resolved dimension "
                                 "slots in mm. Supports optional hole_groups per exterior "
                                 "face (rectangular arrays). Prefer resolve_template for "
-                                "full IntentSpec."
+                                "full IntentSpec; this shortcut is mainly for debugging."
                             ),
                             "key_params": ["slots", "plane", "hole_groups"],
                         },

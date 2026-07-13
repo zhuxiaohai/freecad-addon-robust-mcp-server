@@ -56,11 +56,59 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
         mcp: The FastMCP (Robust MCP Server) instance.
         get_bridge: Async function to get the active bridge connection.
     """
-    from freecad_mcp.intent.registry import resolve_intent_to_plan
+    from freecad_mcp.intent import registry as intent_registry
     from freecad_mcp.intent.schema import IntentSpec
     from freecad_mcp.tools.templates.connectors import register_connector_templates
 
     register_connector_templates(mcp, get_bridge)
+
+    @mcp.tool()
+    async def list_templates() -> list[dict[str, object]]:
+        """List domain templates available to an Intent Agent.
+
+        This is the preferred Agent1 discovery entry point.  The result is a
+        machine-readable catalog containing aliases, natural-language use cases,
+        slot contracts, supported features, valid semantic face IDs, and example
+        IntentSpec payloads.  Do not use shortcut template tools as the primary
+        template-selection action space.
+        """
+        return intent_registry.list_template_catalog()
+
+    @mcp.tool()
+    async def describe_template(template_name: str) -> dict[str, object]:
+        """Describe one domain template for template selection and slot filling.
+
+        Args:
+            template_name: Registry key such as ``"l_connector"``.
+
+        Returns:
+            Machine-readable template contract for building an IntentSpec.
+        """
+        return intent_registry.describe_template(template_name)
+
+    @mcp.tool()
+    async def validate_intent(intent: dict[str, Any]) -> dict[str, object]:
+        """Validate an IntentSpec and return structured attribution.
+
+        This tool is for Agent1/repair workflows.  It does not execute CAD.  A
+        valid result means the deterministic template compiler can produce a
+        FabricationPlan from the supplied IntentSpec.
+        """
+        try:
+            spec = IntentSpec.from_dict(intent)
+            intent_registry.validate_intent(spec)
+        except Exception as exc:
+            message = str(exc)
+            return {
+                "valid": False,
+                "error": message,
+                "failure_attribution": intent_registry.classify_compile_error(message),
+            }
+        return {
+            "valid": True,
+            "error": None,
+            "failure_attribution": None,
+        }
 
     @mcp.tool()
     async def resolve_template(intent: dict[str, Any]) -> dict[str, Any]:
@@ -93,5 +141,39 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
             >>> plan = await resolve_template(intent)
         """
         spec = IntentSpec.from_dict(intent)
-        plan = resolve_intent_to_plan(spec)
+        plan = intent_registry.resolve_intent_to_plan(spec)
         return plan.to_dict()
+
+    @mcp.tool()
+    async def compile_intent(intent: dict[str, Any]) -> dict[str, object]:
+        """Compile IntentSpec into an executable FabricationPlan package.
+
+        Agent1 may expose this package as its handoff artifact: the model output
+        remains the IntentSpec, while ``fabrication_plan`` is deterministic
+        post-processing.  The package preserves provenance and diagnostics for
+        Agent2 execution/repair.
+        """
+        try:
+            spec = IntentSpec.from_dict(intent)
+            return intent_registry.compile_intent_package(spec)
+        except Exception as exc:
+            message = str(exc)
+            return {
+                "intent_spec": intent,
+                "fabrication_plan": None,
+                "assumptions": list(intent.get("assumptions", [])),
+                "template_provenance": {
+                    "template_name": intent.get("template_name"),
+                    "template_version": None,
+                    "compiler": "freecad_mcp.intent.registry.resolve_intent_to_plan",
+                    "deterministic": True,
+                },
+                "compile_diagnostics": {
+                    "ok": False,
+                    "stage": "intent_to_fabrication_plan",
+                    "error": message,
+                    "failure_attribution": intent_registry.classify_compile_error(
+                        message
+                    ),
+                },
+            }

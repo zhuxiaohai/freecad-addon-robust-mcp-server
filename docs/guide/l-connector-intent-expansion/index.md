@@ -20,6 +20,20 @@ execution.
 
 Do not invent face IDs or slot names. Use the catalog and schema above.
 
+## Agent roles during local debugging
+
+For now, Cursor may act as both roles in one workflow:
+
+```text
+Intent role:    NL → L3 notes → IntentSpec
+Compiler step:  IntentSpec → FabricationPlan package
+Execution role: FabricationPlan → FreeCAD model → feedback
+Repair loop:    feedback → revised IntentSpec
+```
+
+Keep these artifacts separate in notes and logs even when one IDE agent performs
+all steps. This makes the trace usable later for SFT/RL data.
+
 ## Required output format
 
 When expanding user intent, produce these sections in order:
@@ -53,6 +67,26 @@ A single JSON object valid for `resolve_template(intent)`:
 
 List defaults you applied (margins, pitch, which faces, unit=mm, etc.).
 
+## Standard trace record
+
+Use this structure when collecting debug cases:
+
+```json
+{
+  "user_query": "",
+  "expanded_l3_prompt": "",
+  "intent_spec": {},
+  "fabrication_plan": {},
+  "execution_result": {},
+  "validation_feedback": {},
+  "repair_action": ""
+}
+```
+
+Prefer `compile_intent(intent)` when you want a complete handoff package with
+`intent_spec`, deterministic `fabrication_plan`, provenance, assumptions, and
+compile diagnostics. Use `resolve_template(intent)` when you only need the plan.
+
 ## Default inference rules
 
 | User says | Expand to |
@@ -79,18 +113,22 @@ Before returning IntentSpec JSON:
 ## Execution workflow (after IntentSpec)
 
 1. Present Parameter Table; confirm with user if ambiguous
-2. `resolve_template(intent)` → FabricationPlan
-3. `execute_fabrication_plan(plan)`
-4. `validate_document()` / `get_body_snapshot()` for verification
+2. `list_templates()` / `describe_template("l_connector")` when template choice is uncertain
+3. `validate_intent(intent)` for structured slot/template feedback
+4. `compile_intent(intent)` → IntentSpec package with FabricationPlan
+5. `execute_fabrication_plan(package["fabrication_plan"])`
+6. `validate_document()` / `get_body_snapshot()` for verification
 
 ## RL / logging
 
 Store assumptions and the final IntentSpec JSON for reward attribution. Template
 compilation and CAD execution are deterministic — reward intent expansion separately
-from geometry success.
+from geometry success. If execution succeeds but geometry violates the user query,
+repair the IntentSpec first; only blame the template compiler when the IntentSpec is
+correct and the deterministic FabricationPlan is wrong.
 
-## Local Cursor debugging
+## Local agent debugging
 
-This repo does **not** ship Cursor-specific skill paths. For local IDE debugging you
-may copy or symlink this guide into your agent project's skill layout; the canonical
-source of truth is `docs/guide/l-connector-intent-expansion/` in this repository.
+This directory is an agent skill/debug aid, not an MCP runtime contract.  Future
+production agent projects may copy or replace it; the MCP runtime contract is the
+machine-readable template catalog and IntentSpec schema exposed by tools.

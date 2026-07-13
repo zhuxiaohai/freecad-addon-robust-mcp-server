@@ -6,7 +6,13 @@ language into a structured :class:`IntentSpec`.  Layer 2 templates compile
 deterministically — no LLM involvement at this stage.
 """
 
-from freecad_mcp.intent.registry import resolve_intent_to_plan, validate_intent
+from freecad_mcp.intent.registry import (
+    compile_intent_package,
+    describe_template,
+    list_template_catalog,
+    resolve_intent_to_plan,
+    validate_intent,
+)
 from freecad_mcp.intent.schema import (
     HoleArraySpec,
     IntentSpec,
@@ -18,6 +24,9 @@ __all__ = [
     "HoleArraySpec",
     "IntentSpec",
     "apply_slot_bindings",
+    "compile_intent_package",
+    "describe_template",
+    "list_template_catalog",
     "resolve_intent_to_plan",
     "validate_hole_array_spec",
     "validate_intent",

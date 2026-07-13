@@ -1003,6 +1003,10 @@ class TestConnectorTemplates:
             return AsyncMock()
 
         register_template_tools(mock_mcp, get_bridge)
+        assert "list_templates" in mock_mcp._registered_tools
+        assert "describe_template" in mock_mcp._registered_tools
+        assert "validate_intent" in mock_mcp._registered_tools
+        assert "compile_intent" in mock_mcp._registered_tools
         assert "resolve_template" in mock_mcp._registered_tools
         assert "resolve_l_connector_template" in mock_mcp._registered_tools
 
@@ -1071,3 +1075,73 @@ class TestConnectorTemplates:
         assert result["metadata"]["template"] == "l_connector"
         assert result["metadata"]["intent_spec"]["template_name"] == "l_connector"
         assert result["features"][0]["params"]["towards"] == 6.0
+
+    @pytest.mark.asyncio
+    async def test_template_catalog_tools(self, mock_mcp: MagicMock) -> None:
+        """Template catalog tools expose Agent1 selection metadata."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+
+        catalog = await mock_mcp._registered_tools["list_templates"]()
+        assert catalog[0]["template_name"] == "l_connector"
+        assert (
+            "width applies to both arms" in catalog[0]["example_intent"]["assumptions"]
+        )
+
+        described = await mock_mcp._registered_tools["describe_template"]("l_connector")
+        assert "arm_x_top" in described["valid_face_ids"]
+
+    @pytest.mark.asyncio
+    async def test_validate_intent_tool_returns_attribution(
+        self, mock_mcp: MagicMock
+    ) -> None:
+        """validate_intent returns structured repair attribution."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+
+        result = await mock_mcp._registered_tools["validate_intent"](
+            {
+                "template_name": "l_connector",
+                "slots": {"arm_x_length": 50.0},
+            }
+        )
+
+        assert result["valid"] is False
+        assert result["failure_attribution"] == "intent_agent_slot_or_capability"
+
+    @pytest.mark.asyncio
+    async def test_compile_intent_tool_returns_handoff_package(
+        self, mock_mcp: MagicMock
+    ) -> None:
+        """compile_intent returns IntentSpec + deterministic plan package."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+
+        package = await mock_mcp._registered_tools["compile_intent"](
+            {
+                "template_name": "l_connector",
+                "slots": {
+                    "arm_x_length": 50.0,
+                    "arm_y_length": 80.0,
+                    "width": 30.0,
+                },
+                "assumptions": ["unit=mm"],
+            }
+        )
+
+        assert package["intent_spec"]["template_name"] == "l_connector"
+        assert package["fabrication_plan"]["metadata"]["template"] == "l_connector"
+        assert package["template_provenance"]["deterministic"] is True
+        assert package["compile_diagnostics"]["ok"] is True

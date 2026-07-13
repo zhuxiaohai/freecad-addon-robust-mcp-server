@@ -73,6 +73,8 @@ class TestFabricationTools:
             "parse_freecad_sketch",
             "check_sketch_constraints",
             "apply_sketch_constraints",
+            "evaluate_sketch_editability",
+            "build_edited_sketch_constraints",
             "execute_extrude",
             "execute_boolean",
             "execute_revolve",
@@ -223,6 +225,44 @@ class TestFabricationTools:
         assert result["applied_count"] == 7
         assert result["profile"]["closed"] is True
         assert result["geometry_drift"]["max_mm"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_evaluate_sketch_editability_uses_parse(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """evaluate_sketch_editability parses sketch geometry when needed."""
+        step0_sketch = {
+            "line_3": {"start": [10.0, -0.75], "end": [10.0, 0.75]},
+            "line_4": {"start": [10.0, 0.75], "end": [3.8611, 1.0717]},
+        }
+        constraints = {
+            "Distance": [
+                [
+                    "line_4.start",
+                    "line_3.start",
+                    {"length": 1.5, "direction": "VERTICAL"},
+                ]
+            ]
+        }
+        mock_bridge.execute_python.return_value = self._success(
+            {
+                "sketch_name": "Sketch001",
+                "sketch": step0_sketch,
+                "entity_index_map": {},
+                "dof_remaining": 0,
+                "existing_constraints": [],
+            }
+        )
+        result = await register_tools["evaluate_sketch_editability"](
+            reference_constraints=constraints,
+            constraint_type="Distance",
+            entry_index=0,
+            edited_value_mm=1.5,
+            sketch_name="Sketch001",
+        )
+        assert result["target_hit"] is True
+        assert result["OES"] is True
+        assert result["ER"] is True
 
     @pytest.mark.asyncio
     async def test_apply_sketch_constraints_redundancy_detected(
@@ -1015,14 +1055,14 @@ class TestFabricationSourceConventions:
         )
 
     def test_directed_vertical_distance_from_ground_truth(self) -> None:
-        """VERTICAL Distance uses signed delta from ground-truth coordinates."""
+        """VERTICAL Distance uses signed delta from sketch_helpers."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
             encoding="utf-8"
         )
-        assert "_directed_axis_distance" in source
-        assert "_ground_truth_xy" in source
+        assert "_SKETCH_HELPER_CODE" in source
+        assert "directed_axis_distance" in source
         assert "ground_truth=ground_truth" in source
 
     def test_orientation_stabilization_from_ground_truth(self) -> None:
@@ -1051,15 +1091,15 @@ class TestFabricationSourceConventions:
         assert "_load_sketch_maps" in parse_block
         assert "geo.StartPoint" not in parse_block
 
-    def test_entity_kind_inferred_from_spec_not_name(self) -> None:
-        """Sketch entities use spec fields; names like 'left_edge' are allowed."""
+    def test_entity_kind_from_histcad_name_prefix(self) -> None:
+        """Sketch entities follow HistCAD name prefixes (line_, arc_, …)."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
             encoding="utf-8"
         )
-        assert "_entity_kind_from_spec" in source
-        assert 'if kind == "line":' in source
+        assert "_entity_kind_from_name" in source
+        assert 'if name.startswith("line_"):' in source
 
     def test_constraint_catalog_in_apply_sketch_constraints(self) -> None:
         """apply_sketch_constraints returns mapped constraint_catalog rows."""
@@ -1070,7 +1110,34 @@ class TestFabricationSourceConventions:
         )
         assert '"constraint_catalog":      _catalog' in source
         assert '"redundant":               _redundant_entries' in source
+        assert '"purged_redundant":        purged_redundant' in source
         assert '"applied_log"' in source
+
+    def test_redundant_constraints_purged_after_apply(self) -> None:
+        """Tangent junction Coincident rows are purged so extrusion stays parametric."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "_purge_redundant_sketch_constraints" in source
+        assert "_extend_coinc_map_from_sketch" in source
+        assert '"purged_redundant": purged_redundant' in source
+        assert "_pos = _r_idx - 1" in source
+        assert "_purge_redundant_sketch_constraints(sk)" in source
+
+    def test_execute_extrude_purges_before_parametric(self) -> None:
+        """execute_extrude purges redundant sketch constraints before extrusion."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        extrude_block = source.split("async def execute_extrude", 1)[1].split(
+            "async def execute_boolean", 1
+        )[0]
+        assert "_purge_redundant_sketch_constraints" in extrude_block
+        assert "_create_parametric_extrusion()" in extrude_block
 
     def test_coordinate_system_key_normalization(self) -> None:
         """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""

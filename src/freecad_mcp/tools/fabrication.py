@@ -17,7 +17,9 @@ Tool groups
 
 A — Coordinate System:  ``create_coordinate_system``
 B — Sketch Geometry:    ``create_sketch_geometry``, ``parse_freecad_sketch``
-C — Sketch Constraints: ``check_sketch_constraints``, ``apply_sketch_constraints``
+C — Sketch Constraints: ``check_sketch_constraints``, ``apply_sketch_constraints``,
+                        ``build_edited_sketch_constraints``,
+                        ``evaluate_sketch_editability``
 D — Feature Execution:  ``execute_extrude``, ``execute_boolean``,
                         ``execute_revolve``, ``execute_helix``
 E — Finishing:          ``feature_fillet``, ``feature_chamfer``
@@ -73,7 +75,15 @@ Angle, Diameter, Radius, MajorRadius, MinorRadius, Length, Distance.
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from freecad_mcp.tools.sketch_editability import (
+    evaluate_sketch_editability as _evaluate_sketch_geometry,
+)
+from freecad_mcp.tools.sketch_editability import (
+    replace_constraint_value,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -84,6 +94,19 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _SPREADSHEET_NAME = "FabricationParams"
+
+
+def _read_sketch_helper_embed() -> str:
+    """Load sketch helper source for embedding (strip ``__future__`` imports)."""
+    text = (Path(__file__).resolve().parent / "sketch_helpers.py").read_text(
+        encoding="utf-8"
+    )
+    return "\n".join(
+        line for line in text.splitlines() if not line.startswith("from __future__")
+    )
+
+
+_SKETCH_HELPER_CODE = _read_sketch_helper_embed()
 
 _SKETCH_ENTITY_CODE = r"""
 import Part, Sketcher
@@ -111,35 +134,31 @@ def _arc_endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end):
     return _endpoint_map_for_geometry(sketch_obj, geo_idx, json_start, json_end)
 
 
-def _entity_kind_from_spec(spec):
-    # Infer geometry kind from fields — entity names are arbitrary (NLT / agent).
-    if not isinstance(spec, dict):
-        return None
-    if spec.get("controls"):
-        return "nurbs"
-    if "middle" in spec and "start" in spec and "end" in spec:
-        return "arc"
-    if "start" in spec and "end" in spec:
-        if "major" in spec and "minor" in spec:
-            return "elliptical_arc"
+def _entity_kind_from_name(name):
+    # HistCAD sketch entity names use type prefixes (see histcad.md §1.2).
+    if name.startswith("line_"):
         return "line"
-    if "center" in spec and "radius" in spec:
+    if name.startswith("circle_"):
         return "circle"
-    if "center" in spec and "major" in spec and "minor" in spec:
+    if name.startswith("arc_"):
+        return "arc"
+    if name.startswith("elliptical_arc_"):
+        return "elliptical_arc"
+    if name.startswith("ellipse_"):
         return "ellipse"
+    if name.startswith("nurbs_"):
+        return "nurbs"
     return None
 
 
 def _json_endpoints_for_entity(name, spec):
-    kind = _entity_kind_from_spec(spec)
-    if kind == "nurbs":
+    if name.startswith("nurbs_"):
         controls = spec.get("controls") or []
         if len(controls) < 2:
             return None
         return controls[0], controls[-1]
-    if kind in ("line", "arc", "elliptical_arc"):
-        if "start" in spec and "end" in spec:
-            return spec["start"], spec["end"]
+    if "start" in spec and "end" in spec:
+        return spec["start"], spec["end"]
     return None
 
 
@@ -171,24 +190,23 @@ def _build_sketch_entities(sketch_obj, entity_dict):
     idx_map = {}
     endpoint_map = {}
     for name, spec in entity_dict.items():
-        kind = _entity_kind_from_spec(spec)
-        if kind == "line":
+        if name.startswith("line_"):
             geo = Part.LineSegment(
                 FreeCAD.Vector(spec["start"][0], spec["start"][1], 0),
                 FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0),
             )
-        elif kind == "circle":
+        elif name.startswith("circle_"):
             geo = Part.Circle(
                 FreeCAD.Vector(spec["center"][0], spec["center"][1], 0),
                 FreeCAD.Vector(0, 0, 1),
                 spec["radius"],
             )
-        elif kind == "arc":
+        elif name.startswith("arc_"):
             s = FreeCAD.Vector(spec["start"][0],  spec["start"][1],  0)
             m = FreeCAD.Vector(spec["middle"][0], spec["middle"][1], 0)
             e = FreeCAD.Vector(spec["end"][0],    spec["end"][1],    0)
             geo = Part.ArcOfCircle(s, m, e)
-        elif kind == "ellipse":
+        elif name.startswith("ellipse_"):
             cx, cy = spec["center"]
             geo = Part.Ellipse(
                 FreeCAD.Vector(cx, cy, 0),
@@ -198,7 +216,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             import math
             angle_rad = math.radians(spec.get("angle", 0.0))
             geo.AngleXU = angle_rad
-        elif kind == "elliptical_arc":
+        elif name.startswith("elliptical_arc_"):
             s = FreeCAD.Vector(spec["start"][0], spec["start"][1], 0)
             e = FreeCAD.Vector(spec["end"][0],   spec["end"][1],   0)
             cx = (s.x + e.x) / 2
@@ -212,7 +230,7 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             angle_rad = math.radians(spec.get("angle", 0.0))
             base_ellipse.AngleXU = angle_rad
             geo = Part.ArcOfEllipse(base_ellipse, 0, math.pi)
-        elif kind == "nurbs":
+        elif name.startswith("nurbs_"):
             geo = Part.BSplineCurve()
             poles = [FreeCAD.Vector(p[0], p[1], 0) for p in spec["controls"]]
             weights = spec.get("weights", [1.0] * len(poles))
@@ -345,7 +363,11 @@ def _semantic_arc_points(sketch_obj, geo_idx, endpoint_map_entry, geo):
     )
 """
 
-_SKETCH_CONSTRAINT_CODE = r"""
+_SKETCH_CONSTRAINT_CODE = (
+    _SKETCH_HELPER_CODE
+    + r"""
+
+
 def _apply_histcad_constraints(
     sketch_obj,
     constraint_dict,
@@ -355,7 +377,7 @@ def _apply_histcad_constraints(
     ground_truth=None,
 ):
     # Apply HistCAD constraints to a Sketcher object.
-    # Returns {"redundant": [...], "dimension_bindings": [...]}.
+    # Returns {"purged_redundant": [...], "dimension_bindings": [...]}.
     #
     # endpoint_map binds JSON/NLT start/end labels to FreeCAD PointPos at sketch
     # creation; constraints resolve refs through the map, not live coordinates.
@@ -403,31 +425,12 @@ def _apply_histcad_constraints(
         return _pos_map.get(point_label, NONE)
 
     def _ground_truth_xy(ref):
-        if not ground_truth or "." not in str(ref):
-            return None
-        name, point = str(ref).split(".", 1)
-        spec = ground_truth.get(name)
-        if not isinstance(spec, dict):
-            return None
-        if point == "start":
-            return spec.get("start")
-        if point == "end":
-            return spec.get("end")
-        if point in ("center", "middle"):
-            return spec.get("center") or spec.get("middle")
-        return None
+        return ground_truth_xy(ground_truth, ref)
 
     def _directed_axis_distance(ref_a, ref_b, axis_index, magnitude):
-        # FreeCAD DistanceX/Y use coord(ref_b) - coord(ref_a) on the axis.
-        # Ground-truth coordinates supply the sign for VERTICAL/HORIZONTAL dims.
-        pa = _ground_truth_xy(ref_a)
-        pb = _ground_truth_xy(ref_b)
-        if pa is None or pb is None:
-            return magnitude
-        delta = float(pb[axis_index]) - float(pa[axis_index])
-        if abs(abs(delta) - float(magnitude)) <= max(1e-3, 1e-3 * abs(magnitude)):
-            return delta
-        return magnitude
+        return directed_axis_distance(
+            ref_a, ref_b, axis_index, magnitude, ground_truth,
+        )
 
     def _fix_constraint(geo_idx, point_pos=None):
         # HistCAD Fix: entity_ref -> Block(geo); point_ref -> Lock/Block point.
@@ -495,7 +498,7 @@ def _apply_histcad_constraints(
         if not ground_truth:
             return entries
         for name, spec in ground_truth.items():
-            if _entity_kind_from_spec(spec) != "line" or name not in idx_map:
+            if not name.startswith("line_") or name not in idx_map:
                 continue
             js = spec.get("start")
             je = spec.get("end")
@@ -597,6 +600,30 @@ def _apply_histcad_constraints(
             _n2, _p2 = _r2.split(".", 1)
             _coinc_map[(_n1, _p1)] = (_n2, _p2)
             _coinc_map[(_n2, _p2)] = (_n1, _p1)
+
+    def _extend_coinc_map_from_sketch():
+        # Incremental apply (e.g. Tangent-only) still needs junction endpoints
+        # from Coincident constraints already on the sketch.
+        if not idx_map:
+            return
+        _inv = {int(v): k for k, v in idx_map.items()}
+        _pos_labels = {1: "start", 2: "end", 3: "middle"}
+        for _c in sketch_obj.Constraints:
+            if _c.Type != "Coincident":
+                continue
+            _f, _fp = int(_c.First), int(_c.FirstPos)
+            _s, _sp = int(_c.Second), int(_c.SecondPos)
+            if _f < 0 or _s < 0:
+                continue
+            _n1 = _inv.get(_f)
+            _n2 = _inv.get(_s)
+            _p1 = _pos_labels.get(_fp)
+            _p2 = _pos_labels.get(_sp)
+            if _n1 and _n2 and _p1 and _p2:
+                _coinc_map[(_n1, _p1)] = (_n2, _p2)
+                _coinc_map[(_n2, _p2)] = (_n1, _p1)
+
+    _extend_coinc_map_from_sketch()
 
     added = []
     dimension_bindings = []
@@ -894,22 +921,92 @@ def _apply_histcad_constraints(
             except Exception:
                 pass
 
-    # Collect redundant constraint names from solver state
-    redundant = []
-    try:
-        sketch_obj.solve()
-        if hasattr(sketch_obj, "RedundantConstraints"):
-            for r_idx in sketch_obj.RedundantConstraints:
-                if 0 <= r_idx < len(sketch_obj.Constraints):
-                    redundant.append(sketch_obj.Constraints[r_idx].Name or str(r_idx))
-    except Exception:
-        pass
+    def _purge_redundant_sketch_constraints(max_iterations=10):
+        # Point-specific Tangent constraints make junction Coincident entries
+        # solver-redundant (solve_status -2).  Part::Extrusion then returns a
+        # null shape even though the wire is closed.  Drop redundant rows and
+        # keep applied_log / dimension_bindings indices aligned.
+        purged = []
+        _pos_labels = {1: "start", 2: "end", 3: "middle"}
+        _inv = {int(v): k for k, v in idx_map.items()}
+        for _ in range(max_iterations):
+            try:
+                sketch_obj.solve()
+            except Exception:
+                break
+            _red_idxs = [
+                int(i)
+                for i in (getattr(sketch_obj, "RedundantConstraints", []) or [])
+            ]
+            if not _red_idxs:
+                break
+            _deleted_any = False
+            # RedundantConstraints uses 1-based indices (matches constraint_catalog
+            # freecad_index); delConstraint() expects 0-based positions.
+            for _r_idx in sorted(_red_idxs, reverse=True):
+                _pos = _r_idx - 1
+                if not (0 <= _pos < len(sketch_obj.Constraints)):
+                    continue
+                _c = sketch_obj.Constraints[_pos]
+                # Tangent + junction Coincident overlap is the known failure mode for
+                # Part::Extrusion.  Leave other redundant types untouched.
+                if _c.Type != "Coincident":
+                    continue
+                _refs = []
+                _f, _fp = int(_c.First), int(_c.FirstPos)
+                _s, _sp = int(_c.Second), int(_c.SecondPos)
+                if _f >= 0 and _f in _inv:
+                    _lbl = _pos_labels.get(_fp)
+                    _refs.append(
+                        f"{_inv[_f]}.{_lbl}" if _lbl else _inv[_f]
+                    )
+                if _s >= 0 and _s in _inv:
+                    _lbl = _pos_labels.get(_sp)
+                    _refs.append(
+                        f"{_inv[_s]}.{_lbl}" if _lbl else _inv[_s]
+                    )
+                purged.append(
+                    {
+                        "freecad_index": _r_idx,
+                        "freecad_type": _c.Type,
+                        "entity_refs": _refs,
+                        "reason": "solver_redundant",
+                    }
+                )
+                sketch_obj.delConstraint(_pos)
+                _deleted_any = True
+                if _pos < len(applied_log):
+                    applied_log.pop(_pos)
+                for _binding in dimension_bindings:
+                    _ci = _binding.get("constraint_index")
+                    if _ci is None:
+                        continue
+                    if _ci == _pos:
+                        _binding["_removed"] = True
+                    elif _ci > _pos:
+                        _new = _ci - 1
+                        _binding["constraint_index"] = _new
+                        _binding["property"] = f"Constraints[{_new}]"
+            if not _deleted_any:
+                break
+        dimension_bindings[:] = [
+            _b for _b in dimension_bindings if not _b.get("_removed")
+        ]
+        try:
+            sketch_obj.solve()
+        except Exception:
+            pass
+        return purged
+
+    purged_redundant = _purge_redundant_sketch_constraints()
     return {
-        "redundant": redundant,
+        "redundant": [],
+        "purged_redundant": purged_redundant,
         "dimension_bindings": dimension_bindings,
         "applied_log": applied_log,
     }
 """
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1366,7 +1463,7 @@ try:
         _espec = sketch_dict.get(_ename, {{}})
         _entity_rows.append({{
             "name": _ename,
-            "kind": _entity_kind_from_spec(_espec),
+            "kind": _entity_kind_from_name(_ename),
             "freecad_geometry_index": _eidx,
         }})
     _kind_counts = {{}}
@@ -1764,6 +1861,11 @@ _result_ = {{
                   indices to input constraint entries and entity refs.
                 - redundant: Catalog rows flagged redundant by the solver.
                 - conflicting: Catalog rows flagged conflicting by the solver.
+                - purged_redundant: Constraints removed after apply because the
+                  solver marked them redundant (common when point-specific
+                  Tangent constraints duplicate junction Coincident rows).
+                  Removing them restores ``solve_status == 0`` and enables
+                  ``Part::Extrusion`` parametric sketch extrusion.
                 - redundant_constraints: 1-based FreeCAD indices (legacy shorthand).
                 - conflicting_constraints: 1-based FreeCAD indices (legacy).
                 - profile: ``{loops, closed_loops, open_loops, closed}`` after
@@ -1843,6 +1945,7 @@ try:
         ground_truth=ground_truth,
     )
     redundant = constraint_result.get("redundant", [])
+    purged_redundant = constraint_result.get("purged_redundant", [])
     applied_log = constraint_result.get("applied_log", [])
     dimension_bindings = constraint_result.get("dimension_bindings", [])
     applied_after = len(sk.Constraints) if hasattr(sk, "Constraints") else applied_before
@@ -2081,6 +2184,7 @@ try:
         "constraint_catalog":      _catalog,
         "redundant":               _redundant_entries,
         "conflicting":             _conflicting_entries,
+        "purged_redundant":        purged_redundant,
         "redundant_constraints":   [_row["freecad_index"] for _row in _redundant_entries],
         "conflicting_constraints": [_row["freecad_index"] for _row in _conflicting_entries],
         "profile":                 _profile,
@@ -2096,6 +2200,118 @@ except Exception as _e:
         if result.success and result.result:
             return result.result
         raise ValueError(result.error_traceback or "Failed to apply constraints")
+
+    @mcp.tool()
+    async def evaluate_sketch_editability(
+        reference_constraints: dict[str, Any],
+        constraint_type: str,
+        entry_index: int,
+        edited_value_mm: float,
+        sketch_name: str | None = None,
+        sketch: dict[str, Any] | None = None,
+        entities: list[str] | None = None,
+        doc_name: str | None = None,
+        length_tol_mm: float = 0.01,
+        angle_tol_deg: float = 0.5,
+    ) -> dict[str, Any]:
+        """Evaluate HistCAD-style sketch editability (ER / cPCSR / OES).
+
+        After applying an edited constraint set with ``apply_sketch_constraints``,
+        call this tool to verify:
+
+        - **ER** (edit reachability): the edited dimension is geometrically met.
+        - **cPCSR**: fraction of *other* reference constraints still satisfied.
+        - **OES**: overall success (ER and all preserved constraints pass).
+
+        Use ``replace_constraint_value`` (re-exported helper) to build the edited
+        constraint dict before applying.  Directed ``Distance`` edits rely on
+        signed ``DistanceX``/``DistanceY`` from ground-truth topology
+        (see ``sketch_helpers.directed_axis_distance``).
+
+        Args:
+            reference_constraints: Original HistCAD constraint dict (pre-edit).
+            constraint_type: Target type (e.g. ``Distance``, ``Diameter``).
+            entry_index: Zero-based index within that type's entry list.
+            edited_value_mm: New dimension value in millimetres.
+            sketch_name: Sketch to parse for live geometry. Required if
+                ``sketch`` is not provided.
+            sketch: Pre-parsed HistCAD entity dict (mm). Skips FreeCAD parse.
+            entities: Optional entity refs to disambiguate the target entry.
+            doc_name: Document name when parsing from FreeCAD.
+            length_tol_mm: Length tolerance in millimetres.
+            angle_tol_deg: Angle tolerance in degrees.
+
+        Returns:
+            Metrics dict with ``ER``, ``cPCSR``, ``OES``, ``target_hit``,
+            ``preserved_records``, and ``failed_preserved``.
+
+        Example:
+            Build edited constraints, apply, then score::
+
+                edited = replace_constraint_value(
+                    constraints,
+                    constraint_type="Distance",
+                    entry_index=0,
+                    edited_value_mm=1.8,
+                )
+                await apply_sketch_constraints("Sketch001", edited)
+                metrics = await evaluate_sketch_editability(
+                    reference_constraints=constraints,
+                    constraint_type="Distance",
+                    entry_index=0,
+                    edited_value_mm=1.8,
+                    sketch_name="Sketch001",
+                )
+        """
+        live_sketch = sketch
+        if live_sketch is None:
+            if sketch_name is None:
+                raise ValueError("Either sketch or sketch_name must be provided")
+            parsed = await parse_freecad_sketch(  # type: ignore[name-defined]
+                sketch_name=sketch_name,
+                doc_name=doc_name,
+            )
+            live_sketch = parsed.get("sketch")
+            if not live_sketch:
+                raise ValueError(f"No sketch geometry parsed from {sketch_name!r}")
+
+        entity_tuple = tuple(entities) if entities else None
+        metrics = _evaluate_sketch_geometry(
+            live_sketch=live_sketch,
+            reference_constraints=reference_constraints,
+            constraint_type=constraint_type,
+            entry_index=entry_index,
+            edited_value_mm=float(edited_value_mm),
+            entities=entity_tuple,
+            length_tol_mm=float(length_tol_mm),
+            angle_tol_deg=float(angle_tol_deg),
+        )
+        metrics["sketch_name"] = sketch_name
+        metrics["success"] = True
+        return metrics
+
+    @mcp.tool()
+    def build_edited_sketch_constraints(
+        constraints: dict[str, Any],
+        constraint_type: str,
+        entry_index: int,
+        edited_value_mm: float,
+        entities: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return a copy of a HistCAD constraint dict with one dimension edited.
+
+        Use the returned ``constraints`` with ``apply_sketch_constraints``, then
+        score the result via ``evaluate_sketch_editability``.
+        """
+        entity_tuple = tuple(entities) if entities else None
+        updated = replace_constraint_value(
+            constraints,
+            constraint_type=constraint_type,
+            entry_index=entry_index,
+            edited_value_mm=float(edited_value_mm),
+            entities=entity_tuple,
+        )
+        return {"constraints": updated, "success": True}
 
     # ------------------------------------------------------------------
     # Group D — Feature Execution
@@ -2358,6 +2574,35 @@ try:
         return _feat
 
     if mode in ("auto", "parametric_sketch"):
+        def _purge_redundant_sketch_constraints(_sk_obj, _max_iterations=10):
+            for _ in range(_max_iterations):
+                try:
+                    _sk_obj.solve()
+                except Exception:
+                    break
+                _red_idxs = [
+                    int(i)
+                    for i in (getattr(_sk_obj, "RedundantConstraints", []) or [])
+                ]
+                if not _red_idxs:
+                    break
+                _deleted_any = False
+                for _r_idx in sorted(_red_idxs, reverse=True):
+                    _pos = _r_idx - 1
+                    if not (0 <= _pos < len(_sk_obj.Constraints)):
+                        continue
+                    if _sk_obj.Constraints[_pos].Type != "Coincident":
+                        continue
+                    _sk_obj.delConstraint(_pos)
+                    _deleted_any = True
+                if not _deleted_any:
+                    break
+            try:
+                _sk_obj.solve()
+            except Exception:
+                pass
+
+        _purge_redundant_sketch_constraints(sk)
         try:
             feat = _create_parametric_extrusion()
             fallback_reason = _shape_failure_reason(feat)

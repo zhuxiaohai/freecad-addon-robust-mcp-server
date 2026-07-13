@@ -1657,6 +1657,38 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "key_params": ["sketch_name", "constraints", "doc_name"],
                         },
                         {
+                            "name": "evaluate_sketch_editability",
+                            "description": (
+                                "Score a sketch edit using HistCAD ER/cPCSR/OES metrics. "
+                                "After apply_sketch_constraints with an edited dimension, "
+                                "verifies target_hit and preserved constraint satisfaction "
+                                "from parse_freecad_sketch geometry. Use "
+                                "replace_constraint_value (sketch_editability module) "
+                                "to build edited constraint dicts; directed Distance "
+                                "signs come from sketch_helpers."
+                            ),
+                            "key_params": [
+                                "reference_constraints",
+                                "constraint_type",
+                                "entry_index",
+                                "edited_value_mm",
+                                "sketch_name",
+                            ],
+                        },
+                        {
+                            "name": "build_edited_sketch_constraints",
+                            "description": (
+                                "Copy a HistCAD constraint dict with one dimension "
+                                "entry updated (for editability experiments)."
+                            ),
+                            "key_params": [
+                                "constraints",
+                                "constraint_type",
+                                "entry_index",
+                                "edited_value_mm",
+                            ],
+                        },
+                        {
                             "name": "execute_extrude",
                             "description": (
                                 "Extrude a sketch into a standalone solid. Defaults to "

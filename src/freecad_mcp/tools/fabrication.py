@@ -2864,8 +2864,11 @@ except Exception as _e:
                 Set ``True`` to keep them visible.
             boolean_mode: ``"auto"`` (default), ``"parametric"``, or
                 ``"static_shape"``.  ``"auto"`` tries a parametric FreeCAD
-                boolean first and falls back to a direct shape boolean when the
-                parametric result is null, invalid, or zero-volume.
+                boolean first.  When native ``Part::Common`` / ``Part::Cut``
+                return zero volume for ``Part::Extrusion`` parents, a linked
+                ``Part::FeaturePython`` fallback keeps base/tool references
+                and still falls back to a direct shape boolean only when both
+                paths fail.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
@@ -2949,6 +2952,20 @@ def _direct_boolean_shape():
         return base_obj.Shape.cut(tool_obj.Shape)
     return base_obj.Shape.common(tool_obj.Shape)
 
+def _prepare_boolean_dependencies():
+    # Part::Extrusion parents must be marked dirty before Part::Common /
+    # Part::Cut recompute.  Without this, FreeCAD can return a valid but
+    # zero-volume parametric boolean even when direct shape booleans work.
+    for _obj in (base_obj, tool_obj):
+        _obj.touch()
+        try:
+            _sk = getattr(_obj, "Base", None)
+            if _sk is not None:
+                _sk.touch()
+        except Exception:
+            pass
+    doc.recompute()
+
 def _create_parametric_boolean():
     if operation == "Join":
         try:
@@ -2969,11 +2986,120 @@ def _create_parametric_boolean():
         _feat = doc.addObject("Part::Common", result_nm or operation)
         _feat.Base = base_obj
         _feat.Tool = tool_obj
+        try:
+            _feat.Refine = True
+        except Exception:
+            pass
         return _feat
     except Exception:
         _feat = doc.addObject("Part::MultiCommon", result_nm or operation)
         _feat.Shapes = [base_obj, tool_obj]
         return _feat
+
+def _create_linked_boolean_feature():
+    # Part::Common / Part::Cut can return zero volume for Part::Extrusion
+    # parents even when direct shape booleans succeed.  A linked
+    # Part::FeaturePython keeps base/tool references and recomputes via
+    # OpenCASCADE shape ops, so sketch edits still propagate.
+    class _FabricationBooleanProxy:
+        def __init__(self, obj):
+            obj.addProperty(
+                "App::PropertyLink", "Base", "Boolean", "Base solid")
+            obj.addProperty(
+                "App::PropertyLink", "Tool", "Boolean", "Tool solid")
+            obj.addProperty(
+                "App::PropertyEnumeration",
+                "Operation",
+                "Boolean",
+                "Boolean operation",
+            )
+            obj.Operation = ["Join", "Cut", "Intersect"]
+            obj.Proxy = self
+
+        def execute(self, obj):
+            _base_sh = obj.Base.Shape
+            _tool_sh = obj.Tool.Shape
+            if obj.Operation == "Join":
+                obj.Shape = _base_sh.fuse(_tool_sh)
+            elif obj.Operation == "Cut":
+                obj.Shape = _base_sh.cut(_tool_sh)
+            else:
+                obj.Shape = _base_sh.common(_tool_sh)
+
+    class _FabricationBooleanViewProvider:
+        # Part::FeaturePython has no default 3-D display.  Without a view
+        # provider the shape exists but stays invisible in the GUI.
+        def __init__(self, vobj):
+            vobj.Proxy = self
+
+        def attach(self, vobj):
+            from pivy import coin
+
+            self.root = coin.SoSeparator()
+            vobj.addDisplayMode(self.root, "Shaded")
+            self.updateData(vobj.Object, "Shape")
+
+        def updateData(self, obj, prop):
+            if prop != "Shape":
+                return
+            from pivy import coin
+
+            self.root.removeAllChildren()
+            _sh = obj.Shape
+            if _sh is None or _sh.isNull():
+                return
+            try:
+                _pts, _tris = _sh.tessellate(0.1)
+            except Exception:
+                return
+            if not _pts:
+                return
+            _coords = coin.SoCoordinate3()
+            _coords.point.setValues(0, len(_pts), [p.toTuple() for p in _pts])
+            _faces = coin.SoIndexedFaceSet()
+            _faces.coordIndex.setValues(
+                0, len(_tris), [i for tri in _tris for i in tri] + [-1]
+            )
+            self.root.addChild(_coords)
+            self.root.addChild(_faces)
+
+        def getDisplayModes(self, obj):
+            return ["Shaded"]
+
+        def getDefaultDisplayMode(self):
+            return "Shaded"
+
+        def setDisplayMode(self, mode):
+            return mode
+
+    import sys as _sys
+
+    _mod = _sys.modules.get("__main__")
+    if _mod is not None:
+        _mod._FabricationBooleanProxy = _FabricationBooleanProxy
+        _mod._FabricationBooleanViewProvider = _FabricationBooleanViewProvider
+
+    _feat = doc.addObject("Part::FeaturePython", result_nm or operation)
+    _FabricationBooleanProxy(_feat)
+    _feat.Base = base_obj
+    _feat.Tool = tool_obj
+    _feat.Operation = operation
+    if FreeCAD.GuiUp:
+        try:
+            _vp = _feat.ViewObject
+            _FabricationBooleanViewProvider(_vp)
+            _vp.Visibility = True
+            _vp.DisplayMode = "Shaded"
+        except Exception:
+            pass
+    return _feat
+
+def _try_linked_boolean_fallback():
+    _direct_shape = _direct_boolean_shape()
+    _direct_reason = _shape_failure_reason(_direct_shape)
+    if _direct_reason is not None:
+        return None, _direct_reason
+    return _create_linked_boolean_feature(), None
 
 doc.openTransaction("Execute Boolean")
 try:
@@ -2992,16 +3118,38 @@ try:
 
     if mode in ("auto", "parametric"):
         try:
+            _prepare_boolean_dependencies()
             feat = _create_parametric_boolean()
             doc.recompute()
             fallback_reason = _shape_failure_reason(feat.Shape)
+            if fallback_reason and fallback_reason.startswith("zero_volume"):
+                doc.recompute()
+                fallback_reason = _shape_failure_reason(feat.Shape)
             if fallback_reason is None:
                 boolean_mode_used = "parametric"
         except Exception as _exc:
             fallback_reason = "parametric_error: " + str(_exc)
             feat = None
-        if fallback_reason and mode == "parametric":
-            raise ValueError("Parametric boolean failed: " + fallback_reason)
+        if fallback_reason and mode in ("auto", "parametric"):
+            _linked_feat, _linked_reason = _try_linked_boolean_fallback()
+            if _linked_feat is not None:
+                if feat is not None:
+                    try:
+                        doc.removeObject(feat.Name)
+                    except Exception:
+                        pass
+                feat = _linked_feat
+                doc.recompute()
+                fallback_reason = _shape_failure_reason(feat.Shape)
+                if fallback_reason is None:
+                    boolean_mode_used = "parametric"
+            elif mode == "parametric":
+                raise ValueError(
+                    "Parametric boolean failed: "
+                    + str(fallback_reason)
+                    + "; linked fallback failed: "
+                    + str(_linked_reason)
+                )
 
     if mode == "static_shape" or (mode == "auto" and fallback_reason):
         direct_shape = _direct_boolean_shape()
@@ -3034,6 +3182,12 @@ try:
                 _obj.ViewObject.Visibility = False
             except Exception:
                 pass
+
+    if FreeCAD.GuiUp:
+        try:
+            feat.ViewObject.Visibility = True
+        except Exception:
+            pass
 
     result_shape = feat.Shape
     _rb = result_shape.BoundBox

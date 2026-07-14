@@ -984,6 +984,10 @@ class TestFabricationSourceConventions:
         assert ".Shape.copy()" not in boolean_source
         assert "feat.Shape = result_shape" not in boolean_source
         assert "_create_parametric_boolean" in boolean_source
+        assert "_create_linked_boolean_feature" in boolean_source
+        assert "_FabricationBooleanViewProvider" in boolean_source
+        assert "_try_linked_boolean_fallback" in boolean_source
+        assert "_prepare_boolean_dependencies" in boolean_source
         assert "_direct_boolean_shape" in boolean_source
         assert "boolean_mode_used" in boolean_source
         assert "feat.Base = base_obj" in boolean_source

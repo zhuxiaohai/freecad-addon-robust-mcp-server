@@ -96,6 +96,66 @@ if TYPE_CHECKING:
 _SPREADSHEET_NAME = "FabricationParams"
 
 
+def _build_editability_validation_code(
+    doc_name: str | None,
+    *,
+    sketch_name: str | None = None,
+) -> str:
+    """Return FreeCAD Python that recomputes and validates post-edit health."""
+    sketch_filter = (
+        f"and obj.Name == {sketch_name!r}" if sketch_name is not None else ""
+    )
+    return f"""
+doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
+if doc is None:
+    raise ValueError("No active document")
+rebuild_success = True
+exception = None
+try:
+    doc.recompute()
+except Exception as _exc:
+    rebuild_success = False
+    exception = str(_exc)
+
+sketches = []
+shape_errors = []
+for obj in doc.Objects:
+    try:
+        if obj.TypeId == "Sketcher::SketchObject" {sketch_filter}:
+            _constraint_types = []
+            try:
+                _constraint_types = [c.Type for c in obj.Constraints]
+            except Exception:
+                pass
+            sketches.append({{
+                "name": obj.Name,
+                "dof": getattr(obj, "DoF", None),
+                "fully_constrained": getattr(obj, "FullyConstrained", None),
+                "conflicting": list(getattr(obj, "ConflictingConstraints", ())),
+                "redundant": list(getattr(obj, "RedundantConstraints", ())),
+                "constraint_types": _constraint_types,
+            }})
+        if hasattr(obj, "Shape") and not obj.Shape.isNull():
+            try:
+                if not obj.Shape.isValid():
+                    shape_errors.append(obj.Name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+validation_ok = rebuild_success and not shape_errors and all(
+    not item.get("conflicting") for item in sketches
+)
+_result_ = {{
+    "rebuild_success": rebuild_success,
+    "validation_ok": validation_ok,
+    "exception": exception,
+    "shape_errors": shape_errors,
+    "sketches": sketches,
+}}
+"""
+
+
 def _read_sketch_helper_embed() -> str:
     """Load sketch helper source for embedding (strip ``__future__`` imports)."""
     text = (Path(__file__).resolve().parent / "sketch_helpers.py").read_text(
@@ -2216,53 +2276,45 @@ except Exception as _e:
     ) -> dict[str, Any]:
         """Evaluate HistCAD-style sketch editability (ER / cPCSR / OES).
 
-        After applying an edited constraint set with ``apply_sketch_constraints``,
-        call this tool to verify:
+        Follows ``HistCAD-68C2/editability/metrics.py`` v2 when ``sketch_name``
+        is provided (recompute + sketch health check in FreeCAD):
 
-        - **ER** (edit reachability): the edited dimension is geometrically met.
-        - **cPCSR**: fraction of *other* reference constraints still satisfied.
-        - **OES**: overall success (ER and all preserved constraints pass).
+        - **ER**: ``target_hit AND validation_ok AND rebuild_success``
+        - **cPCSR**: fraction of *other* reference constraints still satisfied
+        - **OES**: ``ER x cPCSR``
 
-        Use ``replace_constraint_value`` (re-exported helper) to build the edited
-        constraint dict before applying.  Directed ``Distance`` edits rely on
-        signed ``DistanceX``/``DistanceY`` from ground-truth topology
-        (see ``sketch_helpers.directed_axis_distance``).
+        Without ``sketch_name`` (offline ``sketch`` dict only), returns
+        geometric-only scoring for unit tests.
 
-        Args:
-            reference_constraints: Original HistCAD constraint dict (pre-edit).
-            constraint_type: Target type (e.g. ``Distance``, ``Diameter``).
-            entry_index: Zero-based index within that type's entry list.
-            edited_value_mm: New dimension value in millimetres.
-            sketch_name: Sketch to parse for live geometry. Required if
-                ``sketch`` is not provided.
-            sketch: Pre-parsed HistCAD entity dict (mm). Skips FreeCAD parse.
-            entities: Optional entity refs to disambiguate the target entry.
-            doc_name: Document name when parsing from FreeCAD.
-            length_tol_mm: Length tolerance in millimetres.
-            angle_tol_deg: Angle tolerance in degrees.
+        Workflow (aligned with ``editability/experiment.py``)::
 
-        Returns:
-            Metrics dict with ``ER``, ``cPCSR``, ``OES``, ``target_hit``,
-            ``preserved_records``, and ``failed_preserved``.
-
-        Example:
-            Build edited constraints, apply, then score::
-
-                edited = replace_constraint_value(
-                    constraints,
-                    constraint_type="Distance",
-                    entry_index=0,
-                    edited_value_mm=1.8,
-                )
-                await apply_sketch_constraints("Sketch001", edited)
-                metrics = await evaluate_sketch_editability(
-                    reference_constraints=constraints,
-                    constraint_type="Distance",
-                    entry_index=0,
-                    edited_value_mm=1.8,
-                    sketch_name="Sketch001",
-                )
+            edited = build_edited_sketch_constraints(...)
+            await apply_sketch_constraints(sketch_name, edited["constraints"])
+            metrics = await evaluate_sketch_editability(
+                reference_constraints=original_constraints,
+                constraint_type="Distance",
+                entry_index=0,
+                edited_value_mm=1.8,
+                sketch_name="Sketch",
+            )
         """
+        validation: dict[str, Any] | None = None
+        if sketch_name is not None:
+            bridge = await get_bridge()
+            validation_exec = await bridge.execute_python(
+                _build_editability_validation_code(doc_name, sketch_name=sketch_name)
+            )
+            if validation_exec.success and validation_exec.result:
+                validation = validation_exec.result
+            else:
+                validation = {
+                    "rebuild_success": False,
+                    "validation_ok": False,
+                    "exception": validation_exec.error_traceback,
+                    "shape_errors": [],
+                    "sketches": [],
+                }
+
         live_sketch = sketch
         if live_sketch is None:
             if sketch_name is None:
@@ -2285,8 +2337,16 @@ except Exception as _e:
             entities=entity_tuple,
             length_tol_mm=float(length_tol_mm),
             angle_tol_deg=float(angle_tol_deg),
+            rebuild_success=(
+                validation.get("rebuild_success") if validation is not None else None
+            ),
+            validation_ok=(
+                validation.get("validation_ok") if validation is not None else None
+            ),
         )
         metrics["sketch_name"] = sketch_name
+        if validation is not None:
+            metrics["validation"] = validation
         metrics["success"] = True
         return metrics
 

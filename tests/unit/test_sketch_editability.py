@@ -9,6 +9,7 @@ import pytest
 
 from freecad_mcp.tools.sketch_editability import (
     evaluate_sketch_editability,
+    finalize_histcad_editability_metrics,
     normalize_constraint_records,
     replace_constraint_value,
 )
@@ -77,3 +78,32 @@ class TestSketchEditability:
             sketch,
         )
         assert val == pytest.approx(-1.8)
+
+
+class TestFinalizeHistcadMetrics:
+    """HistCAD v2 ER/OES finalization."""
+
+    def test_histcad_v2_oes_is_product(self) -> None:
+        base = {
+            "target_hit": True,
+            "cPCSR": 0.8,
+            "preserved_constraints_all_satisfied": False,
+        }
+        metrics = finalize_histcad_editability_metrics(
+            base,
+            rebuild_success=True,
+            validation_ok=True,
+        )
+        assert metrics["ER"] == 1.0
+        assert metrics["OES"] == pytest.approx(0.8)
+        assert metrics["metric_definition"] == "histcad_v2"
+
+    def test_histcad_v2_er_requires_validation(self) -> None:
+        base = {"target_hit": True, "cPCSR": 1.0}
+        metrics = finalize_histcad_editability_metrics(
+            base,
+            rebuild_success=True,
+            validation_ok=False,
+        )
+        assert metrics["ER"] == 0.0
+        assert metrics["OES"] == 0.0

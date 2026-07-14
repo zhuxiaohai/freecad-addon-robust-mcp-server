@@ -842,6 +842,8 @@ def evaluate_sketch_editability(
     entities: tuple[str, ...] | None = None,
     length_tol_mm: float = 0.01,
     angle_tol_deg: float = DEFAULT_ANGLE_TOL_DEG,
+    rebuild_success: bool | None = None,
+    validation_ok: bool | None = None,
 ) -> dict[str, Any]:
     """Compute HistCAD ER / cPCSR / OES from solved sketch geometry.
 
@@ -855,6 +857,9 @@ def evaluate_sketch_editability(
         entities: Optional entity tuple to disambiguate the target entry.
         length_tol_mm: Length tolerance in millimetres.
         angle_tol_deg: Angle tolerance in degrees.
+        rebuild_success: When set, enables HistCAD v2 ER
+            (``target_hit AND validation_ok AND rebuild_success``).
+        validation_ok: Post-edit sketch/shape validation flag (HistCAD v2).
 
     Returns:
         Metrics dict with ``ER``, ``cPCSR``, ``OES``, target/preserved details.
@@ -886,13 +891,11 @@ def evaluate_sketch_editability(
     target_row = target_eval["records"][0] if target_eval["records"] else {}
     target_hit = target_row.get("ok") is True
     cpcsr = float(preserved_eval["satisfaction_rate"] or 0.0)
-    er = target_hit
-    oes = er and preserved_eval.get("all_satisfied") is True
 
     failed_preserved = [
         row for row in preserved_eval["records"] if row.get("ok") is False
     ]
-    return {
+    metrics = {
         "target_constraint_type": constraint_type,
         "target_entry_index": entry_index,
         "target_entities": list(target_record.entities),
@@ -908,8 +911,71 @@ def evaluate_sketch_editability(
         "preserved_constraint_satisfaction_rate": cpcsr,
         "preserved_constraints_all_satisfied": preserved_eval["all_satisfied"],
         "failed_preserved": failed_preserved,
-        "ER": er,
         "cPCSR": cpcsr,
-        "OES": oes,
-        "reward": float(oes),
     }
+    return finalize_histcad_editability_metrics(
+        metrics,
+        rebuild_success=rebuild_success,
+        validation_ok=validation_ok,
+    )
+
+
+def finalize_histcad_editability_metrics(
+    metrics: dict[str, Any],
+    *,
+    rebuild_success: bool | None = None,
+    validation_ok: bool | None = None,
+) -> dict[str, Any]:
+    """Apply HistCAD ``editability/metrics.py`` v2 ER and OES definitions.
+
+    When ``rebuild_success`` or ``validation_ok`` is supplied (typical after a
+    FreeCAD recompute + sketch health check):
+
+    - **ER** (edit reachability): ``target_hit AND validation_ok AND rebuild_success``
+    - **OES**: ``ER x cPCSR``
+
+    Otherwise uses geometric-only scoring for offline/unit tests:
+
+    - **ER** = ``target_hit``
+    - **OES** = ``ER`` and all preserved constraints satisfied (boolean)
+
+    Args:
+        metrics: Output from geometric ``evaluate_constraint_records`` scoring.
+        rebuild_success: Whether the edited model recomputed without failure.
+        validation_ok: Whether sketches/shapes pass post-edit validation.
+
+    Returns:
+        Copy of ``metrics`` with ``ER``, ``OES``, ``reward``, and
+        ``metric_definition`` populated.
+    """
+    updated = dict(metrics)
+    target_hit = updated.get("target_hit") is True
+    cpcsr = float(
+        updated.get("cPCSR")
+        or updated.get("preserved_constraint_satisfaction_rate")
+        or 0.0
+    )
+    histcad_v2 = rebuild_success is not None or validation_ok is not None
+
+    if histcad_v2:
+        rebuild_ok = rebuild_success is True
+        validation_pass = validation_ok is True
+        edit_reachable = target_hit and rebuild_ok and validation_pass
+        er: float | bool = 1.0 if edit_reachable else 0.0
+        oes: float | bool = float(er) * cpcsr
+        updated["edit_reachable"] = edit_reachable
+        updated["rebuild_success"] = rebuild_success
+        updated["validation_ok"] = validation_ok
+        updated["metric_definition"] = "histcad_v2"
+    else:
+        er = target_hit
+        oes = bool(
+            target_hit and updated.get("preserved_constraints_all_satisfied") is True
+        )
+        updated["edit_reachable"] = target_hit
+        updated["metric_definition"] = "geometric_only"
+
+    updated["ER"] = er
+    updated["OES"] = oes
+    updated["reward"] = float(oes)
+    return updated

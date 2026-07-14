@@ -85,6 +85,8 @@ class TestFabricationTools:
             "set_tunable_param",
             "evaluate_editability",
             "get_body_snapshot",
+            "describe_fabrication_plan_schema",
+            "validate_fabrication_plan",
             "execute_fabrication_plan",
         }
         assert set(register_tools.keys()) == expected

@@ -8,6 +8,9 @@ from freecad_mcp.tools.fabrication_schema import (
     FeatureSpec,
     FinishSpec,
     SketchSpec,
+    describe_fabrication_plan_schema,
+    minimal_fabrication_plan_example,
+    validate_fabrication_plan,
 )
 
 
@@ -265,6 +268,68 @@ class TestFabricationPlan:
         assert plan2.finishes[0].type == "fillet"
 
         assert plan2.metadata["material"] == "aluminium"
+
+    def test_describe_fabrication_plan_schema_is_agent_readable(self) -> None:
+        """Schema description exposes examples and primitive contracts."""
+        schema = describe_fabrication_plan_schema()
+
+        assert schema["schema_name"] == "FabricationPlan"
+        assert "coordinate_systems" in schema["top_level_fields"]
+        assert "line_N" in schema["sketch_entity_conventions"]
+        assert "extrude" in schema["feature_spec"]["types"]
+        assert schema["examples"][0]["features"][0]["type"] == "extrude"
+
+    def test_validate_fabrication_plan_accepts_minimal_example(self) -> None:
+        """The published minimal example validates successfully."""
+        result = validate_fabrication_plan(minimal_fabrication_plan_example())
+
+        assert result["valid"] is True
+        assert result["errors"] == []
+
+    def test_validate_fabrication_plan_rejects_unknown_coordinate_system(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Sketches must reference declared coordinate systems."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["coordinate_system_name"] = "MissingPlane"
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is False
+        assert any(
+            error["code"] == "unknown_ref" and "MissingPlane" in error["message"]
+            for error in result["errors"]
+        )
+
+    def test_validate_fabrication_plan_rejects_bad_constraint_ref(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Constraint references must point at known sketch entities."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"]["Horizontal"] = ["line_99"]
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is False
+        assert any(
+            error["code"] == "unknown_ref" and "line_99" in error["message"]
+            for error in result["errors"]
+        )
+
+    def test_validate_fabrication_plan_rejects_unknown_feature_type(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Feature types are limited to the Layer 1 primitive set."""
+        plan = simple_plan.to_dict()
+        plan["features"][0]["type"] = "sweep"
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is False
+        assert any(error["code"] == "unsupported" for error in result["errors"])
 
     def test_to_dict_is_json_serialisable(self, simple_plan: FabricationPlan) -> None:
         """to_dict output can be serialised by the stdlib json module."""

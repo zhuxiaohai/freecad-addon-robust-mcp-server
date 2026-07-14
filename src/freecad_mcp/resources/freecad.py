@@ -1813,11 +1813,31 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "key_params": ["body_name", "doc_name"],
                         },
                         {
+                            "name": "describe_fabrication_plan_schema",
+                            "description": (
+                                "Describe the agent-facing FabricationPlan contract for "
+                                "no-template workflows. Returns top-level fields, coordinate "
+                                "system/sketch/feature/finish specs, HistCAD entity naming, "
+                                "constraint types, feature parameters, and examples."
+                            ),
+                            "key_params": [],
+                        },
+                        {
+                            "name": "validate_fabrication_plan",
+                            "description": (
+                                "Validate a FabricationPlan dict before execution. Checks "
+                                "structure, named references, feature params, sketch entity "
+                                "names, and constraint references without touching FreeCAD."
+                            ),
+                            "key_params": ["plan"],
+                        },
+                        {
                             "name": "execute_fabrication_plan",
                             "description": (
                                 "Batch-execute a complete FabricationPlan dict produced by a "
-                                "Layer 2 domain template tool. Drives all Layer 1 primitives in "
-                                "order: coordinate_systems → sketches → features → finishes. "
+                                "template compiler or direct no-template agent route. Drives "
+                                "all Layer 1 primitives in order: coordinate_systems → "
+                                "sketches → features → finishes. "
                                 "Returns body_name, feature_names, tunable_params, "
                                 "bounding_box, volume, and steps_completed."
                             ),

@@ -574,11 +574,18 @@ parsing happens upstream in the Intent Model — not in template tools.
 | ------------------- | ---------------------------------------------------------------------------------------------------- |
 | `get_body_snapshot` | Get bounding box, volume, feature list, and `edge_samples` of a PartDesign Body for fillet/chamfer.  |
 
+### FabricationPlan Contract
+
+| Tool                               | Description                                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- |
+| `describe_fabrication_plan_schema` | Describe the agent-facing `FabricationPlan` contract for no-template workflows.             |
+| `validate_fabrication_plan`        | Validate a `FabricationPlan` before execution without touching FreeCAD.                     |
+
 ### Batch Execution
 
-| Tool                       | Description                                                                       |
-| -------------------------- | --------------------------------------------------------------------------------- |
-| `execute_fabrication_plan` | Batch-execute a complete `FabricationPlan` dict produced by a Layer 2 template.   |
+| Tool                       | Description                                                                                          |
+| -------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `execute_fabrication_plan` | Batch-execute a complete `FabricationPlan` dict after template or plan validation.                   |
 
 ### Standard Workflow Example
 

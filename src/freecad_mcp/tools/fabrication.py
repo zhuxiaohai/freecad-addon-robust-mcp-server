@@ -1092,6 +1092,8 @@ def register_fabrication_tools(
     - Group F — Parametric Control: ``list_tunable_params``,
       ``set_tunable_param``
     - Group G — Observation: ``get_body_snapshot``
+    - Plan Contract: ``describe_fabrication_plan_schema``,
+      ``validate_fabrication_plan``
     - Batch: ``execute_fabrication_plan``
 
     Args:
@@ -4435,6 +4437,38 @@ _result_ = {{
         if result.success and result.result:
             return result.result
         raise ValueError(result.error_traceback or "Failed to get body snapshot")
+
+    # ------------------------------------------------------------------
+    # Plan Contract — schema discovery and validation
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    async def describe_fabrication_plan_schema() -> dict[str, Any]:
+        """Describe the FabricationPlan contract for no-template agents.
+
+        Agents should call this before generating a direct FabricationPlan when
+        no registered domain template fits the user request.  This tool is
+        deterministic and does not touch FreeCAD.
+        """
+        from freecad_mcp.tools.fabrication_schema import (
+            describe_fabrication_plan_schema as _describe_schema,
+        )
+
+        return _describe_schema()
+
+    @mcp.tool()
+    async def validate_fabrication_plan(plan: dict[str, Any]) -> dict[str, Any]:
+        """Validate a FabricationPlan before execution.
+
+        This is the no-template counterpart to ``validate_intent``.  It checks
+        the plan shape, references, feature parameters, sketch entity names, and
+        constraint references without executing CAD.
+        """
+        from freecad_mcp.tools.fabrication_schema import (
+            validate_fabrication_plan as _validate_plan,
+        )
+
+        return _validate_plan(plan)
 
     # ------------------------------------------------------------------
     # Batch — execute_fabrication_plan

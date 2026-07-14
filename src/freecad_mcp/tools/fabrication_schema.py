@@ -15,6 +15,40 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+SKETCH_ENTITY_PREFIXES = (
+    "line_",
+    "circle_",
+    "arc_",
+    "ellipse_",
+    "elliptical_arc_",
+    "nurbs_",
+)
+
+CONSTRAINT_TYPES = (
+    "Coincident",
+    "Horizontal",
+    "Vertical",
+    "Perpendicular",
+    "Parallel",
+    "Equal",
+    "Tangent",
+    "Normal",
+    "Concentric",
+    "Fix",
+    "Midpoint",
+    "Mirror",
+    "Angle",
+    "Diameter",
+    "Radius",
+    "MajorRadius",
+    "MinorRadius",
+    "Length",
+    "Distance",
+)
+
+FEATURE_TYPES = ("extrude", "boolean", "revolve", "helix")
+FINISH_TYPES = ("fillet", "chamfer")
+
 
 @dataclass
 class CoordinateSystemSpec:
@@ -364,3 +398,502 @@ class FabricationPlan:
             param_aliases=d.get("param_aliases", {}),
             metadata=d.get("metadata", {}),
         )
+
+
+def minimal_fabrication_plan_example() -> dict[str, Any]:
+    """Return a minimal executable FabricationPlan example for agents."""
+    return FabricationPlan(
+        coordinate_systems=[
+            CoordinateSystemSpec([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], name="XY_Base"),
+        ],
+        sketches=[
+            SketchSpec(
+                sketch={
+                    "circle_1": {"center": [0.0, 0.0], "radius": 10.0},
+                },
+                constraints={
+                    "Fix": ["circle_1.center"],
+                    "Radius": [["circle_1", "10 mm"]],
+                },
+                coordinate_system_name="XY_Base",
+                sketch_name="BaseCircle",
+            )
+        ],
+        features=[
+            FeatureSpec(
+                type="extrude",
+                sketch_name="BaseCircle",
+                operation="NewBody",
+                params={"towards": 20.0, "opposite": 0.0},
+                feature_name="Cylinder",
+            )
+        ],
+        metadata={"source": "describe_fabrication_plan_schema"},
+    ).to_dict()
+
+
+def describe_fabrication_plan_schema() -> dict[str, Any]:
+    """Return the agent-facing FabricationPlan contract."""
+    return {
+        "schema_name": "FabricationPlan",
+        "version": "v1",
+        "deterministic": True,
+        "description": (
+            "Layer 1 CAD execution contract. Agents should generate this only "
+            "when no registered template fits, then call validate_fabrication_plan "
+            "before execute_fabrication_plan."
+        ),
+        "top_level_fields": {
+            "coordinate_systems": "list[CoordinateSystemSpec], created before sketches",
+            "sketches": "list[SketchSpec], ordered 2D profiles and constraints",
+            "features": "list[FeatureSpec], ordered extrude/boolean/revolve/helix features",
+            "finishes": "optional list[FinishSpec], fillet/chamfer operations",
+            "param_aliases": "optional dict[str,str] for tunable UI aliases",
+            "metadata": "optional dict for provenance and agent trace",
+        },
+        "coordinate_system_spec": {
+            "required": ["euler_angles", "translation"],
+            "optional": ["name", "attachment_support", "offset_expressions"],
+            "notes": "Euler angles are active local-to-world XYZ degrees; units are mm.",
+        },
+        "sketch_spec": {
+            "required": ["sketch"],
+            "optional": [
+                "constraints",
+                "coordinate_system",
+                "coordinate_system_name",
+                "attachment_support",
+                "sketch_name",
+                "attach_after_feature",
+                "attach_body_feature",
+            ],
+            "notes": (
+                "Provide coordinate_system_name, inline coordinate_system, or "
+                "attachment_support. Named sketches are recommended because "
+                "features reference sketch_name."
+            ),
+        },
+        "feature_spec": {
+            "types": list(FEATURE_TYPES),
+            "extrude": {
+                "required": ["type", "sketch_name", "operation", "params"],
+                "operation": "NewBody",
+                "params": {"towards": "float", "opposite": "float optional"},
+            },
+            "boolean": {
+                "required": ["type", "operation", "params"],
+                "operation": "Join | Cut | Intersect",
+                "params": {
+                    "base_object_name": "feature/object name",
+                    "tool_object_name": "feature/object name",
+                    "operation": "Join | Cut | Intersect optional mirror",
+                },
+            },
+            "revolve": {
+                "required": ["type", "sketch_name", "operation", "params"],
+                "params": {
+                    "axis": "[[x,y,z],[dx,dy,dz]]",
+                    "start": "float",
+                    "end": "float",
+                },
+            },
+            "helix": {
+                "required": ["type", "sketch_name", "operation", "params"],
+                "params": {
+                    "axis": "[[x,y,z],[dx,dy,dz]]",
+                    "pitch": "float",
+                    "turns": "float",
+                    "handedness": "Right | Left",
+                },
+            },
+        },
+        "finish_spec": {
+            "types": list(FINISH_TYPES),
+            "fillet": {"params": {"radius": "float or list[float]"}},
+            "chamfer": {"params": {"dist": "float", "angle": "float optional"}},
+        },
+        "sketch_entity_conventions": {
+            "line_N": {"start": "[x,y]", "end": "[x,y]"},
+            "circle_N": {"center": "[x,y]", "radius": "float"},
+            "arc_N": {"start": "[x,y]", "middle": "[x,y]", "end": "[x,y]"},
+            "ellipse_N": {
+                "center": "[x,y]",
+                "major": "float",
+                "minor": "float",
+                "angle": "deg",
+            },
+            "elliptical_arc_N": {
+                "start": "[x,y]",
+                "end": "[x,y]",
+                "major": "float",
+                "minor": "float",
+                "angle": "deg",
+                "large_arc": "bool",
+                "sweep": "bool",
+            },
+            "nurbs_N": {
+                "degree": "int",
+                "periodic": "bool",
+                "controls": "[[x,y],...]",
+                "weights": "[float,...]",
+                "knots": "[float,...]",
+            },
+        },
+        "constraint_types": list(CONSTRAINT_TYPES),
+        "point_ref_format": "entity.point, e.g. line_1.start or circle_1.center",
+        "examples": [minimal_fabrication_plan_example()],
+    }
+
+
+def validate_fabrication_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Validate a FabricationPlan dict without executing FreeCAD."""
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+
+    def add_error(path: str, message: str, code: str = "invalid") -> None:
+        errors.append({"path": path, "message": message, "code": code})
+
+    def add_warning(path: str, message: str, code: str = "warning") -> None:
+        warnings.append({"path": path, "message": message, "code": code})
+
+    if not isinstance(plan, dict):
+        return {
+            "valid": False,
+            "errors": [
+                {"path": "$", "message": "plan must be a dict", "code": "type_error"}
+            ],
+            "warnings": [],
+            "summary": "FabricationPlan validation failed with 1 error(s).",
+        }
+
+    for field_name in ("coordinate_systems", "sketches", "features"):
+        if field_name not in plan:
+            add_error(f"$.{field_name}", "required field is missing", "missing")
+        elif not isinstance(plan[field_name], list):
+            add_error(f"$.{field_name}", "must be a list", "type_error")
+
+    if errors:
+        return _fabrication_validation_result(errors, warnings)
+
+    try:
+        FabricationPlan.from_dict(plan)
+    except Exception as exc:
+        add_error("$", f"dataclass deserialisation failed: {exc}", "deserialisation")
+        return _fabrication_validation_result(errors, warnings)
+
+    cs_names = _validate_coordinate_systems(plan["coordinate_systems"], add_error)
+    sketch_names, entity_names_by_sketch = _validate_sketches(
+        plan["sketches"],
+        cs_names,
+        add_error,
+        add_warning,
+    )
+    feature_names = _validate_features(
+        plan["features"],
+        sketch_names,
+        add_error,
+        add_warning,
+    )
+    _validate_finishes(plan.get("finishes", []), add_error)
+
+    for index, sketch in enumerate(plan["sketches"]):
+        name = str(sketch.get("sketch_name") or f"#{index}")
+        entities = entity_names_by_sketch.get(name, set())
+        _validate_constraints(
+            sketch.get("constraints", {}),
+            entities,
+            f"$.sketches[{index}].constraints",
+            add_error,
+        )
+
+    known_feature_refs = feature_names | {"<pre-existing FreeCAD object>"}
+    if not feature_names and plan["features"]:
+        add_warning(
+            "$.features",
+            "No feature_name values were supplied; later booleans cannot reference anonymous generated features reliably.",
+            "anonymous_features",
+        )
+    if known_feature_refs:
+        _ = known_feature_refs
+
+    return _fabrication_validation_result(errors, warnings)
+
+
+def _fabrication_validation_result(
+    errors: list[dict[str, str]],
+    warnings: list[dict[str, str]],
+) -> dict[str, Any]:
+    valid = not errors
+    return {
+        "valid": valid,
+        "errors": errors,
+        "warnings": warnings,
+        "summary": (
+            "FabricationPlan validation passed."
+            if valid
+            else f"FabricationPlan validation failed with {len(errors)} error(s)."
+        ),
+    }
+
+
+def _is_number_list(value: Any, length: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == length
+        and all(isinstance(item, int | float) for item in value)
+    )
+
+
+def _validate_coordinate_systems(
+    coordinate_systems: list[Any],
+    add_error: Any,
+) -> set[str]:
+    names: set[str] = set()
+    for index, cs in enumerate(coordinate_systems):
+        path = f"$.coordinate_systems[{index}]"
+        if not isinstance(cs, dict):
+            add_error(path, "coordinate system must be a dict", "type_error")
+            continue
+        if not _is_number_list(cs.get("euler_angles"), 3):
+            add_error(f"{path}.euler_angles", "must be a 3-number list", "type_error")
+        if not _is_number_list(cs.get("translation"), 3):
+            add_error(f"{path}.translation", "must be a 3-number list", "type_error")
+        name = cs.get("name")
+        if name is not None:
+            if not isinstance(name, str) or not name:
+                add_error(
+                    f"{path}.name",
+                    "must be a non-empty string when provided",
+                    "type_error",
+                )
+            elif name in names:
+                add_error(
+                    f"{path}.name",
+                    f"duplicate coordinate system name {name!r}",
+                    "duplicate",
+                )
+            else:
+                names.add(name)
+    return names
+
+
+def _validate_sketches(
+    sketches: list[Any],
+    cs_names: set[str],
+    add_error: Any,
+    add_warning: Any,
+) -> tuple[set[str], dict[str, set[str]]]:
+    sketch_names: set[str] = set()
+    entity_names_by_sketch: dict[str, set[str]] = {}
+    for index, sketch in enumerate(sketches):
+        path = f"$.sketches[{index}]"
+        if not isinstance(sketch, dict):
+            add_error(path, "sketch must be a dict", "type_error")
+            continue
+        name = sketch.get("sketch_name") or f"#{index}"
+        if sketch.get("sketch_name"):
+            if name in sketch_names:
+                add_error(
+                    f"{path}.sketch_name",
+                    f"duplicate sketch name {name!r}",
+                    "duplicate",
+                )
+            sketch_names.add(str(name))
+        else:
+            add_warning(
+                f"{path}.sketch_name",
+                "named sketches are recommended for feature references",
+            )
+
+        cs_ref = sketch.get("coordinate_system_name")
+        has_plane = bool(
+            cs_ref
+            or sketch.get("coordinate_system")
+            or sketch.get("attachment_support")
+        )
+        if not has_plane:
+            add_error(
+                path,
+                "sketch needs coordinate_system_name, coordinate_system, or attachment_support",
+                "missing_plane",
+            )
+        if cs_ref and cs_ref not in cs_names:
+            add_error(
+                f"{path}.coordinate_system_name",
+                f"unknown coordinate system {cs_ref!r}",
+                "unknown_ref",
+            )
+
+        entities = sketch.get("sketch")
+        if not isinstance(entities, dict) or not entities:
+            add_error(f"{path}.sketch", "must be a non-empty entity dict", "type_error")
+            entity_names_by_sketch[str(name)] = set()
+            continue
+        entity_names = set()
+        for entity_name, spec in entities.items():
+            entity_path = f"{path}.sketch.{entity_name}"
+            if not isinstance(entity_name, str) or not entity_name.startswith(
+                SKETCH_ENTITY_PREFIXES
+            ):
+                add_error(
+                    entity_path,
+                    "entity name must use a supported HistCAD prefix",
+                    "bad_entity_name",
+                )
+            if not isinstance(spec, dict):
+                add_error(entity_path, "entity spec must be a dict", "type_error")
+            entity_names.add(str(entity_name))
+        entity_names_by_sketch[str(name)] = entity_names
+    return sketch_names, entity_names_by_sketch
+
+
+def _validate_features(  # noqa: PLR0912
+    features: list[Any],
+    sketch_names: set[str],
+    add_error: Any,
+    add_warning: Any,
+) -> set[str]:
+    feature_names: set[str] = set()
+    for index, feature in enumerate(features):
+        path = f"$.features[{index}]"
+        if not isinstance(feature, dict):
+            add_error(path, "feature must be a dict", "type_error")
+            continue
+        feature_type = feature.get("type")
+        params = feature.get("params")
+        if feature_type not in FEATURE_TYPES:
+            add_error(
+                f"{path}.type",
+                f"unsupported feature type {feature_type!r}",
+                "unsupported",
+            )
+        if not isinstance(params, dict):
+            add_error(f"{path}.params", "must be a dict", "type_error")
+            params = {}
+        feature_name = feature.get("feature_name")
+        if feature_name:
+            if feature_name in feature_names:
+                add_error(
+                    f"{path}.feature_name",
+                    f"duplicate feature name {feature_name!r}",
+                    "duplicate",
+                )
+            feature_names.add(str(feature_name))
+
+        if feature_type in {"extrude", "revolve", "helix"}:
+            sketch_name = feature.get("sketch_name")
+            if not sketch_name:
+                add_error(
+                    f"{path}.sketch_name", "required for this feature type", "missing"
+                )
+            elif sketch_names and sketch_name not in sketch_names:
+                add_error(
+                    f"{path}.sketch_name",
+                    f"unknown sketch {sketch_name!r}",
+                    "unknown_ref",
+                )
+            if feature.get("operation", "NewBody") != "NewBody":
+                add_warning(
+                    f"{path}.operation",
+                    "canonical fabrication currently expects NewBody",
+                )
+        if (
+            feature_type == "extrude"
+            and "towards" not in params
+            and "opposite" not in params
+        ):
+            add_error(
+                f"{path}.params", "extrude requires towards and/or opposite", "missing"
+            )
+        if feature_type == "boolean":
+            for key in ("base_object_name", "tool_object_name"):
+                if not params.get(key):
+                    add_error(
+                        f"{path}.params.{key}",
+                        "boolean feature requires this reference",
+                        "missing",
+                    )
+            operation = feature.get("operation") or params.get("operation")
+            if operation not in {"Join", "Cut", "Intersect"}:
+                add_error(
+                    f"{path}.operation",
+                    "boolean operation must be Join, Cut, or Intersect",
+                    "unsupported",
+                )
+        if feature_type == "revolve":
+            for key in ("axis", "start", "end"):
+                if key not in params:
+                    add_error(
+                        f"{path}.params.{key}",
+                        "revolve requires this parameter",
+                        "missing",
+                    )
+        if feature_type == "helix":
+            for key in ("axis", "pitch", "turns"):
+                if key not in params:
+                    add_error(
+                        f"{path}.params.{key}",
+                        "helix requires this parameter",
+                        "missing",
+                    )
+    return feature_names
+
+
+def _validate_finishes(finishes: Any, add_error: Any) -> None:
+    if finishes is None:
+        return
+    if not isinstance(finishes, list):
+        add_error("$.finishes", "must be a list when provided", "type_error")
+        return
+    for index, finish in enumerate(finishes):
+        path = f"$.finishes[{index}]"
+        if not isinstance(finish, dict):
+            add_error(path, "finish must be a dict", "type_error")
+            continue
+        if finish.get("type") not in FINISH_TYPES:
+            add_error(
+                f"{path}.type",
+                f"unsupported finish type {finish.get('type')!r}",
+                "unsupported",
+            )
+        if not isinstance(finish.get("near_points"), list):
+            add_error(
+                f"{path}.near_points", "must be a list of 3D points", "type_error"
+            )
+        if not isinstance(finish.get("params"), dict):
+            add_error(f"{path}.params", "must be a dict", "type_error")
+
+
+def _validate_constraints(
+    constraints: Any,
+    entities: set[str],
+    path: str,
+    add_error: Any,
+) -> None:
+    if constraints in (None, {}):
+        return
+    if not isinstance(constraints, dict):
+        add_error(path, "constraints must be a dict", "type_error")
+        return
+    for constraint_type, values in constraints.items():
+        constraint_path = f"{path}.{constraint_type}"
+        if constraint_type not in CONSTRAINT_TYPES:
+            add_error(
+                constraint_path,
+                f"unsupported constraint type {constraint_type!r}",
+                "unsupported",
+            )
+        _walk_constraint_refs(values, entities, constraint_path, add_error)
+
+
+def _walk_constraint_refs(
+    value: Any, entities: set[str], path: str, add_error: Any
+) -> None:
+    if isinstance(value, str):
+        entity = value.split(".", maxsplit=1)[0]
+        if entity.startswith(SKETCH_ENTITY_PREFIXES) and entity not in entities:
+            add_error(path, f"unknown sketch entity reference {value!r}", "unknown_ref")
+        return
+    if isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            _walk_constraint_refs(item, entities, f"{path}[{index}]", add_error)

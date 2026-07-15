@@ -727,10 +727,20 @@ def _apply_histcad_constraints(
                     refs.append(item)
         return refs
 
-    def _log_applied(before_count, *, source, input_type, entry_index, entry, entity_refs):
+    def _log_applied(
+        before_count,
+        *,
+        source,
+        input_type,
+        entry_index,
+        entry,
+        entity_refs,
+        freecad_type=None,
+    ):
         applied_log.append(
             {
                 "freecad_index": before_count + 1,
+                "freecad_type": freecad_type,
                 "source": source,
                 "input": (
                     {
@@ -809,6 +819,7 @@ def _apply_histcad_constraints(
             entry_index=entry_index,
             entry=entry,
             entity_refs=[str(entry[0]), str(entry[1])],
+            freecad_type=c.Type,
         )
         if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
             binding = dict(dim_meta)
@@ -996,6 +1007,7 @@ def _apply_histcad_constraints(
             entry_index=entry_index,
             entry=entry,
             entity_refs=_entity_refs_from_entry(ctype, entry),
+            freecad_type=c.Type,
         )
         if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
             binding = dict(dim_meta)
@@ -2198,6 +2210,7 @@ try:
             "input": None,
             "entity_refs": [],
             "adapter_reason": None,
+            "freecad_type": None,
         }}
         _val = None
         try:
@@ -2323,6 +2336,8 @@ try:
         "applied_count":           applied_count,
         "input_constraint_count":  sum(len(v) for v in constraints_in.values()),
         "constraint_catalog":      _catalog,
+        "applied_log":             applied_log,
+        "applied_constraints":     _catalog,
         "redundant":               _redundant_entries,
         "conflicting":             _conflicting_entries,
         "purged_redundant":        purged_redundant,
@@ -4745,6 +4760,9 @@ _result_ = {{
                 - tunable_params: Output of ``list_tunable_params()``.
                 - bounding_box: Final bounding box.
                 - volume: Final volume in cubic millimetres.
+                - sketch_constraint_results: Per-sketch constraint diagnostics,
+                  including ``constraint_catalog`` rows with actual FreeCAD
+                  types such as ``Distance``, ``DistanceX``, and ``DistanceY``.
                 - steps_completed: Number of successfully completed steps.
                 - success: ``True`` if all steps completed without error.
 
@@ -4778,6 +4796,7 @@ _result_ = {{
         cs_map: dict[str, str] = {}  # cs spec name → FreeCAD cs_name
         sketch_name_map: dict[str, str] = {}  # spec sketch_name → FreeCAD obj name
         object_name_map: dict[str, str] = {}
+        sketch_constraint_results: list[dict[str, Any]] = []
         steps_completed = 0
         last_body_name: str | None = None
         partdesign_body_name: str | None = None
@@ -4816,10 +4835,26 @@ _result_ = {{
             steps_completed += 1
 
             if sk_spec.constraints:
-                await apply_sketch_constraints(  # type: ignore[name-defined]
+                constraint_result = await apply_sketch_constraints(  # type: ignore[name-defined]
                     sketch_name=actual_sk_name,
                     constraints=sk_spec.constraints,
                     doc_name=doc_name,
+                )
+                sketch_constraint_results.append(
+                    {
+                        "sketch_name": actual_sk_name,
+                        "spec_sketch_name": sk_spec.sketch_name,
+                        "constraint_catalog": constraint_result.get(
+                            "constraint_catalog", []
+                        ),
+                        "applied_constraints": constraint_result.get(
+                            "applied_constraints", []
+                        ),
+                        "applied_log": constraint_result.get("applied_log", []),
+                        "dof_after": constraint_result.get("dof_after"),
+                        "solve_status": constraint_result.get("solve_status"),
+                        "geometry_drift": constraint_result.get("geometry_drift"),
+                    }
                 )
                 steps_completed += 1
 
@@ -5003,6 +5038,7 @@ _result_ = {{
             "tunable_params": tunable,
             "bounding_box": snapshot.get("bounding_box", {}),
             "volume": snapshot.get("volume", 0.0),
+            "sketch_constraint_results": sketch_constraint_results,
             "steps_completed": steps_completed,
             "success": True,
         }

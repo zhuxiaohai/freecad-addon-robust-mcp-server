@@ -540,6 +540,53 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
             },
         },
         "constraint_types": list(CONSTRAINT_TYPES),
+        "constraint_entry_formats": {
+            "Coincident": [["line_1.end", "line_2.start"]],
+            "Horizontal": ["line_1", ["line_1.start", "line_1.end"]],
+            "Vertical": ["line_2", ["line_2.start", "line_2.end"]],
+            "Perpendicular": [["line_1", "line_2"]],
+            "Parallel": [["line_1", "line_3"]],
+            "Equal": [["line_1", "line_3"]],
+            "Tangent": [["arc_1", "line_1"]],
+            "Concentric": [["circle_1", "circle_2"]],
+            "Fix": ["line_1.start", "line_1"],
+            "Angle": [["line_1", "line_2", "90 deg"]],
+            "Length": [["line_1", "20 mm"]],
+            "Radius": [["arc_1", "5 mm"]],
+            "Diameter": [["circle_1", "10 mm"]],
+            "Distance": [
+                ["line_1.end", "line_2.start", "5 mm"],
+                [
+                    "line_1.end",
+                    "line_2.start",
+                    {"length": "5 mm", "direction": "HORIZONTAL"},
+                ],
+                [
+                    "line_3.end",
+                    "line_4.start",
+                    {"length": "1.5 mm", "direction": "VERTICAL"},
+                ],
+            ],
+        },
+        "distance_semantics": {
+            "plain": (
+                "[point_or_entity_a, point_or_entity_b, length] creates a "
+                "normal Euclidean Distance constraint."
+            ),
+            "horizontal": (
+                '[point_a, point_b, {"length": value, "direction": '
+                '"HORIZONTAL"}] creates a signed DistanceX constraint.'
+            ),
+            "vertical": (
+                '[point_a, point_b, {"length": value, "direction": '
+                '"VERTICAL"}] creates a signed DistanceY constraint.'
+            ),
+            "minimum": (
+                '[ref_a, ref_b, {"length": value, "direction": "MINIMUM"}] '
+                "documents ordinary minimum-distance intent while preserving "
+                "plain Distance execution."
+            ),
+        },
         "point_ref_format": "entity.point, e.g. line_1.start or circle_1.center",
         "examples": [minimal_fabrication_plan_example()],
     }
@@ -604,6 +651,7 @@ def validate_fabrication_plan(plan: dict[str, Any]) -> dict[str, Any]:
             entities,
             f"$.sketches[{index}].constraints",
             add_error,
+            add_warning,
         )
 
     known_feature_refs = feature_names | {"<pre-existing FreeCAD object>"}
@@ -869,6 +917,7 @@ def _validate_constraints(
     entities: set[str],
     path: str,
     add_error: Any,
+    add_warning: Any,
 ) -> None:
     if constraints in (None, {}):
         return
@@ -883,6 +932,15 @@ def _validate_constraints(
                 f"unsupported constraint type {constraint_type!r}",
                 "unsupported",
             )
+            continue
+        _validate_constraint_shape(
+            str(constraint_type),
+            values,
+            entities,
+            constraint_path,
+            add_error,
+            add_warning,
+        )
         _walk_constraint_refs(values, entities, constraint_path, add_error)
 
 
@@ -897,3 +955,241 @@ def _walk_constraint_refs(
     if isinstance(value, list | tuple):
         for index, item in enumerate(value):
             _walk_constraint_refs(item, entities, f"{path}[{index}]", add_error)
+
+
+def _constraint_entries(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _is_entity_ref(value: Any, entities: set[str]) -> bool:
+    return isinstance(value, str) and "." not in value and value in entities
+
+
+def _is_point_ref(value: Any, entities: set[str]) -> bool:
+    return (
+        isinstance(value, str)
+        and "." in value
+        and value.split(".", maxsplit=1)[0] in entities
+    )
+
+
+def _is_entity_or_point_ref(value: Any, entities: set[str]) -> bool:
+    return _is_entity_ref(value, entities) or _is_point_ref(value, entities)
+
+
+def _looks_like_dimension(value: Any) -> bool:
+    if isinstance(value, int | float):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict):
+        return any(
+            key in value
+            for key in ("length", "value", "radius", "diameter", "expression", "alias")
+        )
+    return False
+
+
+def _validate_ref(
+    ref: Any,
+    entities: set[str],
+    path: str,
+    add_error: Any,
+    *,
+    point_only: bool = False,
+    entity_only: bool = False,
+) -> None:
+    if point_only:
+        if not _is_point_ref(ref, entities):
+            add_error(path, f"expected point reference, got {ref!r}", "bad_ref_shape")
+        return
+    if entity_only:
+        if not _is_entity_ref(ref, entities):
+            add_error(path, f"expected entity reference, got {ref!r}", "bad_ref_shape")
+        return
+    if not _is_entity_or_point_ref(ref, entities):
+        add_error(path, f"expected sketch reference, got {ref!r}", "bad_ref_shape")
+
+
+def _validate_pair_entry(
+    entry: Any,
+    entities: set[str],
+    path: str,
+    add_error: Any,
+    *,
+    point_only: bool = False,
+    entity_only: bool = False,
+) -> None:
+    if not isinstance(entry, list | tuple) or len(entry) != 2:
+        add_error(path, "entry must be a 2-item list", "bad_arity")
+        return
+    _validate_ref(
+        entry[0],
+        entities,
+        f"{path}[0]",
+        add_error,
+        point_only=point_only,
+        entity_only=entity_only,
+    )
+    _validate_ref(
+        entry[1],
+        entities,
+        f"{path}[1]",
+        add_error,
+        point_only=point_only,
+        entity_only=entity_only,
+    )
+
+
+def _validate_constraint_shape(  # noqa: PLR0912
+    constraint_type: str,
+    values: Any,
+    entities: set[str],
+    path: str,
+    add_error: Any,
+    add_warning: Any,
+) -> None:
+    for index, entry in enumerate(_constraint_entries(values)):
+        entry_path = f"{path}[{index}]"
+
+        if constraint_type in {"Coincident"}:
+            _validate_pair_entry(
+                entry, entities, entry_path, add_error, point_only=True
+            )
+            continue
+
+        if constraint_type in {"Perpendicular", "Parallel", "Equal", "Concentric"}:
+            _validate_pair_entry(
+                entry, entities, entry_path, add_error, entity_only=True
+            )
+            continue
+
+        if constraint_type in {"Tangent", "Normal"}:
+            if not isinstance(entry, list | tuple) or len(entry) not in {2, 4}:
+                add_error(
+                    entry_path,
+                    "entry must be a 2-item entity pair or 4-item point-specific list",
+                    "bad_arity",
+                )
+                continue
+            point_specific = len(entry) == 4
+            for ref_index, ref in enumerate(entry):
+                _validate_ref(
+                    ref,
+                    entities,
+                    f"{entry_path}[{ref_index}]",
+                    add_error,
+                    point_only=point_specific,
+                    entity_only=not point_specific,
+                )
+            continue
+
+        if constraint_type in {"Horizontal", "Vertical"}:
+            if isinstance(entry, str):
+                _validate_ref(entry, entities, entry_path, add_error, entity_only=True)
+            else:
+                _validate_pair_entry(
+                    entry, entities, entry_path, add_error, point_only=True
+                )
+            continue
+
+        if constraint_type == "Fix":
+            _validate_ref(entry, entities, entry_path, add_error)
+            continue
+
+        if constraint_type in {
+            "Length",
+            "Radius",
+            "Diameter",
+            "MajorRadius",
+            "MinorRadius",
+        }:
+            if not isinstance(entry, list | tuple) or len(entry) != 2:
+                add_error(entry_path, "entry must be [entity, value]", "bad_arity")
+                continue
+            _validate_ref(
+                entry[0], entities, f"{entry_path}[0]", add_error, entity_only=True
+            )
+            if not _looks_like_dimension(entry[1]):
+                add_error(
+                    f"{entry_path}[1]",
+                    f"{constraint_type} value must be a number, string, or dimension dict",
+                    "bad_value",
+                )
+            continue
+
+        if constraint_type == "Angle":
+            if not isinstance(entry, list | tuple) or len(entry) != 3:
+                add_error(
+                    entry_path, "entry must be [entity_a, entity_b, value]", "bad_arity"
+                )
+                continue
+            _validate_ref(
+                entry[0], entities, f"{entry_path}[0]", add_error, entity_only=True
+            )
+            _validate_ref(
+                entry[1], entities, f"{entry_path}[1]", add_error, entity_only=True
+            )
+            if not _looks_like_dimension(entry[2]):
+                add_error(f"{entry_path}[2]", "Angle value is missing", "bad_value")
+            continue
+
+        if constraint_type == "Distance":
+            if not isinstance(entry, list | tuple) or len(entry) != 3:
+                add_error(
+                    entry_path,
+                    "entry must be [ref_a, ref_b, value_or_dimension_dict]",
+                    "bad_arity",
+                )
+                continue
+            _validate_ref(entry[0], entities, f"{entry_path}[0]", add_error)
+            _validate_ref(entry[1], entities, f"{entry_path}[1]", add_error)
+            value = entry[2]
+            if not _looks_like_dimension(value):
+                add_error(
+                    f"{entry_path}[2]",
+                    "Distance value must be a number, string, or dimension dict",
+                    "bad_value",
+                )
+                continue
+            if isinstance(value, dict):
+                direction = value.get("direction")
+                if direction is not None:
+                    normalized = str(direction).upper()
+                    if normalized not in {"HORIZONTAL", "VERTICAL", "MINIMUM"}:
+                        add_error(
+                            f"{entry_path}[2].direction",
+                            "Distance.direction must be HORIZONTAL, VERTICAL, or MINIMUM",
+                            "bad_direction",
+                        )
+                    elif normalized in {"HORIZONTAL", "VERTICAL"}:
+                        for ref_index, ref in enumerate(entry[:2]):
+                            _validate_ref(
+                                ref,
+                                entities,
+                                f"{entry_path}[{ref_index}]",
+                                add_error,
+                                point_only=True,
+                            )
+            elif all(_is_point_ref(ref, entities) for ref in entry[:2]):
+                add_warning(
+                    f"{entry_path}[2]",
+                    "Plain string/number Distance is Euclidean. If source text says direction HORIZONTAL or VERTICAL, use {'length': value, 'direction': ...}.",
+                    "plain_distance_no_direction",
+                )
+            continue
+
+        if constraint_type in {"Midpoint", "Mirror"}:
+            if not isinstance(entry, list | tuple) or len(entry) < 2:
+                add_error(
+                    entry_path,
+                    "entry must be a list with at least two refs",
+                    "bad_arity",
+                )
+                continue
+            for ref_index, ref in enumerate(entry):
+                _validate_ref(ref, entities, f"{entry_path}[{ref_index}]", add_error)

@@ -1121,9 +1121,22 @@ class TestFabricationSourceConventions:
             encoding="utf-8"
         )
         assert '"constraint_catalog":      _catalog' in source
+        assert '"applied_constraints":     _catalog' in source
         assert '"redundant":               _redundant_entries' in source
         assert '"purged_redundant":        purged_redundant' in source
-        assert '"applied_log"' in source
+        assert '"applied_log":             applied_log' in source
+
+    def test_directional_distance_feedback_is_exposed(self) -> None:
+        """Directional Distance execution exposes actual FreeCAD constraint type."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)' in source
+        assert 'Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)' in source
+        assert '"freecad_type": freecad_type' in source
+        assert '"sketch_constraint_results": sketch_constraint_results' in source
 
     def test_redundant_constraints_purged_after_apply(self) -> None:
         """Tangent junction Coincident rows are purged so extrusion stays parametric."""

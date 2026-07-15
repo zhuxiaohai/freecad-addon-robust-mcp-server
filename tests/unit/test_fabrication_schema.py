@@ -277,6 +277,8 @@ class TestFabricationPlan:
         assert "coordinate_systems" in schema["top_level_fields"]
         assert "line_N" in schema["sketch_entity_conventions"]
         assert "extrude" in schema["feature_spec"]["types"]
+        assert "Distance" in schema["constraint_entry_formats"]
+        assert "vertical" in schema["distance_semantics"]
         assert schema["examples"][0]["features"][0]["type"] == "extrude"
 
     def test_validate_fabrication_plan_accepts_minimal_example(self) -> None:
@@ -317,6 +319,86 @@ class TestFabricationPlan:
             error["code"] == "unknown_ref" and "line_99" in error["message"]
             for error in result["errors"]
         )
+
+    def test_validate_fabrication_plan_accepts_directional_distance(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Directional Distance uses a dict payload and validates cleanly."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Coincident": [["line_1.end", "line_2.start"]],
+            "Distance": [
+                [
+                    "line_4.start",
+                    "line_3.start",
+                    {"length": "1.5 mm", "direction": "VERTICAL"},
+                ]
+            ],
+        }
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is True
+        assert result["errors"] == []
+
+    def test_validate_fabrication_plan_warns_for_plain_point_distance(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Plain point Distance remains valid but warns about lost direction."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Distance": [["line_4.start", "line_3.start", "1.5 mm"]]
+        }
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is True
+        assert result["errors"] == []
+        assert any(
+            warning["code"] == "plain_distance_no_direction"
+            for warning in result["warnings"]
+        )
+
+    def test_validate_fabrication_plan_rejects_bad_distance_direction(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Distance.direction is limited to supported execution semantics."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Distance": [
+                [
+                    "line_4.start",
+                    "line_3.start",
+                    {"length": "1.5 mm", "direction": "DIAGONAL"},
+                ]
+            ]
+        }
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is False
+        assert any(error["code"] == "bad_direction" for error in result["errors"])
+
+    def test_validate_fabrication_plan_rejects_bad_constraint_shapes(
+        self,
+        simple_plan: FabricationPlan,
+    ) -> None:
+        """Validator checks arity and point/entity reference shapes."""
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Length": [["line_1.start", "20 mm"]],
+            "Coincident": [["line_1", "line_2.start"]],
+            "Tangent": [["line_1", "line_2", "line_3"]],
+        }
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is False
+        assert any(error["code"] == "bad_ref_shape" for error in result["errors"])
+        assert any(error["code"] == "bad_arity" for error in result["errors"])
 
     def test_validate_fabrication_plan_rejects_unknown_feature_type(
         self,

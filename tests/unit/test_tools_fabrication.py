@@ -1072,7 +1072,7 @@ class TestFabricationSourceConventions:
         assert "ground_truth=ground_truth" in source
 
     def test_orientation_stabilization_from_ground_truth(self) -> None:
-        """Axis-aligned lines get orientation only when JSON lacks directed dims."""
+        """Orientation stabilization is opt-in and skips Parallel-covered lines."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
@@ -1081,7 +1081,13 @@ class TestFabricationSourceConventions:
         assert "_orientation_entries_from_ground_truth" in source
         assert "_orientation_covered_by_json_constraints" in source
         assert "Phase 1: topology" in source
-        assert "Phase 2: axis-aligned orientation" in source
+        assert "Phase 2: optional axis-aligned orientation" in source
+        assert "if orientation_stabilization:" in source
+        assert "orientation_stabilization: bool = False" in source
+        assert 'constraint_dict.get("Parallel"' in source
+        assert "HistCADPolarities" in source
+        assert "distance_polarity_key" in source
+        assert "polarity_from_signed" in source
 
     def test_parse_freecad_sketch_uses_endpoint_map(self) -> None:
         """parse_freecad_sketch reads start/end via endpoint_map."""

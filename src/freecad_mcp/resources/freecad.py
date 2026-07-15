@@ -1650,11 +1650,18 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "Vertical, Perpendicular, Parallel, Equal, Tangent, Normal, "
                                 "Concentric, Fix, Midpoint, Mirror, Angle, Diameter, Radius, "
                                 "MajorRadius, MinorRadius, Length, Distance) to a sketch. "
-                                "Returns dof_after, redundant/conflicting constraints, "
-                                "profile closure, and geometry_drift (movement away from "
-                                "the ground-truth coordinates) — key RL reward signals."
+                                "Directed Distance polarity is persisted on the sketch. "
+                                "orientation_stabilization defaults to False (opt-in invented "
+                                "axis-aligned dimensions). Returns dof_after, "
+                                "redundant/conflicting constraints, profile closure, and "
+                                "geometry_drift — key RL reward signals."
                             ),
-                            "key_params": ["sketch_name", "constraints", "doc_name"],
+                            "key_params": [
+                                "sketch_name",
+                                "constraints",
+                                "doc_name",
+                                "orientation_stabilization",
+                            ],
                         },
                         {
                             "name": "evaluate_sketch_editability",

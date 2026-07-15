@@ -538,10 +538,10 @@ parsing happens upstream in the Intent Model — not in template tools.
 
 ### Group C: Sketch Constraints
 
-| Tool                       | Description                                                                                            |
-| -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `check_sketch_constraints` | Dry-run constraint validation without modifying the sketch. Returns `valid` and `estimated_dof_after`. |
-| `apply_sketch_constraints` | Apply 19 HistCAD constraint types. Returns `dof_after`, `redundant_constraints`, `sketch_valid`.       |
+| Tool                       | Description                                                                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check_sketch_constraints` | Dry-run constraint validation without modifying the sketch. Returns `valid` and `estimated_dof_after`.                                                                    |
+| `apply_sketch_constraints` | Apply 19 HistCAD types. Returns `dof_after`, etc. Default `orientation_stabilization=False` (opt-in invented axis dims).                                                  |
 
 ### Group D: Feature Execution
 
@@ -606,6 +606,8 @@ geo = await create_sketch_geometry(
 # geo["dof_remaining"] → 8 (unconstrained rectangle)
 
 # Step 3: Apply constraints
+# orientation_stabilization defaults to False so HistCAD free DOFs stay free.
+# Pass orientation_stabilization=True only if segment-flip is observed.
 result = await apply_sketch_constraints(geo["sketch_name"], {
     "Coincident": [["line_1.end","line_2.start"],["line_2.end","line_3.start"],
                    ["line_3.end","line_4.start"],["line_4.end","line_1.start"]],

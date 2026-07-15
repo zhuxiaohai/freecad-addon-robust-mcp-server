@@ -56,8 +56,14 @@ resolve ``line_1.start`` through that map — never by re-matching coordinates
 after the solver moves geometry.  Maps are persisted on the sketch object
 (``HistCADMaps`` / ``HistCADGeometry`` properties) for cross-MCP-call reuse.
 Directed ``Distance`` constraints with ``HORIZONTAL``/``VERTICAL`` use signed
-deltas from the persisted ground-truth geometry to break segment-flip ambiguity
-without ``Fix`` on profile entities.
+``DistanceX``/``DistanceY`` values.  Sign polarity is taken from a persisted
+sketch map when available, otherwise from creation-time ground-truth geometry
+(with live endpoint fallback).  Magnitude always comes from the HistCAD length
+(so editability edits keep topology direction stable).
+
+Optional ``orientation_stabilization`` (default ``False``) may invent additional
+axis-aligned directed dimensions for uncovered segments; leave it off for
+editability-faithful HistCAD replay so free DOFs stay free to link.
 
 HistCAD constraint types (19 total)
 ------------------------------------
@@ -435,18 +441,29 @@ def _apply_histcad_constraints(
     endpoint_map=None,
     arc_endpoint_map=None,
     ground_truth=None,
+    orientation_stabilization=False,
 ):
     # Apply HistCAD constraints to a Sketcher object.
     # Returns {"purged_redundant": [...], "dimension_bindings": [...]}.
     #
     # endpoint_map binds JSON/NLT start/end labels to FreeCAD PointPos at sketch
     # creation; constraints resolve refs through the map, not live coordinates.
+    # orientation_stabilization=False (default) skips inventing axis-aligned
+    # DistanceX/Y rows that are not in the HistCAD JSON.
+    import json
     import Sketcher
 
     if endpoint_map is None:
         endpoint_map = arc_endpoint_map or {}
     if ground_truth is None:
         ground_truth = {}
+
+    _polarities = {}
+    try:
+        if hasattr(sketch_obj, "HistCADPolarities") and sketch_obj.HistCADPolarities:
+            _polarities = json.loads(sketch_obj.HistCADPolarities) or {}
+    except Exception:
+        _polarities = {}
 
     # FreeCAD 1.1 removed Sketcher.PointPos; use integer PointPos values directly.
     # 0 = none, 1 = start, 2 = end, 3 = middle
@@ -487,11 +504,6 @@ def _apply_histcad_constraints(
     def _ground_truth_xy(ref):
         return ground_truth_xy(ground_truth, ref)
 
-    def _directed_axis_distance(ref_a, ref_b, axis_index, magnitude):
-        return directed_axis_distance(
-            ref_a, ref_b, axis_index, magnitude, ground_truth,
-        )
-
     def _fix_constraint(geo_idx, point_pos=None):
         # HistCAD Fix: entity_ref -> Block(geo); point_ref -> Lock/Block point.
         # FreeCAD 1.1 Block(geo, point) is invalid; whole-entity uses Block(geo).
@@ -513,26 +525,33 @@ def _apply_histcad_constraints(
 
     def _orientation_covered_by_json_constraints(line_name, orient_direction):
         # Skip auto-orientation when JSON already fixes segment direction via
-        # directed Distance / Horizontal / Vertical. Extra orientation constraints
-        # are invisible to editability preserved-constraint checks but still
-        # fight parametric edits (hurts cPCSR / OES).
+        # directed Distance / Horizontal / Vertical / Parallel-to-oriented.
+        # Extra orientation constraints are invisible to editability
+        # preserved-constraint checks but still fight parametric edits.
         wanted = str(orient_direction).upper()
-        for entry in constraint_dict.get("Vertical", []):
-            if entry == line_name:
+        oriented = set()
+
+        def _collect_oriented(entries):
+            for entry in entries:
+                if isinstance(entry, str):
+                    oriented.add(entry)
+                elif isinstance(entry, list) and len(entry) >= 2:
+                    if {_primitive_from_ref(entry[0]), _primitive_from_ref(entry[1])} == {
+                        line_name
+                    }:
+                        return True
+                    oriented.add(_primitive_from_ref(entry[0]))
+                    oriented.add(_primitive_from_ref(entry[1]))
+            return False
+
+        if wanted == "VERTICAL":
+            if _collect_oriented(constraint_dict.get("Vertical", [])):
                 return True
-            if isinstance(entry, list) and len(entry) >= 2:
-                if {_primitive_from_ref(entry[0]), _primitive_from_ref(entry[1])} == {
-                    line_name
-                }:
-                    return True
-        for entry in constraint_dict.get("Horizontal", []):
-            if entry == line_name:
+        elif wanted == "HORIZONTAL":
+            if _collect_oriented(constraint_dict.get("Horizontal", [])):
                 return True
-            if isinstance(entry, list) and len(entry) >= 2:
-                if {_primitive_from_ref(entry[0]), _primitive_from_ref(entry[1])} == {
-                    line_name
-                }:
-                    return True
+        if line_name in oriented:
+            return True
         for entry in constraint_dict.get("Distance", []):
             if not isinstance(entry, list) or len(entry) < 2:
                 continue
@@ -548,6 +567,15 @@ def _apply_histcad_constraints(
                 if isinstance(ref, str) and "." in ref
             }
             if line_name in primitives:
+                return True
+        for entry in constraint_dict.get("Parallel", []):
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            a = _primitive_from_ref(entry[0])
+            b = _primitive_from_ref(entry[1])
+            if line_name == a and b in oriented:
+                return True
+            if line_name == b and a in oriented:
                 return True
         return False
 
@@ -720,6 +748,16 @@ def _apply_histcad_constraints(
             }
         )
 
+    def _live_xy(ref):
+        try:
+            geo_idx, point_pos = _resolve_point(ref)
+            if geo_idx < 0 or point_pos == NONE:
+                return None
+            pt = sketch_obj.getPoint(geo_idx, point_pos)
+            return [float(pt.x), float(pt.y)]
+        except Exception:
+            return None
+
     def _apply_distance_entry(
         entry,
         *,
@@ -733,13 +771,33 @@ def _apply_histcad_constraints(
         extra = entry[2] if len(entry) > 2 else {}
         dim_meta = _dimension_meta(extra)
         val = dim_meta["value"]
-        direction = extra.get("direction", "")
-        if direction == "HORIZONTAL":
-            val = _directed_axis_distance(entry[0], entry[1], 0, val)
-            c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
-        elif direction == "VERTICAL":
-            val = _directed_axis_distance(entry[0], entry[1], 1, val)
-            c = Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)
+        direction = str(extra.get("direction", "")).upper()
+        if direction in ("HORIZONTAL", "VERTICAL"):
+            axis_index = 0 if direction == "HORIZONTAL" else 1
+            key = distance_polarity_key(str(entry[0]), str(entry[1]), direction)
+            stored = _polarities.get(key)
+            try:
+                stored_polarity = int(stored) if stored is not None else None
+            except (TypeError, ValueError):
+                stored_polarity = None
+            if stored_polarity not in (1, -1):
+                stored_polarity = None
+            val = directed_axis_distance(
+                entry[0],
+                entry[1],
+                axis_index,
+                val,
+                ground_truth=ground_truth,
+                polarity=stored_polarity,
+                live_a=_live_xy(entry[0]),
+                live_b=_live_xy(entry[1]),
+            )
+            if stored_polarity is None and abs(float(val)) >= 1e-12:
+                _polarities[key] = polarity_from_signed(val)
+            if direction == "HORIZONTAL":
+                c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
+            else:
+                c = Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)
         else:
             c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
         before_count = len(sketch_obj.Constraints)
@@ -959,17 +1017,19 @@ def _apply_histcad_constraints(
             except Exception:
                 pass
 
-    # Phase 2: axis-aligned orientation from ground truth (breaks segment flip).
-    for orient_entry in _orientation_entries_from_ground_truth():
-        try:
-            _apply_distance_entry(
-                orient_entry,
-                source="adapter",
-                input_type=None,
-                entry_index=None,
-            )
-        except Exception:
-            pass
+    # Phase 2: optional axis-aligned orientation from ground truth (opt-in).
+    # Default off: inventing DistanceX/Y locks free DOFs and hurts editability.
+    if orientation_stabilization:
+        for orient_entry in _orientation_entries_from_ground_truth():
+            try:
+                _apply_distance_entry(
+                    orient_entry,
+                    source="adapter",
+                    input_type=None,
+                    entry_index=None,
+                )
+            except Exception:
+                pass
 
     # Phase 3: remaining constraints in input order.
     for ctype, entries in constraint_dict.items():
@@ -1059,11 +1119,23 @@ def _apply_histcad_constraints(
         return purged
 
     purged_redundant = _purge_redundant_sketch_constraints()
+    try:
+        if not hasattr(sketch_obj, "HistCADPolarities"):
+            sketch_obj.addProperty(
+                "App::PropertyString",
+                "HistCADPolarities",
+                "HistCAD",
+                "Persisted directed Distance polarities",
+            )
+        sketch_obj.HistCADPolarities = json.dumps(_polarities)
+    except Exception:
+        pass
     return {
         "redundant": [],
         "purged_redundant": purged_redundant,
         "dimension_bindings": dimension_bindings,
         "applied_log": applied_log,
+        "polarities": dict(_polarities),
     }
 """
 )
@@ -1877,6 +1949,7 @@ _result_ = {{
         sketch_name: str,
         constraints: dict[str, Any],
         doc_name: str | None = None,
+        orientation_stabilization: bool = False,
     ) -> dict[str, Any]:
         """Apply HistCAD constraints to an existing sketch.
 
@@ -1907,6 +1980,11 @@ _result_ = {{
                     }
 
             doc_name: Document name. Uses the active document if None.
+            orientation_stabilization: When ``True``, invent axis-aligned
+                ``DistanceX``/``DistanceY`` rows for uncovered segments to
+                reduce segment-flip.  Default ``False`` — invented dimensions
+                change linkage semantics and hurt HistCAD editability fidelity.
+                Enable only when segment flip is observed after solve.
 
         Returns:
             Dictionary with:
@@ -2005,6 +2083,7 @@ try:
         idx_map,
         endpoint_map=endpoint_map,
         ground_truth=ground_truth,
+        orientation_stabilization={orientation_stabilization!r},
     )
     redundant = constraint_result.get("redundant", [])
     purged_redundant = constraint_result.get("purged_redundant", [])

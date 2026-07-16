@@ -222,12 +222,15 @@ def build_l_connector_plan(
     if not hole_groups:
         return plan
 
-    hole_sketches, hole_features, face_ids, hole_aliases = compile_hole_groups(
-        hole_groups,
-        slots=slots,
-        base_body_name="L_Connector_Solid",
+    hole_coordinate_systems, hole_sketches, hole_features, face_ids, hole_aliases = (
+        compile_hole_groups(
+            hole_groups,
+            slots=slots,
+            base_body_name="L_Connector_Solid",
+        )
     )
 
+    plan.coordinate_systems.extend(hole_coordinate_systems)
     plan.sketches.extend(hole_sketches)
     plan.features.extend(hole_features)
     plan.metadata["hole_face_ids"] = face_ids

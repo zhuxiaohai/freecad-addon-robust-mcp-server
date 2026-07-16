@@ -179,16 +179,15 @@ class TestHolePlanCompilation:
 
         hole_sketch = plan.sketches[1]
         assert hole_sketch.sketch_name == "Holes_arm_x_top_0"
-        assert hole_sketch.attachment_support is None
-        assert hole_sketch.coordinate_system is not None
-        assert hole_sketch.coordinate_system.translation == [20.0, 0.0, 10.0]
-        assert hole_sketch.coordinate_system.attachment_support == {
-            "feature_name": "L_Connector_Solid",
-        }
-        assert hole_sketch.coordinate_system.offset_expressions == {
-            "AttachmentOffset.Base.x": "FabricationParams.arm_y_width",
-            "AttachmentOffset.Base.y": "0 mm",
-            "AttachmentOffset.Base.z": "FabricationParams.thickness",
+        assert hole_sketch.coordinate_system_name == "CS_arm_x_top"
+        hole_plane = next(
+            cs for cs in plan.coordinate_systems if cs.name == "CS_arm_x_top"
+        )
+        assert hole_plane.translation == [20.0, 0.0, 10.0]
+        assert hole_plane.attachment_support == {"target": "L_Connector_Solid"}
+        assert hole_plane.param_aliases == {
+            "translation.x": "arm_y_width",
+            "translation.z": "thickness",
         }
         assert hole_sketch.attach_after_feature == "L_Connector_Solid"
         assert "circle_1" in hole_sketch.sketch
@@ -323,12 +322,12 @@ class TestCompileHoleGroups:
     ) -> None:
         """Each hole group adds a deferred sketch on the face UV plane."""
         groups = [HoleArraySpec(face_id="bottom", margin_u=30.0, margin_v=40.0)]
-        sketches, features, _face_ids, aliases = compile_hole_groups(
-            groups, slots=base_slots
+        coordinate_systems, sketches, features, _face_ids, aliases = (
+            compile_hole_groups(groups, slots=base_slots)
         )
         assert len(sketches) == 1
-        assert sketches[0].attachment_support is None
-        assert sketches[0].coordinate_system is not None
+        assert len(coordinate_systems) == 1
+        assert sketches[0].coordinate_system_name == coordinate_systems[0].name
         assert sketches[0].attach_after_feature == "L_Connector_Solid"
         assert "hole_bottom_diameter" in aliases
         assert len(features) == 2

@@ -73,12 +73,15 @@ def register_document_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
     async def create_document(
         name: str = "Unnamed",
         label: str | None = None,
+        fail_if_exists: bool = True,
     ) -> dict[str, Any]:
         """Create a new FreeCAD document.
 
         Args:
-            name: Internal document name (no spaces allowed, will be sanitized).
+            name: Internal document name. Must be a Python identifier.
             label: Display label (can contain spaces). Defaults to name.
+            fail_if_exists: Reject a duplicate internal name. Defaults to true
+                so concurrent sessions cannot silently share a document.
 
         Returns:
             Dictionary with created document information:
@@ -86,8 +89,10 @@ def register_document_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
                 - label: Display label
                 - path: File path (None for new document)
         """
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError("Document name must be a Python identifier")
         bridge = await get_bridge()
-        doc = await bridge.create_document(name, label)
+        doc = await bridge.create_document(name, label, fail_if_exists)
         return {
             "name": doc.name,
             "label": doc.label,

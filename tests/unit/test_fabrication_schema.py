@@ -40,21 +40,21 @@ class TestCoordinateSystemSpec:
         d = cs.to_dict()
         assert set(d.keys()) == {"euler_angles", "translation", "name"}
 
-    def test_placement_expressions_round_trip(self) -> None:
-        """offset_expressions survive serialisation (legacy Placement keys migrate)."""
+    def test_attached_parametric_coordinate_system_round_trip(self) -> None:
+        """The public attached-coordinate payload survives serialisation."""
         cs = CoordinateSystemSpec(
             [0, 0, 0],
             [20, 0, 10],
             name="CS_arm_x_top",
-            attachment_support={"feature_name": "L_Connector_Solid"},
-            offset_expressions={
-                "AttachmentOffset.Base.x": "FabricationParams.arm_y_width",
-                "AttachmentOffset.Base.z": "FabricationParams.thickness",
+            attachment_support={"target": "L_Connector_Solid"},
+            param_aliases={
+                "translation.x": "arm_y_width",
+                "translation.z": "thickness",
             },
         )
         cs2 = CoordinateSystemSpec.from_dict(cs.to_dict())
-        assert cs2.offset_expressions == cs.offset_expressions
-        assert cs2.attachment_support == {"feature_name": "L_Connector_Solid"}
+        assert cs2.param_aliases == cs.param_aliases
+        assert cs2.attachment_support == {"target": "L_Connector_Solid"}
 
     def test_from_dict_missing_name_defaults_none(self) -> None:
         """from_dict tolerates a missing 'name' key."""
@@ -68,19 +68,18 @@ class TestSketchSpec:
 
     @pytest.fixture
     def minimal_sketch(self) -> SketchSpec:
-        """Minimal valid SketchSpec with inline coordinate_system."""
+        """Minimal valid SketchSpec references a named coordinate system."""
         return SketchSpec(
             sketch={"line_1": {"start": [0, 0], "end": [10, 0]}},
             constraints={"Horizontal": ["line_1"]},
-            coordinate_system=CoordinateSystemSpec([0, 0, 0], [0, 0, 0]),
+            coordinate_system_name="XY_Base",
         )
 
-    def test_round_trip_with_inline_cs(self, minimal_sketch: SketchSpec) -> None:
-        """Inline coordinate_system survives to_dict / from_dict."""
+    def test_round_trip_with_cs_name(self, minimal_sketch: SketchSpec) -> None:
+        """Named coordinate-system reference survives to_dict / from_dict."""
         d = minimal_sketch.to_dict()
         sk2 = SketchSpec.from_dict(d)
-        assert sk2.coordinate_system is not None
-        assert sk2.coordinate_system.euler_angles == [0, 0, 0]
+        assert sk2.coordinate_system_name == "XY_Base"
         assert sk2.sketch == minimal_sketch.sketch
         assert sk2.constraints == minimal_sketch.constraints
 
@@ -93,24 +92,12 @@ class TestSketchSpec:
         )
         sk2 = SketchSpec.from_dict(sk.to_dict())
         assert sk2.coordinate_system_name == "TopPlane"
-        assert sk2.coordinate_system is None
-
-    def test_attachment_support_preserved(self) -> None:
-        """attachment_support dict is preserved through serialisation."""
-        sk = SketchSpec(
-            sketch={"line_1": {"start": [0, 0], "end": [1, 0]}},
-            constraints={},
-            coordinate_system_name="XY",
-            attachment_support={"near_point": [0.0, 0.0, 30.0]},
-        )
-        sk2 = SketchSpec.from_dict(sk.to_dict())
-        assert sk2.attachment_support == {"near_point": [0.0, 0.0, 30.0]}
 
     def test_missing_constraints_defaults_empty_dict(self) -> None:
         """from_dict tolerates missing 'constraints' key."""
         d = {
             "sketch": {"line_1": {"start": [0, 0], "end": [1, 0]}},
-            "coordinate_system": {"euler_angles": [0, 0, 0], "translation": [0, 0, 0]},
+            "coordinate_system_name": "XY_Base",
         }
         sk = SketchSpec.from_dict(d)
         assert sk.constraints == {}
@@ -354,6 +341,50 @@ class TestFabricationPlan:
 
         assert result["valid"] is True
         assert result["errors"] == []
+
+    def test_validate_fabrication_plan_accepts_origin_directional_distance(
+        self, simple_plan: FabricationPlan
+    ) -> None:
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Distance": [
+                [
+                    "origin",
+                    "line_1.start",
+                    {"length": "5 mm", "direction": "HORIZONTAL"},
+                ]
+            ]
+        }
+        assert validate_fabrication_plan(plan)["valid"] is True
+
+    def test_validate_fabrication_plan_rejects_self_distance(
+        self, simple_plan: FabricationPlan
+    ) -> None:
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["constraints"] = {
+            "Distance": [
+                [
+                    "line_1.start",
+                    "line_1.start",
+                    {"length": "5 mm", "direction": "HORIZONTAL"},
+                ]
+            ]
+        }
+        result = validate_fabrication_plan(plan)
+        assert result["valid"] is False
+        assert any(error["code"] == "self_distance" for error in result["errors"])
+
+    def test_validate_fabrication_plan_rejects_inline_sketch_coordinate_system(
+        self, simple_plan: FabricationPlan
+    ) -> None:
+        plan = simple_plan.to_dict()
+        plan["sketches"][0]["coordinate_system"] = {
+            "euler_angles": [0, 0, 0],
+            "translation": [0, 0, 0],
+        }
+        result = validate_fabrication_plan(plan)
+        assert result["valid"] is False
+        assert any(error["code"] == "retired_field" for error in result["errors"])
 
     def test_validate_fabrication_plan_warns_for_plain_point_distance(
         self,

@@ -84,6 +84,7 @@ import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from freecad_mcp.tools.coordinate_system import validate_coordinate_system_payload
 from freecad_mcp.tools.sketch_editability import (
     evaluate_sketch_editability as _evaluate_sketch_geometry,
 )
@@ -1193,6 +1194,8 @@ def register_fabrication_tools(
         euler_angles: list[float],
         translation: list[float],
         name: str | None = None,
+        attachment_support: dict[str, Any] | None = None,
+        param_aliases: dict[str, str] | None = None,
         body_name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
@@ -1217,7 +1220,11 @@ def register_fabrication_tools(
             name: Human-readable label for the coordinate system. If None,
                 defaults to ``"CoordinateSystem"`` (matching the HistCAD JSON
                 field name).
-            body_name: PartDesign Body to attach the LCS to. Uses the active
+            attachment_support: Optional ``{"target": object_name}``. With a
+                target, pose values are relative to that object's local frame.
+            param_aliases: Optional neutral coordinate-property aliases, such
+                as ``{"translation.z": "block_thickness"}``.
+            body_name: PartDesign Body to contain the LCS. Uses the active
                 body if None.
             doc_name: Target document. Uses the active document if None.
 
@@ -1246,6 +1253,24 @@ def register_fabrication_tools(
                 )
                 # result["cs_name"] → "TopPlane"  (the label you provided)
         """
+        validation_errors: list[dict[str, str]] = []
+        validate_coordinate_system_payload(
+            {
+                "euler_angles": euler_angles,
+                "translation": translation,
+                "attachment_support": attachment_support,
+                "param_aliases": param_aliases or {},
+            },
+            lambda path, message, code: validation_errors.append(
+                {"path": path, "message": message, "code": code}
+            ),
+            "$",
+        )
+        if validation_errors:
+            raise ValueError(
+                "Invalid coordinate system: "
+                + "; ".join(x["message"] for x in validation_errors)
+            )
         bridge = await get_bridge()
         code = f"""
 import math
@@ -1257,6 +1282,8 @@ if doc is None:
 euler = {euler_angles!r}
 trans = {translation!r}
 label = {name!r} or "CoordinateSystem"
+attachment = {attachment_support!r}
+aliases = {param_aliases!r} or {{}}
 
 # Build the placement from Euler angles (degrees, XYZ intrinsic).
 # Convention (matches the HistCAD Fusion 360 adapter): euler_angles are the
@@ -1284,17 +1311,69 @@ try:
                 break
 
     lcs = doc.addObject("PartDesign::CoordinateSystem", label)
-    lcs.Placement = placement
     lcs.Label = label
+    target_name = attachment.get("target") if attachment else None
+    target = doc.getObject(target_name) if target_name else None
+    if target_name and target is None:
+        raise ValueError(f"Coordinate-system attachment target not found: {{target_name!r}}")
+    if target is not None:
+        lcs.AttachmentSupport = [(target, ("", ""))]
+        lcs.MapMode = "ObjectXY"
+        lcs.AttachmentOffset = placement
+    else:
+        lcs.Placement = placement
     if body is not None:
         body.addObject(lcs)
     doc.recompute()
+    bound_params = []
+    if aliases:
+        sheet = doc.getObject("FabricationParams")
+        if sheet is None:
+            sheet = doc.addObject("Spreadsheet::Sheet", "FabricationParams")
+        prop_map = {{
+            "translation.x": "AttachmentOffset.Base.x" if target else "Placement.Base.x",
+            "translation.y": "AttachmentOffset.Base.y" if target else "Placement.Base.y",
+            "translation.z": "AttachmentOffset.Base.z" if target else "Placement.Base.z",
+            "euler_angles.x": None,
+            "euler_angles.y": None,
+            "euler_angles.z": None,
+        }}
+        values = {{
+            "translation.x": trans[0], "translation.y": trans[1], "translation.z": trans[2],
+            "euler_angles.x": euler[0], "euler_angles.y": euler[1], "euler_angles.z": euler[2],
+        }}
+        used = set(sheet.getUsedCells()) if hasattr(sheet, "getUsedCells") else set()
+        for key, alias in aliases.items():
+            cell = next((c for c in used if sheet.getAlias(c) == alias), None)
+            if cell is None:
+                row = 1
+                while f"A{{row}}" in used:
+                    row += 1
+                cell = f"A{{row}}"; used.add(cell)
+            sheet.set(cell, str(values[key]))
+            try: sheet.setAlias(cell, alias)
+            except Exception: pass
+            prop = prop_map[key]
+            diagnostic = None
+            if prop is None:
+                diagnostic = "rotation_alias_not_supported_by_freecad_adapter"
+            else:
+                try: lcs.setExpression(prop, f"FabricationParams.{{alias}}")
+                except Exception: diagnostic = "setExpression_failed"
+            bound_params.append({{
+                "alias": alias, "cell": cell, "value": values[key], "property": prop,
+                "object": lcs.Name, "role": "coordinate_system" if prop else "unbound_adapter_limit",
+                "diagnostic": diagnostic,
+            }})
+        doc.recompute()
     doc.commitTransaction()
     _result_ = {{
         "cs_name": lcs.Label,
         "cs_internal_name": lcs.Name,
         "label": lcs.Label,
         "placement": {{"euler_angles": {euler_angles!r}, "translation": {translation!r}}},
+        "attachment_support": attachment,
+        "bound_params": bound_params,
         "success": True,
     }}
 except Exception as _e:
@@ -1313,21 +1392,15 @@ except Exception as _e:
     @mcp.tool()
     async def create_sketch_geometry(
         sketch: dict[str, Any],
-        coordinate_system: dict[str, Any] | None = None,
-        coordinate_system_name: str | None = None,
-        attachment_support: dict[str, Any] | None = None,
+        coordinate_system_name: str,
         body_name: str | None = None,
         sketch_name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
         """Create a 2-D sketch with HistCAD geometry entities.
 
-        Accepts either an inline ``coordinate_system`` dict (Euler angles +
-        translation) or a ``coordinate_system_name`` referencing an LCS
-        created by ``create_coordinate_system``.  When ``attachment_support``
-        is provided, the sketch is face-attached so it physically follows that
-        face when the model is recomputed — enabling the "selective follow-on"
-        product pattern.
+        Attaches the sketch to a named coordinate system created by
+        ``create_coordinate_system``. This is the only sketch-plane path.
 
         The returned ``entity_index_map`` maps HistCAD entity names (e.g.
         ``"line_1"``) to FreeCAD Sketcher integer indices so that the subsequent
@@ -1342,26 +1415,8 @@ except Exception as _e:
                     "arc_1":    {"start": [0, 10], "middle": [7, 7], "end": [10, 0]},
                 }
 
-            coordinate_system: Inline plane spec
-                ``{"euler_angles": [a, b, g], "translation": [x, y, z]}``.
-                When provided, a ``PartDesign::CoordinateSystem`` datum is
-                created automatically and the sketch is *attached* to it (via
-                ``MapMode = "ObjectXY"``) rather than having its Placement set
-                directly.  This makes the sketch robust for parametric editing:
-                the datum survives undo/redo, can be driven by spreadsheet
-                expressions, and allows faces to propagate changes to dependent
-                features.  The created datum name is returned as ``cs_name``.
-                Mutually exclusive with ``coordinate_system_name``.
             coordinate_system_name: Name of a datum LCS created by
-                ``create_coordinate_system``.  Takes precedence over
-                ``coordinate_system`` if both are supplied.
-            attachment_support: Attach the sketch to an existing face so it
-                follows that face during recompute.  Use
-                ``{"near_point": [x, y, z]}`` for nearest-face resolution, or
-                ``{"face_name": "TopFace"}`` for a known face name.
-                Holes whose sketches are face-attached move with the face;
-                holes with only ``coordinate_system`` stay at their absolute
-                positions.
+                ``create_coordinate_system``.
             body_name: PartDesign Body to add the sketch to. Auto-detected
                 if None.
             sketch_name: Explicit FreeCAD object name. Auto-generated if None.
@@ -1407,8 +1462,7 @@ except Exception as _e:
                         "line_3": {"start": [20,10], "end": [0,10]},
                         "line_4": {"start": [0,10], "end": [0,0]},
                     },
-                    coordinate_system={"euler_angles": [0,0,0],
-                                       "translation": [0,0,0]},
+                    coordinate_system_name="XY_Base",
                 )
                 # The geometry is stored on the sketch object automatically.
                 # execute_extrude retrieves it without any caller pass-through.
@@ -1424,9 +1478,7 @@ if doc is None:
     raise ValueError("No active document")
 
 sketch_dict  = {sketch!r}
-cs_inline    = {coordinate_system!r}
 cs_name_ref  = {coordinate_system_name!r}
-attach_spec  = {attachment_support!r}
 body_nm      = {body_name!r}
 sketch_nm    = {sketch_name!r}
 
@@ -1442,90 +1494,12 @@ try:
                 body = obj
                 break
 
-    # --- Step 1: create the coordinate system datum (before the sketch) ---
-    # Correct mechanical-design order: coordinate_system first, sketch on top.
-    # When cs_inline is provided (HistCAD "coordinate_system" dict), we build a
-    # PartDesign::CoordinateSystem datum here so the sketch can be immediately
-    # attached to it in step 3.  Face-attachment and named-LCS references skip
-    # this step (the reference already exists).
-    attachment_info = None
-    _auto_lcs_name = None
-    _pending_lcs = None
-    if cs_inline is not None and cs_name_ref is None:
-        # Accept both the original Fusion-360-adapter key style
-        # ("Euler Angles" / "Translation Vector") and the lowercase-underscore
-        # style ("euler_angles" / "translation") used in most HistCAD examples.
-        euler = cs_inline.get("Euler Angles", cs_inline.get("euler_angles", [0, 0, 0]))
-        trans = cs_inline.get("Translation Vector", cs_inline.get("translation", [0, 0, 0]))
-        # Active rotation R = Rx(a)*Ry(b)*Rz(g), angles as-is (matches the
-        # HistCAD / Fusion 360 adapter convention).
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), euler[2])
-        rot = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), euler[1]) * rot
-        rot = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), euler[0]) * rot
-        # Label mirrors the HistCAD field name "coordinate_system" so the
-        # FreeCAD model tree reads naturally alongside the source JSON.
-        _cs_label = (sketch_nm + "_coordinate_system") if sketch_nm else "coordinate_system"
-        _pending_lcs = doc.addObject("PartDesign::CoordinateSystem", _cs_label)
-        _pending_lcs.Label = _cs_label
-        _cs_attach = cs_inline.get("attachment_support") or {{}}
-        _ref_nm = _cs_attach.get("object_name")
-        _offset_rot = rot
-        _offset_trans = FreeCAD.Vector(*trans)
-        if _ref_nm:
-            _ref_obj = doc.getObject(_ref_nm)
-            if _ref_obj is None:
-                raise ValueError(f"Coordinate system attachment object not found: {{_ref_nm!r}}")
-            _pending_lcs.AttachmentSupport = [(_ref_obj, ("", ""))]
-            _pending_lcs.MapMode = "ObjectXY"
-            _pending_lcs.AttachmentOffset = FreeCAD.Placement(_offset_trans, _offset_rot)
-        else:
-            _pending_lcs.Placement = FreeCAD.Placement(_offset_trans, _offset_rot)
-        if body is not None and getattr(body, "TypeId", "") == "PartDesign::Body":
-            body.addObject(_pending_lcs)
-        doc.recompute()
-        _offset_exprs = cs_inline.get("offset_expressions") or cs_inline.get("placement_expressions") or {{}}
-        if _offset_exprs:
-            for _prop, _expr in _offset_exprs.items():
-                try:
-                    _pending_lcs.setExpression(_prop, _expr)
-                except Exception:
-                    pass
-            doc.recompute()
-        _auto_lcs_name = _pending_lcs.Name
-
-    # --- Step 2: create the sketch object ---
+    # The named LCS is the only source of the sketch plane.
     sk = doc.addObject("Sketcher::SketchObject", sketch_nm or "Sketch")
 
-    # --- Step 3: attach the sketch to its plane ---
+    # Attach the sketch to its named local coordinate system.
     _plane_attached = False
-    if attach_spec is not None:
-        near_pt = attach_spec.get("near_point")
-        face_nm = attach_spec.get("face_name")
-        if near_pt is not None and body is not None:
-            shape = body.Shape
-            pt = FreeCAD.Vector(*near_pt)
-            vtx = Part.Vertex(pt)
-            best_face = None
-            best_dist = float("inf")
-            for i, face in enumerate(shape.Faces):
-                try:
-                    dist = face.distToShape(vtx)[0]
-                except Exception:
-                    dist = float("inf")
-                if dist < best_dist:
-                    best_dist = dist
-                    best_face = (body, "Face" + str(i + 1))
-            if best_face is not None:
-                sk.AttachmentSupport = [best_face]
-                sk.MapMode = "FlatFace"
-                attachment_info = {{"face_name": best_face[1], "attachment_offset": 0.0}}
-                _plane_attached = True
-        elif face_nm is not None and body is not None:
-            sk.AttachmentSupport = [(body, face_nm)]
-            sk.MapMode = "FlatFace"
-            attachment_info = {{"face_name": face_nm, "attachment_offset": 0.0}}
-            _plane_attached = True
-    if not _plane_attached and cs_name_ref is not None:
+    if cs_name_ref is not None:
         # Look up by Label first (the user-visible name returned by
         # create_coordinate_system as cs_name), then fall back to the
         # internal FreeCAD Name so both "MyPlane" and "CoordinateSystem001"
@@ -1541,12 +1515,8 @@ try:
             sk.AttachmentSupport = [(lcs, "")]
             sk.MapMode = "ObjectXY"
             _plane_attached = True
-    if not _plane_attached and _pending_lcs is not None:
-        # Attach to the datum created in step 1 from cs_inline
-        sk.AttachmentSupport = [(_pending_lcs, "")]
-        sk.MapMode = "ObjectXY"
-        _plane_attached = True
-
+        else:
+            raise ValueError(f"Coordinate system not found: {{cs_name_ref!r}}")
     if body is not None and getattr(body, "TypeId", "") == "PartDesign::Body":
         body.addObject(sk)
 
@@ -1618,7 +1588,7 @@ try:
         _kind_counts[_k] = _kind_counts.get(_k, 0) + 1
     _result_ = {{
         "sketch_name": sk.Name,
-        "cs_name": _auto_lcs_name,
+        "cs_name": cs_name_ref,
         "entities": _entity_rows,
         "geometry_count": {{
             "total":   _n_total,
@@ -4925,18 +4895,9 @@ _result_ = {{
             if attach_body is None and sk_spec.attach_body_feature:
                 attach_body = object_name_map.get(sk_spec.attach_body_feature)
 
-            cs_inline = None
-            if sk_spec.coordinate_system is not None:
-                cs_inline = sk_spec.coordinate_system.to_dict()
-                cs_attach = cs_inline.get("attachment_support") or {}
-                if cs_attach.get("feature_name") and attach_body:
-                    cs_inline["attachment_support"] = {"object_name": attach_body}
-
             geo_result = await create_sketch_geometry(  # type: ignore[name-defined]
                 sketch=sk_spec.sketch,
-                coordinate_system=cs_inline,
                 coordinate_system_name=cs_name_ref,
-                attachment_support=sk_spec.attachment_support,
                 body_name=attach_body,
                 sketch_name=sk_spec.sketch_name,
                 doc_name=doc_name,
@@ -4987,21 +4948,46 @@ _result_ = {{
                 immediate_sketches.append(sk_spec)
 
         async def _flush_deferred_sketches(trigger: str) -> None:
+            await _flush_deferred_coordinate_systems(trigger)
             pending = deferred_by_trigger.pop(trigger, [])
             for sk_spec in pending:
                 await _create_sketch_from_spec(sk_spec)
 
-        # Step 1: Coordinate systems
-        for cs_spec in fab_plan.coordinate_systems:
+        # Coordinate systems attached to a feature are created only after that
+        # feature exists. Both primitive and batch execution use this same tool.
+        deferred_coordinate_systems: dict[str, list[Any]] = {}
+
+        async def _create_coordinate_system_from_spec(cs_spec: Any) -> None:
+            nonlocal steps_completed
             result = await create_coordinate_system(  # type: ignore[name-defined]
                 euler_angles=cs_spec.euler_angles,
                 translation=cs_spec.translation,
                 name=cs_spec.name,
+                attachment_support=(cs_spec.attachment_support or None),
+                param_aliases=(cs_spec.param_aliases or None),
                 doc_name=doc_name,
             )
             if cs_spec.name:
                 cs_map[cs_spec.name] = result["cs_name"]
+            _record_bound_params(
+                result.get("bound_params", []),
+                source="coordinate_system",
+                spec_name=cs_spec.name,
+                actual_name=result.get("cs_internal_name"),
+            )
             steps_completed += 1
+
+        async def _flush_deferred_coordinate_systems(trigger: str) -> None:
+            for cs_spec in deferred_coordinate_systems.pop(trigger, []):
+                await _create_coordinate_system_from_spec(cs_spec)
+
+        # Step 1: world coordinate systems; attached systems wait for targets.
+        for cs_spec in fab_plan.coordinate_systems:
+            target = (cs_spec.attachment_support or {}).get("target")
+            if target:
+                deferred_coordinate_systems.setdefault(str(target), []).append(cs_spec)
+            else:
+                await _create_coordinate_system_from_spec(cs_spec)
 
         # Step 2: Immediate sketches (deferred sketches flush after features)
         for sk_spec in immediate_sketches:

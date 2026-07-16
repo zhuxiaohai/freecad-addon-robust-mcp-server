@@ -121,6 +121,30 @@ class TestFabricationTools:
         assert result["success"] is True
 
     @pytest.mark.asyncio
+    async def test_create_coordinate_system_accepts_attached_parametric_contract(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        mock_bridge.execute_python.return_value = self._success(
+            {
+                "cs_name": "HoleTopPlane",
+                "attachment_support": {"target": "BlockSolid"},
+                "bound_params": [],
+                "success": True,
+            }
+        )
+        result = await register_tools["create_coordinate_system"](
+            euler_angles=[0, 0, 0],
+            translation=[0, 0, 10],
+            name="HoleTopPlane",
+            attachment_support={"target": "BlockSolid"},
+            param_aliases={"translation.z": "block_thickness"},
+        )
+        assert result["attachment_support"] == {"target": "BlockSolid"}
+        code = mock_bridge.execute_python.call_args.args[0]
+        assert "AttachmentSupport" in code
+        assert "AttachmentOffset.Base.z" in code
+
+    @pytest.mark.asyncio
     async def test_create_coordinate_system_raises_on_failure(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
@@ -159,7 +183,7 @@ class TestFabricationTools:
         )
         result = await register_tools["create_sketch_geometry"](
             sketch={"line_1": {"start": [0, 0], "end": [10, 0]}},
-            coordinate_system={"euler_angles": [0, 0, 0], "translation": [0, 0, 0]},
+            coordinate_system_name="XY_Base",
         )
         assert result["sketch_name"] == "Sketch001"
         assert result["geometry_count"]["lines"] == 2
@@ -167,24 +191,23 @@ class TestFabricationTools:
         assert result["dof_remaining"] == 4
 
     @pytest.mark.asyncio
-    async def test_create_sketch_geometry_with_attachment_support(
+    async def test_create_sketch_geometry_uses_named_coordinate_system(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """attachment_support is forwarded to the bridge code."""
+        """A sketch uses the existing named coordinate-system contract."""
         mock_bridge.execute_python.return_value = self._success(
             {
                 "sketch_name": "Sketch002",
                 "entity_index_map": {},
                 "dof_remaining": 2,
-                "attachment_info": {"face_name": "Face3", "attachment_offset": 0.0},
                 "success": True,
             }
         )
         result = await register_tools["create_sketch_geometry"](
             sketch={"circle_1": {"center": [0, 0], "radius": 5}},
-            attachment_support={"near_point": [0.0, 0.0, 30.0]},
+            coordinate_system_name="HoleTopPlane",
         )
-        assert result["attachment_info"]["face_name"] == "Face3"
+        assert result["sketch_name"] == "Sketch002"
 
     # ------------------------------------------------------------------
     # apply_sketch_constraints
@@ -1321,29 +1344,19 @@ class TestFabricationSourceConventions:
         assert "_purge_redundant_sketch_constraints" in extrude_block
         assert "_create_parametric_extrusion()" in extrude_block
 
-    def test_coordinate_system_key_normalization(self) -> None:
-        """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
+    def test_coordinate_system_uses_canonical_named_lcs_contract(self) -> None:
+        """Sketch creation has no inline or face-attachment plane path."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
             encoding="utf-8"
         )
-        assert '"Euler Angles"' in source
-        assert '"Translation Vector"' in source
-        assert '"euler_angles"' in source
-        assert '"translation"' in source
-        """cs_inline parsing accepts both 'Euler Angles' and 'euler_angles' keys."""
-        from pathlib import Path
-
-        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
-            encoding="utf-8"
-        )
-        # Both capitalised (Fusion-360-adapter style) and lowercase keys must be tried
-        assert '"Euler Angles"' in source
-        assert '"Translation Vector"' in source
-        # Fallback to lowercase-underscore style
-        assert '"euler_angles"' in source
-        assert '"translation"' in source
+        sketch_block = source.split("async def create_sketch_geometry", 1)[1].split(
+            "async def parse_freecad_sketch", 1
+        )[0]
+        assert "coordinate_system_name: str" in sketch_block
+        assert "cs_inline" not in sketch_block
+        assert "FlatFace" not in sketch_block
 
 
 class TestConnectorTemplates:

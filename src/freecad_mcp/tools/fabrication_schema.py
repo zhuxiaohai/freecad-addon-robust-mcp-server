@@ -448,7 +448,10 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
             "sketches": "list[SketchSpec], ordered 2D profiles and constraints",
             "features": "list[FeatureSpec], ordered extrude/boolean/revolve/helix features",
             "finishes": "optional list[FinishSpec], fillet/chamfer operations",
-            "param_aliases": "optional dict[str,str] for tunable UI aliases",
+            "param_aliases": (
+                "optional fallback dict[str,str] for tunable feature aliases; "
+                "prefer per-feature param_aliases when possible"
+            ),
             "metadata": "optional dict for provenance and agent trace",
         },
         "coordinate_system_spec": {
@@ -479,6 +482,10 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                 "required": ["type", "sketch_name", "operation", "params"],
                 "operation": "NewBody",
                 "params": {"towards": "float", "opposite": "float optional"},
+                "param_aliases": (
+                    "optional per-feature mapping such as "
+                    "{'towards': 'thickness'} for reliable extrude linkage"
+                ),
             },
             "boolean": {
                 "required": ["type", "operation", "params"],
@@ -496,6 +503,10 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                     "start": "float",
                     "end": "float",
                 },
+                "param_aliases_note": (
+                    "accepted by the interface but not a reliable auto-binding "
+                    "path in the current executor"
+                ),
             },
             "helix": {
                 "required": ["type", "sketch_name", "operation", "params"],
@@ -505,6 +516,10 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                     "turns": "float",
                     "handedness": "Right | Left",
                 },
+                "param_aliases_note": (
+                    "accepted by the interface but not a reliable auto-binding "
+                    "path in the current executor"
+                ),
             },
         },
         "finish_spec": {
@@ -551,9 +566,39 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
             "Concentric": [["circle_1", "circle_2"]],
             "Fix": ["line_1.start", "line_1"],
             "Angle": [["line_1", "line_2", "90 deg"]],
-            "Length": [["line_1", "20 mm"]],
-            "Radius": [["arc_1", "5 mm"]],
-            "Diameter": [["circle_1", "10 mm"]],
+            "Length": [
+                ["line_1", "20 mm"],
+                [
+                    "line_1",
+                    {
+                        "length": "20 mm",
+                        "alias": "base_length",
+                        "role": "sketch_dimension",
+                    },
+                ],
+            ],
+            "Radius": [
+                ["arc_1", "5 mm"],
+                [
+                    "arc_1",
+                    {
+                        "radius": "5 mm",
+                        "alias": "corner_radius",
+                        "role": "sketch_dimension",
+                    },
+                ],
+            ],
+            "Diameter": [
+                ["circle_1", "10 mm"],
+                [
+                    "circle_1",
+                    {
+                        "diameter": "10 mm",
+                        "alias": "hole_diameter",
+                        "role": "sketch_dimension",
+                    },
+                ],
+            ],
             "Distance": [
                 ["line_1.end", "line_2.start", "5 mm"],
                 [
@@ -566,7 +611,63 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                     "line_4.start",
                     {"length": "1.5 mm", "direction": "VERTICAL"},
                 ],
+                [
+                    "line_1.end",
+                    "line_2.start",
+                    {
+                        "length": "5 mm",
+                        "direction": "HORIZONTAL",
+                        "alias": "edge_offset",
+                        "role": "sketch_dimension",
+                    },
+                ],
             ],
+        },
+        "parametric_linkage": {
+            "sketch_dimensions": (
+                "When the user asks for parametric/tunable/linked sketch "
+                "dimensions, write the dimension as a dict with alias. "
+                "Supported dimension dict keys include length, radius, "
+                "diameter, angle, value, expression, alias, label, role, min, "
+                "max, and default."
+            ),
+            "diameter_note": (
+                "Diameter and Radius are separate sketch dimension semantics. "
+                "Diameter entries create FreeCAD Sketcher Diameter constraints "
+                "and bind aliases directly to the diameter value; Radius entries "
+                "create Radius constraints and bind aliases directly to radius."
+            ),
+            "diameter_example": [
+                "circle_1",
+                {
+                    "diameter": "5 mm",
+                    "alias": "hole_diameter",
+                    "role": "sketch_dimension",
+                },
+            ],
+            "angle_example": [
+                "line_1",
+                "line_2",
+                {
+                    "angle": 90,
+                    "alias": "bend_angle",
+                    "role": "sketch_dimension",
+                },
+            ],
+            "extrude_feature_example": {
+                "type": "extrude",
+                "sketch_name": "PlateProfile",
+                "operation": "NewBody",
+                "params": {"towards": 6.0, "opposite": 0.0},
+                "param_aliases": {"towards": "thickness"},
+                "feature_name": "PlateSolid",
+            },
+            "safety_note": (
+                "The executor may safely skip alias expression binding when "
+                "the sketch solver reports conflicts, over-constraint, or an "
+                "opened profile. In that case geometry is still generated and "
+                "bound_params reports an unbound role with diagnostics."
+            ),
         },
         "distance_semantics": {
             "plain": (

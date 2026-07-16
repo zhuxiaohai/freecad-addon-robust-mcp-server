@@ -280,6 +280,19 @@ class TestFabricationPlan:
         assert "Distance" in schema["constraint_entry_formats"]
         assert "vertical" in schema["distance_semantics"]
         assert schema["examples"][0]["features"][0]["type"] == "extrude"
+        assert "parametric_linkage" in schema
+        assert schema["parametric_linkage"]["extrude_feature_example"][
+            "param_aliases"
+        ] == {"towards": "thickness"}
+        assert "diameter_note" in schema["parametric_linkage"]
+        assert "expression" not in schema["parametric_linkage"]["diameter_example"][1]
+        length_entries = schema["constraint_entry_formats"]["Length"]
+        assert length_entries[1][1]["alias"] == "base_length"
+        diameter_entries = schema["constraint_entry_formats"]["Diameter"]
+        assert diameter_entries[1][1]["alias"] == "hole_diameter"
+        assert "expression" not in diameter_entries[1][1]
+        assert schema["feature_spec"]["revolve"]["param_aliases_note"]
+        assert schema["feature_spec"]["helix"]["param_aliases_note"]
 
     def test_validate_fabrication_plan_accepts_minimal_example(self) -> None:
         """The published minimal example validates successfully."""

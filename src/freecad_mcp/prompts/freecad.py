@@ -777,10 +777,16 @@ constraints = {
 
 ## param_aliases for Frontend Sliders
 
-When calling `execute_extrude`, `execute_revolve`, or `execute_helix`, pass
-`param_aliases` to auto-bind parameters to the `FabricationParams` spreadsheet:
+For reliable frontend sliders, bind sketch dimensions with dimension dict
+`alias` values and bind extrude height/thickness with `execute_extrude`
+`param_aliases`. `execute_revolve` and `execute_helix` currently accept
+`param_aliases` but should not be treated as reliable auto-binding paths unless
+`list_tunable_params()` confirms the alias is bound.
 
 ```python
+constraints = {
+    "Length": [["line_1", {"length": "80 mm", "alias": "base_length"}]],
+}
 execute_extrude(sketch_name, towards=150, param_aliases={"towards": "column_height"})
 # → creates FabricationParams.column_height = 150
 # → binds Pad.Length expression to FabricationParams.column_height

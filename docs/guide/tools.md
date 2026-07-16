@@ -622,6 +622,8 @@ result = await apply_sketch_constraints(geo["sketch_name"], {
 feat = await execute_extrude(geo["sketch_name"], towards=30.0,
                               param_aliases={"towards": "box_height"})
 # feat["extrusion_mode_used"] is "parametric_sketch" or "robust_face"
+# param_aliases bind only when the extrusion remains parametric_sketch; robust_face
+# returns bound_params entries with role="unbound_fallback".
 # For complex HistCAD JSON profiles, pass extrusion_mode="robust_face".
 
 # Step 4b (optional): Boolean-combine with an explicit base and tool
@@ -640,6 +642,12 @@ await feature_fillet([[10.0, 0.0, 30.0]], radius=2.0)
 # Step 7: Frontend slider
 await set_tunable_param("box_height", 50.0)  # updates model live
 ```
+
+For sketch dimensions requested as tunable or linked, use dimension dictionaries
+with `alias`, such as `["line_1", {"length": "20 mm", "alias": "box_length"}]`.
+`execute_revolve` and `execute_helix` accept `param_aliases` for interface
+compatibility, but do not rely on them as automatic bindings unless
+`list_tunable_params()` reports the alias.
 
 ---
 

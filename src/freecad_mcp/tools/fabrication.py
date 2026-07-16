@@ -967,7 +967,7 @@ def _apply_histcad_constraints(
             i, _ = _resolve_entity(entry[0])
             dim_meta = _dimension_meta(entry[1], value_key="diameter")
             val = dim_meta["value"]
-            c = Sketcher.Constraint("Radius", i, val / 2.0)
+            c = Sketcher.Constraint("Diameter", i, val)
         elif ctype == "Radius":
             i, _ = _resolve_entity(entry[0])
             dim_meta = _dimension_meta(entry[1], value_key="radius")
@@ -2104,8 +2104,85 @@ try:
     applied_after = len(sk.Constraints) if hasattr(sk, "Constraints") else applied_before
     applied_count = applied_after - applied_before
 
-    bound_params = []
+    def _profile_is_closed(_sk):
+        try:
+            _chk_edges = _sk.Shape.Edges
+            _chk_groups = Part.sortEdges(_chk_edges) if _chk_edges else []
+            if not _chk_groups:
+                return False
+            _closed_cnt = 0
+            for _grp in _chk_groups:
+                try:
+                    if Part.Wire(_grp).isClosed():
+                        _closed_cnt += 1
+                except Exception:
+                    pass
+            return _closed_cnt == len(_chk_groups)
+        except Exception:
+            return None
+
+    pre_bind_solve_status = None
+    pre_bind_dof = None
+    pre_bind_conflicting = []
+    pre_bind_profile_closed = None
     if dimension_bindings:
+        try:
+            doc.recompute()
+        except Exception:
+            pass
+        try:
+            pre_bind_solve_status = sk.solve() if hasattr(sk, "solve") else None
+        except Exception:
+            pre_bind_solve_status = "solve_error"
+        try:
+            pre_bind_dof = getattr(sk, "DoF", None)
+        except Exception:
+            pre_bind_dof = None
+        try:
+            pre_bind_conflicting = [
+                int(_x)
+                for _x in (getattr(sk, "ConflictingConstraints", []) or [])
+            ]
+        except Exception:
+            pre_bind_conflicting = []
+        pre_bind_profile_closed = _profile_is_closed(sk)
+
+    binding_guard_reasons = []
+    if dimension_bindings:
+        if pre_bind_solve_status not in (None, 0):
+            binding_guard_reasons.append(f"solve_status={{pre_bind_solve_status}}")
+        if pre_bind_conflicting:
+            binding_guard_reasons.append(f"conflicting_constraints={{pre_bind_conflicting}}")
+        try:
+            if pre_bind_dof is not None and int(pre_bind_dof) < 0:
+                binding_guard_reasons.append(f"dof_after={{pre_bind_dof}}")
+        except Exception:
+            pass
+        if pre_bind_profile_closed is False:
+            binding_guard_reasons.append("profile_open")
+
+    bound_params = []
+    if dimension_bindings and binding_guard_reasons:
+        for _binding in dimension_bindings:
+            _alias = _binding.get("alias")
+            if not _alias:
+                continue
+            bound_params.append({{
+                "alias": _alias,
+                "cell": None,
+                "value": _binding.get("value"),
+                "unit": _binding.get("unit", "mm"),
+                "property": _binding.get("property"),
+                "object": sk.Name,
+                "constraint_type": _binding.get("constraint_type"),
+                "role": "unbound_solver_guard",
+                "label": _binding.get("label"),
+                "min": _binding.get("min"),
+                "max": _binding.get("max"),
+                "default": _binding.get("default"),
+                "diagnostic": "; ".join(binding_guard_reasons),
+            }})
+    elif dimension_bindings:
         sheet = doc.getObject("FabricationParams")
         if sheet is None:
             sheet = doc.addObject("Spreadsheet::Sheet", "FabricationParams")
@@ -2167,6 +2244,7 @@ try:
                     "property": _prop,
                     "object": sk.Name,
                     "constraint_type": _binding.get("constraint_type"),
+                    "expression": _expr or f"FabricationParams.{{_alias}}",
                     "role": _binding.get("role"),
                     "label": _binding.get("label"),
                     "min": _binding.get("min"),
@@ -2869,19 +2947,27 @@ try:
             except Exception:
                 pass
             prop_name = prop_map.get(param_key, "LengthFwd")
+            bound_property = None
+            bind_diagnostic = None
             try:
                 setattr(feat, prop_name, value)
                 feat.setExpression(prop_name, f"FabricationParams.{{alias_name}}")
+                bound_property = prop_name
             except Exception:
-                pass
+                bind_diagnostic = "setExpression_failed"
             bound_params.append({{
                 "alias": alias_name,
                 "cell": cell,
                 "value": value,
                 "unit": "mm",
                 "object": feat.Name,
-                "property": prop_name,
-                "role": "thickness" if param_key == "towards" else param_key,
+                "property": bound_property,
+                "role": (
+                    ("thickness" if param_key == "towards" else param_key)
+                    if bound_property
+                    else "unbound_expression_error"
+                ),
+                "diagnostic": bind_diagnostic,
             }})
     elif aliases:
         # The robust-face fallback is intentionally stable geometry, not a
@@ -2896,6 +2982,7 @@ try:
                 "object": feat.Name,
                 "property": None,
                 "role": "unbound_fallback",
+                "diagnostic": fallback_reason or "extrusion_mode_not_parametric_sketch",
             }})
 
     doc.recompute()
@@ -4797,9 +4884,34 @@ _result_ = {{
         sketch_name_map: dict[str, str] = {}  # spec sketch_name → FreeCAD obj name
         object_name_map: dict[str, str] = {}
         sketch_constraint_results: list[dict[str, Any]] = []
+        parametric_binding_diagnostics: list[dict[str, Any]] = []
         steps_completed = 0
         last_body_name: str | None = None
         partdesign_body_name: str | None = None
+
+        def _record_bound_params(
+            params: list[dict[str, Any]] | None,
+            *,
+            source: str,
+            spec_name: str | None,
+            actual_name: str | None,
+        ) -> None:
+            for item in params or []:
+                parametric_binding_diagnostics.append(
+                    {
+                        "source": source,
+                        "spec_name": spec_name,
+                        "object_name": actual_name or item.get("object"),
+                        "alias": item.get("alias"),
+                        "role": item.get("role"),
+                        "property": item.get("property"),
+                        "cell": item.get("cell"),
+                        "value": item.get("value"),
+                        "unit": item.get("unit"),
+                        "diagnostic": item.get("diagnostic"),
+                        "bound": bool(item.get("cell") and item.get("property")),
+                    }
+                )
 
         async def _create_sketch_from_spec(sk_spec: Any) -> None:
             nonlocal steps_completed, partdesign_body_name
@@ -4854,7 +4966,14 @@ _result_ = {{
                         "dof_after": constraint_result.get("dof_after"),
                         "solve_status": constraint_result.get("solve_status"),
                         "geometry_drift": constraint_result.get("geometry_drift"),
+                        "bound_params": constraint_result.get("bound_params", []),
                     }
+                )
+                _record_bound_params(
+                    constraint_result.get("bound_params", []),
+                    source="sketch_constraints",
+                    spec_name=sk_spec.sketch_name,
+                    actual_name=actual_sk_name,
                 )
                 steps_completed += 1
 
@@ -4924,6 +5043,12 @@ _result_ = {{
                 last_body_name = feat_result.get("body_name") or created_name
                 if feat_result.get("body_name"):
                     partdesign_body_name = feat_result["body_name"]
+                _record_bound_params(
+                    feat_result.get("bound_params", []),
+                    source="feature",
+                    spec_name=feat_spec.feature_name,
+                    actual_name=created_name,
+                )
                 if feat_spec.feature_name:
                     await _flush_deferred_sketches(feat_spec.feature_name)
                 continue
@@ -4996,6 +5121,12 @@ _result_ = {{
                 object_name_map[feat_spec.feature_name] = created_name
             feature_names.append(created_name)
             last_body_name = feat_result.get("body_name") or created_name
+            _record_bound_params(
+                feat_result.get("bound_params", []),
+                source="feature",
+                spec_name=feat_spec.feature_name,
+                actual_name=created_name,
+            )
             steps_completed += 1
 
         # Step 4: Finishing
@@ -5039,6 +5170,7 @@ _result_ = {{
             "bounding_box": snapshot.get("bounding_box", {}),
             "volume": snapshot.get("volume", 0.0),
             "sketch_constraint_results": sketch_constraint_results,
+            "parametric_binding_diagnostics": parametric_binding_diagnostics,
             "steps_completed": steps_completed,
             "success": True,
         }

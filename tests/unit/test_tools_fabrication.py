@@ -327,6 +327,31 @@ class TestFabricationTools:
         assert result["geometry_drift"]["max_mm"] > 0
         assert "line_1" in result["geometry_drift"]["drifted_entities"]
 
+    def test_apply_sketch_constraints_has_alias_solver_guard(self) -> None:
+        """Source guards expression binding when sketch solving is unhealthy."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "binding_guard_reasons" in source
+        assert '"role": "unbound_solver_guard"' in source
+        assert "pre_bind_solve_status" in source
+        assert "profile_open" in source
+
+    def test_apply_sketch_constraints_uses_diameter_constraint_for_diameter(
+        self,
+    ) -> None:
+        """Diameter FabricationPlan entries create Diameter constraints."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'elif ctype == "Diameter":' in source
+        assert 'Sketcher.Constraint("Diameter", i, val)' in source
+        assert 'c = Sketcher.Constraint("Radius", i, val / 2.0)' not in source
+
     # ------------------------------------------------------------------
     # check_sketch_constraints
     # ------------------------------------------------------------------
@@ -549,6 +574,36 @@ class TestFabricationTools:
         assert result["params"][0]["alias"] == "column_height"
 
     @pytest.mark.asyncio
+    async def test_execute_extrude_reports_unbound_fallback(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Robust-face fallback returns unbound param diagnostics."""
+        mock_bridge.execute_python.return_value = self._success(
+            {
+                "feature_name": "Solid",
+                "extrusion_mode_used": "robust_face",
+                "fallback_reason": "zero_volume_0.0",
+                "bound_params": [
+                    {
+                        "alias": "box_height",
+                        "cell": None,
+                        "property": None,
+                        "role": "unbound_fallback",
+                        "diagnostic": "zero_volume_0.0",
+                    }
+                ],
+                "success": True,
+            }
+        )
+        result = await register_tools["execute_extrude"](
+            sketch_name="Sketch001",
+            towards=30.0,
+            param_aliases={"towards": "box_height"},
+        )
+        assert result["bound_params"][0]["role"] == "unbound_fallback"
+        assert result["bound_params"][0]["property"] is None
+
+    @pytest.mark.asyncio
     async def test_set_tunable_param_success(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
@@ -590,6 +645,108 @@ class TestFabricationTools:
         )
         with pytest.raises(ValueError, match="unknown_param"):
             await register_tools["set_tunable_param"](alias="unknown_param", value=10.0)
+
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_summarizes_binding_diagnostics(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Batch execution exposes sketch and feature binding diagnostics."""
+        mock_bridge.execute_python.side_effect = [
+            self._success({"cs_name": "XY_Base", "success": True}),
+            self._success({"sketch_name": "PlateProfile", "success": True}),
+            self._success(
+                {
+                    "dof_after": -1,
+                    "solve_status": 1,
+                    "bound_params": [
+                        {
+                            "alias": "plate_length",
+                            "cell": None,
+                            "property": "Constraints[0]",
+                            "role": "unbound_solver_guard",
+                            "diagnostic": "solve_status=1",
+                        }
+                    ],
+                    "success": True,
+                }
+            ),
+            self._success(
+                {
+                    "feature_name": "PlateSolid",
+                    "body_name": "PlateSolid",
+                    "bound_params": [
+                        {
+                            "alias": "thickness",
+                            "cell": "A1",
+                            "property": "LengthFwd",
+                            "role": "thickness",
+                            "value": 6.0,
+                            "unit": "mm",
+                        }
+                    ],
+                    "success": True,
+                }
+            ),
+            self._success(
+                {
+                    "bounding_box": {"x_min": 0, "x_max": 80},
+                    "volume": 480.0,
+                    "success": True,
+                }
+            ),
+            self._success(
+                {
+                    "params": [{"alias": "thickness", "value": 6.0, "cell": "A1"}],
+                    "spreadsheet_name": "FabricationParams",
+                }
+            ),
+        ]
+        plan = {
+            "coordinate_systems": [
+                {
+                    "euler_angles": [0, 0, 0],
+                    "translation": [0, 0, 0],
+                    "name": "XY_Base",
+                }
+            ],
+            "sketches": [
+                {
+                    "sketch_name": "PlateProfile",
+                    "coordinate_system_name": "XY_Base",
+                    "sketch": {
+                        "line_1": {"start": [0, 0], "end": [80, 0]},
+                    },
+                    "constraints": {
+                        "Length": [
+                            [
+                                "line_1",
+                                {
+                                    "length": 80,
+                                    "alias": "plate_length",
+                                },
+                            ]
+                        ]
+                    },
+                }
+            ],
+            "features": [
+                {
+                    "type": "extrude",
+                    "sketch_name": "PlateProfile",
+                    "operation": "NewBody",
+                    "params": {"towards": 6.0, "opposite": 0.0},
+                    "param_aliases": {"towards": "thickness"},
+                    "feature_name": "PlateSolid",
+                }
+            ],
+        }
+        result = await register_tools["execute_fabrication_plan"](plan)
+        diagnostics = result["parametric_binding_diagnostics"]
+        assert diagnostics[0]["alias"] == "plate_length"
+        assert diagnostics[0]["role"] == "unbound_solver_guard"
+        assert diagnostics[0]["bound"] is False
+        assert diagnostics[1]["alias"] == "thickness"
+        assert diagnostics[1]["bound"] is True
 
     @pytest.mark.asyncio
     async def test_evaluate_editability_success(

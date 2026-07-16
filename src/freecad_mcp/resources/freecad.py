@@ -1596,6 +1596,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": (
                                 "Create a named datum coordinate system (sketch plane) "
                                 "from Euler angles + translation. "
+                                "Optional attachment_support targets an upstream object; "
                                 "Returns cs_name for reference in create_sketch_geometry."
                             ),
                             "key_params": [
@@ -1610,17 +1611,14 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "name": "create_sketch_geometry",
                             "description": (
                                 "Create a 2-D sketch with HistCAD entity dict. "
-                                "Accepts inline coordinate_system or coordinate_system_name "
-                                "reference, and optional attachment_support for face-attached "
-                                "sketches (selective follow-on pattern). "
+                                "Requires a named coordinate_system_name; sketch-level planes "
+                                "and attachment are not supported. "
                                 "Returns geometry_count, profile closure check "
                                 "(closed loops), and dof_remaining."
                             ),
                             "key_params": [
                                 "sketch",
-                                "coordinate_system",
                                 "coordinate_system_name",
-                                "attachment_support",
                                 "sketch_name",
                                 "doc_name",
                             ],

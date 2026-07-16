@@ -15,6 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from freecad_mcp.tools.coordinate_system import (
+    COORDINATE_PARAMETER_PATHS,
+    validate_coordinate_system_payload,
+)
+
 SKETCH_ENTITY_PREFIXES = (
     "line_",
     "circle_",
@@ -59,15 +64,14 @@ class CoordinateSystemSpec:
             applied as the active local-to-world rotation
             R = Rx(a) * Ry(b) * Rz(g) (HistCAD / Fusion 360 adapter
             convention).
-        translation: Default attachment offset origin [x, y, z] in millimetres
-            in the reference object's local frame (HistCAD ``Translation Vector``).
+        translation: Origin [x, y, z] in millimetres. It is world-relative
+            when unattached and target-local when ``attachment_support`` exists.
         name: Optional label used to reference this CS in SketchSpec.
         attachment_support: Optional attachment to a reference solid.
-            Use ``{"feature_name": "L_Connector_Solid"}`` in plans; Layer 1
-            resolves to ``{"object_name": "<FreeCADName>"}`` at execution.
-        offset_expressions: FreeCAD expressions on ``AttachmentOffset`` (or
-            ``Placement`` when unattached).  Layer 2 supplies these; Layer 1
-            applies them as-is.
+            Use ``{"target": "L_Connector_Solid"}``. The adapter resolves
+            the target without exposing FreeCAD attachment properties.
+        param_aliases: Tunable coordinate properties, keyed by neutral paths
+            such as ``translation.z``.
 
     Example:
         >>> cs = CoordinateSystemSpec(
@@ -81,7 +85,8 @@ class CoordinateSystemSpec:
     translation: list[float]
     name: str | None = None
     attachment_support: dict[str, Any] = field(default_factory=dict)
-    offset_expressions: dict[str, str] = field(default_factory=dict)
+    param_aliases: dict[str, str] = field(default_factory=dict)
+    param_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise to plain dict for JSON transport."""
@@ -92,21 +97,16 @@ class CoordinateSystemSpec:
         }
         if self.attachment_support:
             d["attachment_support"] = dict(self.attachment_support)
-        if self.offset_expressions:
-            d["offset_expressions"] = dict(self.offset_expressions)
+        if self.param_aliases:
+            d["param_aliases"] = dict(self.param_aliases)
+        if self.param_bindings:
+            d["param_bindings"] = self.param_bindings
         return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> CoordinateSystemSpec:
         """Deserialise from plain dict."""
         raw_attach = d.get("attachment_support", {})
-        raw_exprs = d.get("offset_expressions", d.get("placement_expressions", {}))
-        offset_expressions: dict[str, str] = {}
-        for key, value in raw_exprs.items():
-            prop = str(key)
-            if prop.startswith("Placement."):
-                prop = "AttachmentOffset." + prop.removeprefix("Placement.")
-            offset_expressions[prop] = str(value)
         return cls(
             euler_angles=d["euler_angles"],
             translation=d["translation"],
@@ -114,7 +114,10 @@ class CoordinateSystemSpec:
             attachment_support={
                 str(k): v for k, v in raw_attach.items() if v is not None
             },
-            offset_expressions=offset_expressions,
+            param_aliases={
+                str(k): str(v) for k, v in d.get("param_aliases", {}).items()
+            },
+            param_bindings=dict(d.get("param_bindings", {})),
         )
 
 
@@ -122,22 +125,16 @@ class CoordinateSystemSpec:
 class SketchSpec:
     """Specification for a 2-D sketch: geometry entities + constraints + plane.
 
-    Either ``coordinate_system`` (inline) or ``coordinate_system_name``
-    (reference to a CoordinateSystemSpec in the parent FabricationPlan) must
-    be provided, or ``attachment_support`` for face-attached sketches.
+    ``coordinate_system_name`` references a CoordinateSystemSpec in the parent
+    FabricationPlan. It is the sole sketch-plane mechanism.
 
     Attributes:
         sketch: HistCAD entity dict, e.g.
             ``{"line_1": {"start": [0,0], "end": [10,0]}, ...}``
         constraints: HistCAD constraint dict, e.g.
             ``{"Horizontal": ["line_1"], "Length": [["line_1", "10 mm"]]}``
-        coordinate_system: Inline plane spec (mutually exclusive with
-            ``coordinate_system_name``).
         coordinate_system_name: Name of a CoordinateSystemSpec declared in
             the parent plan's ``coordinate_systems`` list.
-        attachment_support: Face-attachment spec so the sketch follows a face.
-            ``{"near_point": [x, y, z]}`` — adapter resolves to the nearest
-            face; ``{"face_name": "TopFace"}`` for a known face name.
         sketch_name: Explicit sketch object name. Auto-generated if None.
         attach_after_feature: When set, the sketch is created only after this
             feature (by ``feature_name``) has been executed — required for
@@ -156,9 +153,7 @@ class SketchSpec:
 
     sketch: dict[str, Any]
     constraints: dict[str, Any]
-    coordinate_system: CoordinateSystemSpec | None = None
     coordinate_system_name: str | None = None
-    attachment_support: dict[str, Any] | None = None
     sketch_name: str | None = None
     attach_after_feature: str | None = None
     attach_body_feature: str | None = None
@@ -169,12 +164,8 @@ class SketchSpec:
             "sketch": self.sketch,
             "constraints": self.constraints,
         }
-        if self.coordinate_system is not None:
-            d["coordinate_system"] = self.coordinate_system.to_dict()
         if self.coordinate_system_name is not None:
             d["coordinate_system_name"] = self.coordinate_system_name
-        if self.attachment_support is not None:
-            d["attachment_support"] = self.attachment_support
         if self.sketch_name is not None:
             d["sketch_name"] = self.sketch_name
         if self.attach_after_feature is not None:
@@ -186,15 +177,10 @@ class SketchSpec:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SketchSpec:
         """Deserialise from plain dict."""
-        cs = d.get("coordinate_system")
         return cls(
             sketch=d["sketch"],
             constraints=d.get("constraints", {}),
-            coordinate_system=(
-                CoordinateSystemSpec.from_dict(cs) if cs is not None else None
-            ),
             coordinate_system_name=d.get("coordinate_system_name"),
-            attachment_support=d.get("attachment_support"),
             sketch_name=d.get("sketch_name"),
             attach_after_feature=d.get("attach_after_feature"),
             attach_body_feature=d.get("attach_body_feature"),
@@ -452,27 +438,55 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                 "optional fallback dict[str,str] for tunable feature aliases; "
                 "prefer per-feature param_aliases when possible"
             ),
-            "metadata": "optional dict for provenance and agent trace",
+            "metadata": "optional dict for provenance, agent trace, and use_spreadsheet_aliases (default true)",
         },
         "coordinate_system_spec": {
             "required": ["euler_angles", "translation"],
-            "optional": ["name", "attachment_support", "offset_expressions"],
+            "optional": [
+                "name",
+                "attachment_support",
+                "param_aliases",
+                "param_bindings",
+            ],
+            "attachment_support": "optional {'target': '<upstream feature or object>'}; pose is target-local when present",
+            "param_aliases": {
+                "description": "optional mapping of tunable coordinate properties to aliases",
+                "supported_properties": sorted(COORDINATE_PARAMETER_PATHS),
+            },
+            "param_bindings": {
+                "description": "direct non-Spreadsheet sources for translation offsets",
+                "feature_example": {
+                    "translation.z": {
+                        "source": {
+                            "kind": "feature_param",
+                            "feature_name": "PlateSolid",
+                            "param": "towards",
+                        }
+                    }
+                },
+                "sketch_example": {
+                    "translation.x": {
+                        "source": {
+                            "kind": "sketch_constraint",
+                            "sketch_name": "Profile",
+                            "constraint_alias": "width",
+                        }
+                    }
+                },
+            },
             "notes": "Euler angles are active local-to-world XYZ degrees; units are mm.",
         },
         "sketch_spec": {
             "required": ["sketch"],
             "optional": [
                 "constraints",
-                "coordinate_system",
                 "coordinate_system_name",
-                "attachment_support",
                 "sketch_name",
                 "attach_after_feature",
                 "attach_body_feature",
             ],
             "notes": (
-                "Provide coordinate_system_name, inline coordinate_system, or "
-                "attachment_support. Named sketches are recommended because "
+                "Provide coordinate_system_name. Named sketches are recommended because "
                 "features reference sketch_name."
             ),
         },
@@ -688,7 +702,7 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
                 "plain Distance execution."
             ),
         },
-        "point_ref_format": "entity.point, e.g. line_1.start or circle_1.center",
+        "point_ref_format": "entity.point, e.g. line_1.start or circle_1.center; 'origin' is the sketch-local origin",
         "examples": [minimal_fabrication_plan_example()],
     }
 
@@ -742,6 +756,14 @@ def validate_fabrication_plan(plan: dict[str, Any]) -> dict[str, Any]:
         add_error,
         add_warning,
     )
+    for index, cs in enumerate(plan["coordinate_systems"]):
+        if isinstance(cs, dict):
+            validate_coordinate_system_payload(
+                cs,
+                add_error,
+                f"$.coordinate_systems[{index}]",
+                known_targets=feature_names,
+            )
     _validate_finishes(plan.get("finishes", []), add_error)
 
     for index, sketch in enumerate(plan["sketches"]):
@@ -803,10 +825,7 @@ def _validate_coordinate_systems(
         if not isinstance(cs, dict):
             add_error(path, "coordinate system must be a dict", "type_error")
             continue
-        if not _is_number_list(cs.get("euler_angles"), 3):
-            add_error(f"{path}.euler_angles", "must be a 3-number list", "type_error")
-        if not _is_number_list(cs.get("translation"), 3):
-            add_error(f"{path}.translation", "must be a 3-number list", "type_error")
+        validate_coordinate_system_payload(cs, add_error, path)
         name = cs.get("name")
         if name is not None:
             if not isinstance(name, str) or not name:
@@ -826,7 +845,7 @@ def _validate_coordinate_systems(
     return names
 
 
-def _validate_sketches(
+def _validate_sketches(  # noqa: PLR0912
     sketches: list[Any],
     cs_names: set[str],
     add_error: Any,
@@ -855,15 +874,22 @@ def _validate_sketches(
             )
 
         cs_ref = sketch.get("coordinate_system_name")
-        has_plane = bool(
-            cs_ref
-            or sketch.get("coordinate_system")
-            or sketch.get("attachment_support")
-        )
-        if not has_plane:
+        if "coordinate_system" in sketch:
+            add_error(
+                f"{path}.coordinate_system",
+                "inline coordinate_system is retired; declare it in top-level coordinate_systems and reference coordinate_system_name",
+                "retired_field",
+            )
+        if "attachment_support" in sketch:
+            add_error(
+                f"{path}.attachment_support",
+                "sketch-level attachment_support is retired; attach a named coordinate system instead",
+                "retired_field",
+            )
+        if not cs_ref:
             add_error(
                 path,
-                "sketch needs coordinate_system_name, coordinate_system, or attachment_support",
+                "sketch needs coordinate_system_name",
                 "missing_plane",
             )
         if cs_ref and cs_ref not in cs_names:
@@ -1071,7 +1097,7 @@ def _is_entity_ref(value: Any, entities: set[str]) -> bool:
 
 
 def _is_point_ref(value: Any, entities: set[str]) -> bool:
-    return (
+    return value == "origin" or (
         isinstance(value, str)
         and "." in value
         and value.split(".", maxsplit=1)[0] in entities
@@ -1250,6 +1276,12 @@ def _validate_constraint_shape(  # noqa: PLR0912
             _validate_ref(entry[0], entities, f"{entry_path}[0]", add_error)
             _validate_ref(entry[1], entities, f"{entry_path}[1]", add_error)
             value = entry[2]
+            if entry[0] == entry[1]:
+                add_error(
+                    entry_path,
+                    "Distance cannot reference the same point twice; use origin and the target point for local offsets",
+                    "self_distance",
+                )
             if not _looks_like_dimension(value):
                 add_error(
                     f"{entry_path}[2]",

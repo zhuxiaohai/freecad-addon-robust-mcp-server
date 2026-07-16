@@ -324,13 +324,15 @@ class FreecadBridge(ABC):
 
     @abstractmethod
     async def create_document(
-        self, name: str, label: str | None = None
+        self, name: str, label: str | None = None, fail_if_exists: bool = True
     ) -> DocumentInfo:
         """Create a new document.
 
         Args:
             name: Internal document name (no spaces).
             label: Display label (optional, defaults to name).
+            fail_if_exists: Reject an existing internal name instead of letting
+                FreeCAD silently allocate a suffixed document name.
 
         Returns:
             DocumentInfo for the created document.

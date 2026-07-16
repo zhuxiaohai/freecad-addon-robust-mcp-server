@@ -356,12 +356,14 @@ else:
         return None
 
     async def create_document(
-        self, name: str, label: str | None = None
+        self, name: str, label: str | None = None, fail_if_exists: bool = True
     ) -> DocumentInfo:
         """Create a new document."""
         label = label or name
         result = await self.execute_python(
             f"""
+if {fail_if_exists!r} and {name!r} in FreeCAD.listDocuments():
+    raise ValueError("Document already exists: " + {name!r})
 doc = FreeCAD.newDocument({name!r})
 doc.Label = {label!r}
 _result_ = {{

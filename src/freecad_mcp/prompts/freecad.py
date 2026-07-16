@@ -700,7 +700,7 @@ works at Layer 1 when exploring constraint strategies, or calls
 
 2. create_sketch_geometry(
        sketch={"line_1": {"start":[0,0], "end":[20,0]}, ...},
-       coordinate_system_name="TopPlane",   # or inline coordinate_system dict
+       coordinate_system_name="TopPlane",
    )
    → sketch_name, geometry_count, profile, dof_remaining
    (check profile.closed is True before extruding — open_loops > 0 means
@@ -794,17 +794,20 @@ execute_extrude(sketch_name, towards=150, param_aliases={"towards": "column_heig
 set_tunable_param("column_height", 200)   # drag slider → all deps update
 ```
 
-## Selective Follow-On (Face-Attached Sketches)
+## Selective Follow-On (Named Coordinate Systems)
 
-Use `attachment_support` in `create_sketch_geometry` to make a sketch
-physically follow a face when the model recomputes:
+Attach a named coordinate system to the upstream object, then attach the
+sketch to that coordinate system:
 
 ```python
+create_coordinate_system(
+    euler_angles=[0, 0, 0], translation=[0, 0, 50],
+    name="TopPlane", attachment_support={"target": "ColumnSolid"},
+)
 create_sketch_geometry(
     sketch={"circle_1": {"center":[0,0], "radius":3}},
-    attachment_support={"near_point": [0, 0, 50]},   # resolved to TopFace
+    coordinate_system_name="TopPlane",
 )
-# Sketch follows TopFace — if column_height changes, holes stay on top
 ```
 
 ## RL Training Tips

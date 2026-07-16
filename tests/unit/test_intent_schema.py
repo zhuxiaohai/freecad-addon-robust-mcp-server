@@ -116,6 +116,16 @@ class TestResolveIntentToPlan:
         assert length_constraints[1][1]["length"] == 30.0
         assert length_constraints[2][1]["length"] == 30.0
         assert length_constraints[3][1]["length"] == 80.0
+        # A user-facing shared width must remain a real Spreadsheet alias,
+        # rather than being expanded into two unrelated internal parameters.
+        assert length_constraints[1][1]["alias"] == "width"
+        assert length_constraints[2][1]["alias"] == "width"
+        assert "width" in plan.metadata["editable_aliases"]
+        assert "arm_x_width" not in plan.metadata["editable_aliases"]
+        assert plan.metadata["design_intent"]["shared_aliases"] == [
+            "width",
+            "thickness",
+        ]
         assert plan.features[0].params["towards"] == 6.0
         assert plan.metadata["intent_spec"]["template_name"] == "l_connector"
         assert plan.metadata["assumptions"] == [

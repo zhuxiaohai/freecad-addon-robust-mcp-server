@@ -395,7 +395,9 @@ def compile_hole_array_features(
     slots: dict[str, float],
     base_body_name: str,
     group_index: int,
+    shared_width_alias: str | None = None,
 ) -> tuple[
+    list[CoordinateSystemSpec],
     list[SketchSpec],
     list[FeatureSpec],
     str,
@@ -408,9 +410,12 @@ def compile_hole_array_features(
         slots: Resolved L-connector dimension slots.
         base_body_name: Current solid name to cut from and attach sketches to.
         group_index: Index for unique sketch/tool/boolean names.
+        shared_width_alias: Optional Spreadsheet alias used when X/Y arm widths
+            intentionally share one user-facing parameter.
 
     Returns:
-        Tuple of (sketches, features, updated_base_name, editable_aliases).
+        Tuple of (coordinate_systems, sketches, features, updated_base_name,
+        editable_aliases).
 
     Raises:
         ValueError: If the array is invalid or does not fit the face.
@@ -440,16 +445,17 @@ def compile_hole_array_features(
     # entity coordinates and FabricationParams margin/pitch aliases are always
     # relative to this sketch origin (not L-global).  World position:
     # ``frame.uv_to_world(u, v)``.
+    coordinate_system = CoordinateSystemSpec(
+        euler_angles=list(frame.euler_angles),
+        translation=list(frame.origin),
+        name=frame.cs_name,
+        attachment_support={"target": base_body_name},
+        param_aliases=_face_frame_param_aliases(spec.face_id, shared_width_alias),
+    )
     sketch = SketchSpec(
         sketch=sketch_entities,
         constraints=constraints,
-        coordinate_system=CoordinateSystemSpec(
-            euler_angles=list(frame.euler_angles),
-            translation=list(frame.origin),
-            name=frame.cs_name,
-            attachment_support={"feature_name": base_body_name},
-            offset_expressions=dict(frame.offset_expressions),
-        ),
+        coordinate_system_name=frame.cs_name,
         sketch_name=sketch_name,
         attach_after_feature=base_body_name,
     )
@@ -466,7 +472,7 @@ def compile_hole_array_features(
             "opposite": float(frame.cut_depth),
         },
         param_aliases={
-            "opposite": frame.cut_depth_alias,
+            "opposite": _face_frame_cut_depth_alias(frame, shared_width_alias),
         },
         feature_name=tool_name,
     )
@@ -484,6 +490,7 @@ def compile_hole_array_features(
     )
 
     return (
+        [coordinate_system],
         [sketch],
         [extrude, boolean_feat],
         result_name,
@@ -491,22 +498,69 @@ def compile_hole_array_features(
     )
 
 
+def _face_frame_param_aliases(
+    face_id: str, shared_width_alias: str | None = None
+) -> dict[str, str]:
+    width_alias = shared_width_alias
+    if face_id == "arm_x_top":
+        return {
+            "translation.x": width_alias or "arm_y_width",
+            "translation.z": "thickness",
+        }
+    if face_id == "arm_y_top":
+        return {
+            "translation.y": width_alias or "arm_x_width",
+            "translation.z": "thickness",
+        }
+    if face_id == "inner_corner_horizontal":
+        return {
+            "translation.x": width_alias or "arm_y_width",
+            "translation.y": width_alias or "arm_x_width",
+            "translation.z": "thickness",
+        }
+    if face_id == "inner_corner_vertical":
+        return {
+            "translation.x": width_alias or "arm_y_width",
+            "translation.y": width_alias or "arm_x_width",
+        }
+    return {}
+
+
+def _face_frame_cut_depth_alias(
+    frame: FaceFrame, shared_width_alias: str | None = None
+) -> str:
+    """Return the Spreadsheet alias driving a hole-tool through depth."""
+    if shared_width_alias and frame.cut_depth_alias in {"arm_x_width", "arm_y_width"}:
+        return shared_width_alias
+    return frame.cut_depth_alias
+
+
 def compile_hole_groups(
     hole_groups: list[HoleArraySpec],
     *,
     slots: dict[str, float],
     base_body_name: str = "L_Connector_Solid",
-) -> tuple[list[SketchSpec], list[FeatureSpec], list[str], list[str]]:
+    shared_width_alias: str | None = None,
+) -> tuple[
+    list[CoordinateSystemSpec],
+    list[SketchSpec],
+    list[FeatureSpec],
+    list[str],
+    list[str],
+]:
     """Compile all hole groups into plan fragments.
 
     Args:
         hole_groups: Per-face hole specifications.
         slots: Resolved L-connector slots.
         base_body_name: Initial solid name before any hole cuts.
+        shared_width_alias: Optional Spreadsheet alias used when X/Y arm widths
+            intentionally share one user-facing parameter.
 
     Returns:
-        (sketches, features, hole_face_ids, editable_aliases)
+        (coordinate_systems, sketches, features, hole_face_ids, editable_aliases)
     """
+    all_coordinate_systems: list[CoordinateSystemSpec] = []
     all_sketches: list[SketchSpec] = []
     all_features: list[FeatureSpec] = []
     face_ids: list[str] = []
@@ -514,16 +568,20 @@ def compile_hole_groups(
 
     current_base = base_body_name
     for idx, group in enumerate(hole_groups):
-        sk_list, feat_list, new_base, group_aliases = compile_hole_array_features(
-            group,
-            slots=slots,
-            base_body_name=current_base,
-            group_index=idx,
+        cs_list, sk_list, feat_list, new_base, group_aliases = (
+            compile_hole_array_features(
+                group,
+                slots=slots,
+                base_body_name=current_base,
+                group_index=idx,
+                shared_width_alias=shared_width_alias,
+            )
         )
+        all_coordinate_systems.extend(cs_list)
         all_sketches.extend(sk_list)
         all_features.extend(feat_list)
         face_ids.append(group.face_id)
         aliases.extend(group_aliases)
         current_base = new_base
 
-    return all_sketches, all_features, face_ids, aliases
+    return all_coordinate_systems, all_sketches, all_features, face_ids, aliases

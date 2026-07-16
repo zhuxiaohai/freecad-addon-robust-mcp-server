@@ -135,7 +135,7 @@ class TestDocumentTools:
         result = await create_document()
 
         assert result["name"] == "Unnamed"
-        mock_bridge.create_document.assert_called_once_with("Unnamed", None)
+        mock_bridge.create_document.assert_called_once_with("Unnamed", None, True)
 
     @pytest.mark.asyncio
     async def test_create_document_with_name_and_label(
@@ -156,7 +156,18 @@ class TestDocumentTools:
 
         assert result["name"] == "MyPart"
         assert result["label"] == "My Part Design"
-        mock_bridge.create_document.assert_called_once_with("MyPart", "My Part Design")
+        mock_bridge.create_document.assert_called_once_with(
+            "MyPart", "My Part Design", True
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_document_rejects_non_identifier_name(
+        self, register_tools, mock_bridge
+    ):
+        create_document = register_tools["create_document"]
+        with pytest.raises(ValueError, match="Python identifier"):
+            await create_document(name="part with spaces")
+        mock_bridge.create_document.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_open_document(self, register_tools, mock_bridge):

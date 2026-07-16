@@ -10,6 +10,7 @@ from freecad_mcp.intent.schema import (
     IntentSpec,
     validate_hole_array_spec,
 )
+from freecad_mcp.tools.fabrication_schema import validate_fabrication_plan
 from freecad_mcp.tools.templates.connectors import build_l_connector_plan
 from freecad_mcp.tools.templates.face_catalog import (
     L_CONNECTOR_EXTERIOR_FACE_IDS,
@@ -179,16 +180,15 @@ class TestHolePlanCompilation:
 
         hole_sketch = plan.sketches[1]
         assert hole_sketch.sketch_name == "Holes_arm_x_top_0"
-        assert hole_sketch.attachment_support is None
-        assert hole_sketch.coordinate_system is not None
-        assert hole_sketch.coordinate_system.translation == [20.0, 0.0, 10.0]
-        assert hole_sketch.coordinate_system.attachment_support == {
-            "feature_name": "L_Connector_Solid",
-        }
-        assert hole_sketch.coordinate_system.offset_expressions == {
-            "AttachmentOffset.Base.x": "FabricationParams.arm_y_width",
-            "AttachmentOffset.Base.y": "0 mm",
-            "AttachmentOffset.Base.z": "FabricationParams.thickness",
+        assert hole_sketch.coordinate_system_name == "CS_arm_x_top"
+        hole_plane = next(
+            cs for cs in plan.coordinate_systems if cs.name == "CS_arm_x_top"
+        )
+        assert hole_plane.translation == [20.0, 0.0, 10.0]
+        assert hole_plane.attachment_support == {"target": "L_Connector_Solid"}
+        assert hole_plane.param_aliases == {
+            "translation.x": "arm_y_width",
+            "translation.z": "thickness",
         }
         assert hole_sketch.attach_after_feature == "L_Connector_Solid"
         assert "circle_1" in hole_sketch.sketch
@@ -222,6 +222,61 @@ class TestHolePlanCompilation:
         assert len(cuts) == 2
         assert cuts[0].params["base_object_name"] == "L_Connector_Solid"
         assert cuts[1].params["base_object_name"] == "L_After_Holes_arm_x_top_0"
+
+    def test_inner_side_holes_share_width_cut_depth(self) -> None:
+        """Side-face through-hole tools follow shared width aliases."""
+        groups = [
+            HoleArraySpec(
+                face_id="inner_corner_horizontal",
+                diameter=4.0,
+                margin_u=20.0,
+                margin_v=5.0,
+            ),
+            HoleArraySpec(
+                face_id="inner_corner_vertical",
+                diameter=4.0,
+                margin_u=20.0,
+                margin_v=5.0,
+            ),
+        ]
+        plan = build_l_connector_plan(
+            slots={
+                "arm_x_length": 80.0,
+                "arm_y_length": 100.0,
+                "arm_x_width": 30.0,
+                "arm_y_width": 30.0,
+                "thickness": 10.0,
+            },
+            hole_groups=groups,
+            shared_width_alias="width",
+        )
+
+        tool_aliases = {
+            f.feature_name: f.param_aliases
+            for f in plan.features
+            if (f.feature_name or "").startswith("HoleTool_")
+        }
+        plane_aliases = {
+            cs.name: cs.param_aliases
+            for cs in plan.coordinate_systems
+            if (cs.name or "").startswith("CS_inner_corner_")
+        }
+
+        assert tool_aliases == {
+            "HoleTool_inner_corner_horizontal_0": {"opposite": "width"},
+            "HoleTool_inner_corner_vertical_1": {"opposite": "width"},
+        }
+        assert plane_aliases == {
+            "CS_inner_corner_horizontal": {
+                "translation.x": "width",
+                "translation.y": "width",
+                "translation.z": "thickness",
+            },
+            "CS_inner_corner_vertical": {
+                "translation.x": "width",
+                "translation.y": "width",
+            },
+        }
 
     def test_mixed_diameters_per_face(self, base_slots: dict[str, float]) -> None:
         """Per-hole diameter list creates separate radius aliases."""
@@ -266,6 +321,8 @@ class TestHolePlanCompilation:
         plan = build_l_connector_plan(slots=base_slots, hole_groups=groups)
         assert plan.metadata["hole_group_count"] == 9
         assert len([f for f in plan.features if f.type == "boolean"]) == 9
+        validation = validate_fabrication_plan(plan.to_dict())
+        assert validation["valid"], validation["errors"]
 
 
 class TestIntentWithHoles:
@@ -298,6 +355,74 @@ class TestIntentWithHoles:
         plan = resolve_intent_to_plan(intent)
         assert plan.metadata["hole_group_count"] == 1
         assert "hole_groups" in plan.metadata["intent_spec"]
+        assert "width" in plan.metadata["editable_aliases"]
+        hole_plane = next(
+            cs for cs in plan.coordinate_systems if cs.name != "LConnectorPlane"
+        )
+        assert hole_plane.param_aliases["translation.x"] == "width"
+
+    @pytest.mark.parametrize(
+        ("arm_x_length", "arm_y_length", "width", "thickness"),
+        [
+            (50.0, 80.0, 30.0, 10.0),  # user session dimensions
+            (42.0, 47.0, 12.0, 3.0),  # compact but feasible envelope
+            (180.0, 140.0, 25.0, 18.0),  # larger asymmetric envelope
+        ],
+    )
+    def test_template_slot_matrix_is_schema_valid_and_spreadsheet_linked(
+        self,
+        arm_x_length: float,
+        arm_y_length: float,
+        width: float,
+        thickness: float,
+    ) -> None:
+        """Representative valid slots must produce a self-consistent plan.
+
+        This is intentionally a template-only contract test: it exercises
+        Intent parsing, deterministic compilation, plan-schema validation,
+        feature ordering, and the Spreadsheet-facing shared-width aliases
+        without involving an MCP response or a FreeCAD document.
+        """
+        intent = IntentSpec(
+            template_name="l_connector",
+            slots={
+                "arm_x_length": arm_x_length,
+                "arm_y_length": arm_y_length,
+                "width": width,
+                "thickness": thickness,
+            },
+            slot_bindings=["arm_x_width = width", "arm_y_width = width"],
+            hole_groups=[
+                HoleArraySpec(
+                    face_id="arm_x_top",
+                    count_u=1,
+                    count_v=1,
+                    diameter=min(6.0, width / 3.0),
+                    margin_u=width / 2.0,
+                    margin_v=width / 3.0,
+                ),
+                HoleArraySpec(
+                    face_id="arm_y_top",
+                    count_u=1,
+                    count_v=1,
+                    diameter=min(6.0, width / 3.0),
+                    margin_u=width / 3.0,
+                    margin_v=width / 2.0,
+                ),
+            ],
+        )
+        plan = resolve_intent_to_plan(intent)
+        validation = validate_fabrication_plan(plan.to_dict())
+
+        assert validation["valid"], validation["errors"]
+        assert plan.metadata["editable_aliases"].count("width") == 1
+        assert [f.feature_name for f in plan.features if f.type == "boolean"] == [
+            "L_After_Holes_arm_x_top_0",
+            "L_After_Holes_arm_y_top_1",
+        ]
+        planes = {cs.name: cs for cs in plan.coordinate_systems}
+        assert planes["CS_arm_x_top"].param_aliases["translation.x"] == "width"
+        assert planes["CS_arm_y_top"].param_aliases["translation.y"] == "width"
 
     def test_unknown_face_in_intent_raises(self) -> None:
         """Invalid face_id in hole_groups raises during validation."""
@@ -323,12 +448,12 @@ class TestCompileHoleGroups:
     ) -> None:
         """Each hole group adds a deferred sketch on the face UV plane."""
         groups = [HoleArraySpec(face_id="bottom", margin_u=30.0, margin_v=40.0)]
-        sketches, features, _face_ids, aliases = compile_hole_groups(
-            groups, slots=base_slots
+        coordinate_systems, sketches, features, _face_ids, aliases = (
+            compile_hole_groups(groups, slots=base_slots)
         )
         assert len(sketches) == 1
-        assert sketches[0].attachment_support is None
-        assert sketches[0].coordinate_system is not None
+        assert len(coordinate_systems) == 1
+        assert sketches[0].coordinate_system_name == coordinate_systems[0].name
         assert sketches[0].attach_after_feature == "L_Connector_Solid"
         assert "hole_bottom_diameter" in aliases
         assert len(features) == 2

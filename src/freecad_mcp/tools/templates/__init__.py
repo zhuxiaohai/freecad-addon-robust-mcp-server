@@ -45,8 +45,10 @@ Every template tool MUST:
 See ``freecad_mcp.intent.schema`` and ``tools/fabrication_schema.py``.
 """
 
+import json
 from collections.abc import Awaitable, Callable
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 
 def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) -> None:
@@ -155,19 +157,47 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
     async def compile_intent(
         intent: dict[str, Any] | str | None = None,
         intent_path: str | None = None,
+        output_plan_path: str | None = None,
     ) -> dict[str, object]:
         """Compile IntentSpec into an executable FabricationPlan package.
 
         Agent1 may expose this package as its handoff artifact: the model output
         remains the IntentSpec, while ``fabrication_plan`` is deterministic
-        post-processing.  ``intent`` may be a dict or JSON string;
-        ``intent_path`` may point to a UTF-8 JSON file. The package preserves
-        provenance and diagnostics for Agent2 execution/repair.
+        post-processing.  When ``output_plan_path`` is supplied, the plan is
+        written as UTF-8 JSON and omitted from the response.  Agent harnesses
+        should use this file-backed handoff and pass the same path as
+        ``plan_path`` to ``execute_fabrication_plan``; this prevents a large
+        plan from being copied through model-visible MCP text.
         """
         try:
             intent_data = load_structured_input(intent, intent_path, "intent")
             spec = IntentSpec.from_dict(intent_data)
-            return intent_registry.compile_intent_package(spec)
+            package = intent_registry.compile_intent_package(spec)
+            fabrication_plan = cast("dict[str, Any]", package["fabrication_plan"])
+            if not output_plan_path:
+                return package
+
+            plan_path = Path(output_plan_path).expanduser().resolve()
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            plan_path.write_text(
+                json.dumps(fabrication_plan, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return {
+                **{
+                    key: value
+                    for key, value in package.items()
+                    if key != "fabrication_plan"
+                },
+                "fabrication_plan_path": str(plan_path),
+                "fabrication_plan_summary": {
+                    "coordinate_system_count": len(
+                        fabrication_plan.get("coordinate_systems", [])
+                    ),
+                    "sketch_count": len(fabrication_plan.get("sketches", [])),
+                    "feature_count": len(fabrication_plan.get("features", [])),
+                },
+            }
         except Exception as exc:
             message = str(exc)
             fallback_intent = intent if isinstance(intent, dict) else {}

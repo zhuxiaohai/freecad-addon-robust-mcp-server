@@ -388,13 +388,15 @@ _result_ = {
     # =========================================================================
 
     async def create_document(
-        self, name: str, label: str | None = None
+        self, name: str, label: str | None = None, fail_if_exists: bool = True
     ) -> DocumentInfo:
         """Create a new document.
 
         Args:
             name: Internal document name (no spaces).
             label: Display label (optional, defaults to name).
+            fail_if_exists: Reject an existing internal name instead of letting
+                FreeCAD silently allocate a suffixed document name.
 
         Returns:
             DocumentInfo for the created document.
@@ -402,6 +404,8 @@ _result_ = {
         label = label or name
         result = await self.execute_python(
             f"""
+if {fail_if_exists!r} and {name!r} in FreeCAD.listDocuments():
+    raise ValueError("Document already exists: " + {name!r})
 doc = FreeCAD.newDocument({name!r})
 doc.Label = {label!r}
 _result_ = {{

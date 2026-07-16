@@ -214,6 +214,13 @@ def _build_l_connector_from_intent(intent: IntentSpec) -> FabricationPlan:
         slots=resolved,
         plane=intent.placement,
         hole_groups=intent.hole_groups or None,
+        shared_width_alias=(
+            "width"
+            if "width" in intent.slots
+            and "arm_x_width" not in intent.slots
+            and "arm_y_width" not in intent.slots
+            else None
+        ),
     )
     plan.metadata["intent_spec"] = intent.to_dict()
     plan.metadata["assumptions"] = list(intent.assumptions)

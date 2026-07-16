@@ -63,6 +63,7 @@ def _build_l_connector_profile_plan(
     *,
     slots: dict[str, float],
     plane: dict[str, Any] | None = None,
+    shared_width_alias: str | None = None,
 ) -> FabricationPlan:
     """Build the base L-profile sketch and extrude (no holes)."""
     lx = float(slots["arm_x_length"])
@@ -109,7 +110,7 @@ def _build_l_connector_profile_plan(
                 "line_2",
                 {
                     "length": wx,
-                    "alias": "arm_x_width",
+                    "alias": shared_width_alias or "arm_x_width",
                     "label": "X arm width",
                     "role": "sketch_dimension",
                     "unit": "mm",
@@ -122,7 +123,7 @@ def _build_l_connector_profile_plan(
                 "line_5",
                 {
                     "length": wy,
-                    "alias": "arm_y_width",
+                    "alias": shared_width_alias or "arm_y_width",
                     "label": "Y arm width",
                     "role": "sketch_dimension",
                     "unit": "mm",
@@ -170,15 +171,27 @@ def _build_l_connector_profile_plan(
             "domain": "welding_fixture_connector",
             "editable_aliases": [
                 "arm_x_length",
-                "arm_x_width",
-                "arm_y_width",
+                *(
+                    [shared_width_alias]
+                    if shared_width_alias
+                    else ["arm_x_width", "arm_y_width"]
+                ),
                 "arm_y_length",
                 "thickness",
             ],
             "design_intent": {
                 "preserve_aliases_by_default": [
-                    "arm_x_width",
-                    "arm_y_width",
+                    *(
+                        [shared_width_alias]
+                        if shared_width_alias
+                        else ["arm_x_width", "arm_y_width"]
+                    ),
+                    "thickness",
+                ],
+                # Reuse is deliberate: these aliases are one Spreadsheet
+                # parameter driving multiple dimensions/features.
+                "shared_aliases": [
+                    *([shared_width_alias] if shared_width_alias else []),
                     "thickness",
                 ],
                 "coupled_alias_groups": [],
@@ -199,6 +212,7 @@ def build_l_connector_plan(
     slots: dict[str, float],
     plane: dict[str, Any] | None = None,
     hole_groups: list[HoleArraySpec] | None = None,
+    shared_width_alias: str | None = None,
 ) -> FabricationPlan:
     """Build a FabricationPlan for a fully constrained L connector.
 
@@ -209,6 +223,8 @@ def build_l_connector_plan(
         plane: Optional sketch-plane placement (euler_angles, translation, name).
         hole_groups: Optional per-face rectangular hole arrays compiled after
             the base solid is created.
+        shared_width_alias: Optional Spreadsheet alias used when both arm
+            widths intentionally share one user-facing parameter.
 
     Returns:
         FabricationPlan ready for ``execute_fabrication_plan()``.
@@ -217,17 +233,23 @@ def build_l_connector_plan(
         ValueError: If required slots are missing or geometry is infeasible.
     """
     _validate_l_connector_slots(slots)
-    plan = _build_l_connector_profile_plan(slots=slots, plane=plane)
+    plan = _build_l_connector_profile_plan(
+        slots=slots, plane=plane, shared_width_alias=shared_width_alias
+    )
 
     if not hole_groups:
         return plan
 
-    hole_sketches, hole_features, face_ids, hole_aliases = compile_hole_groups(
-        hole_groups,
-        slots=slots,
-        base_body_name="L_Connector_Solid",
+    hole_coordinate_systems, hole_sketches, hole_features, face_ids, hole_aliases = (
+        compile_hole_groups(
+            hole_groups,
+            slots=slots,
+            base_body_name="L_Connector_Solid",
+            shared_width_alias=shared_width_alias,
+        )
     )
 
+    plan.coordinate_systems.extend(hole_coordinate_systems)
     plan.sketches.extend(hole_sketches)
     plan.features.extend(hole_features)
     plan.metadata["hole_face_ids"] = face_ids

@@ -6,7 +6,7 @@
 list_templates()/describe_template()  →  template contract
 validate_intent(intent)  →  structured diagnostics
 compile_intent(intent)  →  IntentSpec package with FabricationPlan
-execute_fabrication_plan(plan)  →  FreeCAD body
+execute_fabrication_plan(plan, doc_name)  →  FreeCAD body
 ```
 
 ## Key tools
@@ -26,8 +26,15 @@ execute_fabrication_plan(plan)  →  FreeCAD body
 ## IntentSpec entry point
 
 Prefer `compile_intent` with full IntentSpec (includes `hole_groups`) when
-handoff or training logs need provenance. Use `resolve_template` only when a bare
-FabricationPlan is enough.
+handoff, production trace, or training logs need provenance. The orchestrator
+should pass the returned `fabrication_plan` directly from trace/process memory
+into `execute_fabrication_plan`; do not ask an LLM to copy the large JSON. Use
+`resolve_template` only when a bare FabricationPlan is explicitly needed for
+debugging.
+
+For file-backed harnesses, `validate_intent` / `compile_intent` also accept
+`intent_path`, and `validate_fabrication_plan` / `execute_fabrication_plan`
+accept `plan_path`.
 
 Direct shortcut:
 
@@ -36,7 +43,7 @@ plan = await resolve_l_connector_template(
     slots={"arm_x_length": 50, "arm_y_length": 80, "width": 30, "thickness": 10},
     hole_groups=[{"face_id": "arm_x_top", "count_u": 2, "count_v": 2, ...}],
 )
-await execute_fabrication_plan(plan)
+await execute_fabrication_plan(plan, doc_name=doc_name)
 ```
 
 ## Capabilities resource

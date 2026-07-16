@@ -1834,9 +1834,10 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": (
                                 "Validate a FabricationPlan dict before execution. Checks "
                                 "structure, named references, feature params, sketch entity "
-                                "names, and constraint references without touching FreeCAD."
+                                "names, and constraint references without touching FreeCAD. "
+                                "Accepts plan as a dict, JSON string, or plan_path."
                             ),
-                            "key_params": ["plan"],
+                            "key_params": ["plan", "plan_path"],
                         },
                         {
                             "name": "execute_fabrication_plan",
@@ -1845,10 +1846,14 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                                 "template compiler or direct no-template agent route. Drives "
                                 "all Layer 1 primitives in order: coordinate_systems → "
                                 "sketches → features → finishes. "
+                                "Production agents should create a session-owned document "
+                                "with create_document(name=doc_name) first and pass that "
+                                "same doc_name explicitly. Accepts plan as a dict, JSON "
+                                "string, or plan_path for file-backed harness handoff. "
                                 "Returns body_name, feature_names, tunable_params, "
                                 "bounding_box, volume, and steps_completed."
                             ),
-                            "key_params": ["plan", "doc_name"],
+                            "key_params": ["plan", "plan_path", "doc_name"],
                         },
                     ],
                 },
@@ -1882,9 +1887,10 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "name": "validate_intent",
                             "description": (
                                 "Validate an IntentSpec without CAD execution and return "
-                                "structured failure attribution for repair workflows."
+                                "structured failure attribution for repair workflows. "
+                                "Accepts intent as a dict, JSON string, or intent_path."
                             ),
-                            "key_params": ["intent"],
+                            "key_params": ["intent", "intent_path"],
                         },
                         {
                             "name": "resolve_template",
@@ -1899,9 +1905,13 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "description": (
                                 "Compile an IntentSpec into a handoff package containing "
                                 "intent_spec, deterministic fabrication_plan, provenance, "
-                                "assumptions, and compile diagnostics."
+                                "assumptions, and compile diagnostics. This is the preferred "
+                                "template compilation boundary for traceable agents: write the "
+                                "fabrication_plan directly to trace/process memory, then call "
+                                "execute_fabrication_plan without model-side JSON copying. "
+                                "Accepts intent as a dict, JSON string, or intent_path."
                             ),
-                            "key_params": ["intent"],
+                            "key_params": ["intent", "intent_path"],
                         },
                         {
                             "name": "resolve_l_connector_template",

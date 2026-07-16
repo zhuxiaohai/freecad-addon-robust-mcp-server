@@ -3698,7 +3698,7 @@ except Exception as _e:
         Example:
             Fillet the top outer edge of a cylinder at z=30::
 
-                snapshot = await get_body_snapshot()
+                snapshot = await get_body_snapshot(doc_name=doc_name)
                 # Find edge near [15, 0, 30]
                 result = await feature_fillet(
                     near_points=[[15.0, 0.0, 30.0]],
@@ -4692,7 +4692,7 @@ _result_ = {{
         Example:
             Find the top outer edge of a cylinder for filleting::
 
-                snap = await get_body_snapshot()
+                snap = await get_body_snapshot(doc_name=doc_name)
                 # Find edge near z=30, r=15:
                 # snap["edge_samples"][N]["near_point"] → [15, 0, 30]
         """
@@ -4792,18 +4792,27 @@ _result_ = {{
         return _describe_schema()
 
     @mcp.tool()
-    async def validate_fabrication_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    async def validate_fabrication_plan(
+        plan: dict[str, Any] | str | None = None,
+        plan_path: str | None = None,
+    ) -> dict[str, Any]:
         """Validate a FabricationPlan before execution.
 
         This is the no-template counterpart to ``validate_intent``.  It checks
         the plan shape, references, feature parameters, sketch entity names, and
-        constraint references without executing CAD.
+        constraint references without executing CAD. ``plan`` may be a dict or
+        JSON string; ``plan_path`` may point to a UTF-8 JSON file.
         """
         from freecad_mcp.tools.fabrication_schema import (
             validate_fabrication_plan as _validate_plan,
         )
+        from freecad_mcp.tools.structured_input import load_structured_input
 
-        return _validate_plan(plan)
+        try:
+            plan_data = load_structured_input(plan, plan_path, "plan")
+        except ValueError as exc:
+            return {"valid": False, "errors": [str(exc)]}
+        return _validate_plan(plan_data)
 
     # ------------------------------------------------------------------
     # Batch — execute_fabrication_plan
@@ -4811,8 +4820,9 @@ _result_ = {{
 
     @mcp.tool()
     async def execute_fabrication_plan(  # noqa: PLR0912
-        plan: dict[str, Any],
+        plan: dict[str, Any] | str | None = None,
         doc_name: str | None = None,
+        plan_path: str | None = None,
     ) -> dict[str, Any]:
         """Execute a complete FabricationPlan by dispatching to Layer 1 primitives.
 
@@ -4830,15 +4840,22 @@ _result_ = {{
            accumulated-solid state.
         4. ``feature_fillet`` / ``feature_chamfer`` for each ``finishes`` entry.
 
-        The batch path is recommended for production automation.  For RL
-        training, call the individual primitives directly to obtain per-step
+        The batch path is recommended for production automation. Production
+        agents should first create a session-owned document with
+        ``create_document(name=doc_name)`` and then pass that same ``doc_name``
+        here; relying on the active document is only for interactive use. For
+        RL training, call the individual primitives directly to obtain per-step
         reward signals.
 
         Args:
             plan: ``FabricationPlan.to_dict()`` output — a plain dict with
                 ``coordinate_systems``, ``sketches``, ``features``, ``finishes``,
-                ``param_aliases``, and ``metadata`` keys.
-            doc_name: Target document. Uses the active document if None.
+                ``param_aliases``, and ``metadata`` keys. May also be a JSON
+                string.
+            plan_path: Optional UTF-8 JSON file containing a FabricationPlan.
+            doc_name: Target document. Uses the active document if None for
+                backward compatibility; production automation should pass this
+                explicitly.
 
         Returns:
             Dictionary with:
@@ -4872,12 +4889,16 @@ _result_ = {{
                     ],
                 }
                 plan = await resolve_template(intent)
-                result = await execute_fabrication_plan(plan)
+                doc_name = "FabricationDoc_123"
+                await create_document(name=doc_name)
+                result = await execute_fabrication_plan(plan, doc_name=doc_name)
                 # result["tunable_params"] → [{alias:"arm_length",...}]
         """
         from freecad_mcp.tools.fabrication_schema import FabricationPlan
+        from freecad_mcp.tools.structured_input import load_structured_input
 
-        fab_plan = FabricationPlan.from_dict(plan)
+        plan_data = load_structured_input(plan, plan_path, "plan")
+        fab_plan = FabricationPlan.from_dict(plan_data)
 
         feature_names: list[str] = []
         cs_map: dict[str, str] = {}  # cs spec name → FreeCAD cs_name

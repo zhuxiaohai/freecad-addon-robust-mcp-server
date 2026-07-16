@@ -58,6 +58,7 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
     """
     from freecad_mcp.intent import registry as intent_registry
     from freecad_mcp.intent.schema import IntentSpec
+    from freecad_mcp.tools.structured_input import load_structured_input
     from freecad_mcp.tools.templates.connectors import register_connector_templates
 
     register_connector_templates(mcp, get_bridge)
@@ -87,15 +88,20 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
         return intent_registry.describe_template(template_name)
 
     @mcp.tool()
-    async def validate_intent(intent: dict[str, Any]) -> dict[str, object]:
+    async def validate_intent(
+        intent: dict[str, Any] | str | None = None,
+        intent_path: str | None = None,
+    ) -> dict[str, object]:
         """Validate an IntentSpec and return structured attribution.
 
         This tool is for Agent1/repair workflows.  It does not execute CAD.  A
         valid result means the deterministic template compiler can produce a
-        FabricationPlan from the supplied IntentSpec.
+        FabricationPlan from the supplied IntentSpec. ``intent`` may be a dict
+        or JSON string; ``intent_path`` may point to a UTF-8 JSON file.
         """
         try:
-            spec = IntentSpec.from_dict(intent)
+            intent_data = load_structured_input(intent, intent_path, "intent")
+            spec = IntentSpec.from_dict(intent_data)
             intent_registry.validate_intent(spec)
         except Exception as exc:
             message = str(exc)
@@ -140,30 +146,37 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
             ... }
             >>> plan = await resolve_template(intent)
         """
-        spec = IntentSpec.from_dict(intent)
+        intent_data = load_structured_input(intent, None, "intent")
+        spec = IntentSpec.from_dict(intent_data)
         plan = intent_registry.resolve_intent_to_plan(spec)
         return plan.to_dict()
 
     @mcp.tool()
-    async def compile_intent(intent: dict[str, Any]) -> dict[str, object]:
+    async def compile_intent(
+        intent: dict[str, Any] | str | None = None,
+        intent_path: str | None = None,
+    ) -> dict[str, object]:
         """Compile IntentSpec into an executable FabricationPlan package.
 
         Agent1 may expose this package as its handoff artifact: the model output
         remains the IntentSpec, while ``fabrication_plan`` is deterministic
-        post-processing.  The package preserves provenance and diagnostics for
-        Agent2 execution/repair.
+        post-processing.  ``intent`` may be a dict or JSON string;
+        ``intent_path`` may point to a UTF-8 JSON file. The package preserves
+        provenance and diagnostics for Agent2 execution/repair.
         """
         try:
-            spec = IntentSpec.from_dict(intent)
+            intent_data = load_structured_input(intent, intent_path, "intent")
+            spec = IntentSpec.from_dict(intent_data)
             return intent_registry.compile_intent_package(spec)
         except Exception as exc:
             message = str(exc)
+            fallback_intent = intent if isinstance(intent, dict) else {}
             return {
-                "intent_spec": intent,
+                "intent_spec": fallback_intent,
                 "fabrication_plan": None,
-                "assumptions": list(intent.get("assumptions", [])),
+                "assumptions": list(fallback_intent.get("assumptions", [])),
                 "template_provenance": {
-                    "template_name": intent.get("template_name"),
+                    "template_name": fallback_intent.get("template_name"),
                     "template_version": None,
                     "compiler": "freecad_mcp.intent.registry.resolve_intent_to_plan",
                     "deterministic": True,

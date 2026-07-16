@@ -115,9 +115,13 @@ Before returning IntentSpec JSON:
 1. Present Parameter Table; confirm with user if ambiguous
 2. `list_templates()` / `describe_template("l_connector")` when template choice is uncertain
 3. `validate_intent(intent)` for structured slot/template feedback
-4. `compile_intent(intent)` → IntentSpec package with FabricationPlan
-5. `execute_fabrication_plan(package["fabrication_plan"])`
-6. `validate_document()` / `get_body_snapshot()` for verification
+4. `compile_intent(intent)` to produce the deterministic FabricationPlan
+   package and write it directly to trace/process memory.
+5. `execute_fabrication_plan(plan, doc_name=<session_doc_name>)`, passing the
+   compiled plan from memory/trace rather than asking an LLM to copy the JSON.
+   File-backed harnesses may pass `plan_path` instead of recopying the plan.
+6. `validate_document(doc_name=<session_doc_name>)` /
+   `get_body_snapshot(doc_name=<session_doc_name>)` for verification
 
 ## RL / logging
 

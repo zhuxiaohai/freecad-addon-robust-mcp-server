@@ -1,5 +1,7 @@
 """Tests for fabrication primitives (Layer 1) tool registration and behaviour."""
 
+import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -749,6 +751,70 @@ class TestFabricationTools:
         assert diagnostics[1]["bound"] is True
 
     @pytest.mark.asyncio
+    async def test_validate_fabrication_plan_accepts_json_string_and_path(
+        self, register_tools: dict, tmp_path
+    ) -> None:
+        """validate_fabrication_plan accepts dict-equivalent JSON inputs."""
+        plan: dict[str, Any] = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [],
+        }
+        from_json = await register_tools["validate_fabrication_plan"](json.dumps(plan))
+        assert from_json["valid"] is True
+
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        from_path = await register_tools["validate_fabrication_plan"](
+            plan_path=str(plan_path)
+        )
+        assert from_path["valid"] is True
+
+    @pytest.mark.asyncio
+    async def test_validate_fabrication_plan_reports_bad_json(
+        self, register_tools: dict
+    ) -> None:
+        """Invalid JSON is reported as validation feedback, not CAD execution."""
+        result = await register_tools["validate_fabrication_plan"]("{bad")
+        assert result["valid"] is False
+        assert "failed to parse plan" in result["errors"][0]
+
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_accepts_plan_path(
+        self, register_tools: dict, mock_bridge: AsyncMock, tmp_path
+    ) -> None:
+        """execute_fabrication_plan can load plan JSON directly from a file."""
+        mock_bridge.execute_python.return_value = self._success(
+            {"params": [], "spreadsheet_name": None}
+        )
+        plan: dict[str, Any] = {
+            "coordinate_systems": [],
+            "sketches": [],
+            "features": [],
+        }
+        plan_path = tmp_path / "plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+        result = await register_tools["execute_fabrication_plan"](
+            plan_path=str(plan_path),
+            doc_name="Doc",
+        )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_fabrication_plan_rejects_missing_plan_path_without_cad(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Bad plan_path fails before calling the FreeCAD bridge."""
+        with pytest.raises(ValueError, match="plan_path does not exist"):
+            await register_tools["execute_fabrication_plan"](
+                plan_path="/no/such/plan.json",
+                doc_name="Doc",
+            )
+        mock_bridge.execute_python.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_evaluate_editability_success(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
@@ -1489,6 +1555,38 @@ class TestConnectorTemplates:
         assert result["failure_attribution"] == "intent_agent_slot_or_capability"
 
     @pytest.mark.asyncio
+    async def test_validate_intent_accepts_json_string_and_path(
+        self, mock_mcp: MagicMock, tmp_path
+    ) -> None:
+        """validate_intent accepts dict-equivalent JSON inputs."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        intent = {
+            "template_name": "l_connector",
+            "slots": {
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "width": 30.0,
+            },
+        }
+
+        from_json = await mock_mcp._registered_tools["validate_intent"](
+            json.dumps(intent)
+        )
+        assert from_json["valid"] is True
+
+        intent_path = tmp_path / "intent.json"
+        intent_path.write_text(json.dumps(intent), encoding="utf-8")
+        from_path = await mock_mcp._registered_tools["validate_intent"](
+            intent_path=str(intent_path)
+        )
+        assert from_path["valid"] is True
+
+    @pytest.mark.asyncio
     async def test_compile_intent_tool_returns_handoff_package(
         self, mock_mcp: MagicMock
     ) -> None:
@@ -1516,3 +1614,50 @@ class TestConnectorTemplates:
         assert package["fabrication_plan"]["metadata"]["template"] == "l_connector"
         assert package["template_provenance"]["deterministic"] is True
         assert package["compile_diagnostics"]["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_compile_intent_accepts_json_string_and_path(
+        self, mock_mcp: MagicMock, tmp_path
+    ) -> None:
+        """compile_intent accepts JSON string and file-backed IntentSpec."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        intent = {
+            "template_name": "l_connector",
+            "slots": {
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "width": 30.0,
+            },
+        }
+
+        from_json = await mock_mcp._registered_tools["compile_intent"](
+            json.dumps(intent)
+        )
+        assert from_json["compile_diagnostics"]["ok"] is True
+
+        intent_path = tmp_path / "intent.json"
+        intent_path.write_text(json.dumps(intent), encoding="utf-8")
+        from_path = await mock_mcp._registered_tools["compile_intent"](
+            intent_path=str(intent_path)
+        )
+        assert from_path["fabrication_plan"]["metadata"]["template"] == "l_connector"
+
+    @pytest.mark.asyncio
+    async def test_compile_intent_reports_bad_path(self, mock_mcp: MagicMock) -> None:
+        """compile_intent reports file input errors as compile diagnostics."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        result = await mock_mcp._registered_tools["compile_intent"](
+            intent_path="/no/such/intent.json"
+        )
+        assert result["fabrication_plan"] is None
+        assert "intent_path does not exist" in result["compile_diagnostics"]["error"]

@@ -19,7 +19,7 @@ User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
           │
           ▼
    Layer 1 Generic Primitives
-   execute_fabrication_plan(plan)
+   execute_fabrication_plan(plan, doc_name=doc_name)
 ```
 
 Natural language parsing is **not** done in this package.  The Intent Model
@@ -31,9 +31,12 @@ During early validation, Cursor may temporarily play both roles:
 
 - **Intent Agent**: read skills/docs/template catalog, expand natural language
   into an ``IntentSpec``.
-- **Execution Agent**: call ``resolve_template`` / ``compile_intent``,
-  ``execute_fabrication_plan``, ``validate_document``, and
-  ``get_body_snapshot`` to execute and diagnose.
+- **Execution Agent**: traceable production TUI agents should call
+  ``compile_intent(intent)`` after ``validate_intent``, write the returned
+  ``fabrication_plan`` directly to trace/process memory, then call
+  ``execute_fabrication_plan`` with that plan without asking the LLM to copy the
+  JSON. Tools accept structured dicts, JSON strings, or ``intent_path`` /
+  ``plan_path`` file inputs for file-backed harness handoff.
 
 This repository still treats those as separate stages.  Production agent code
 can move to a dedicated agent repo later without changing the contracts:
@@ -201,11 +204,25 @@ intent = {
     "slot_bindings": ["arm_x_width = width", "arm_y_width = width"],
 }
 
-# 2. Deterministic template compilation
+# 2. Traceable deterministic CAD execution
+doc_name = "FabricationDoc_123"
+await create_document(name=doc_name)
+package = await compile_intent(intent)
+# The orchestrator should pass package["fabrication_plan"] directly from memory
+# or trace storage; do not ask the LLM to recopy this JSON.
+result = await execute_fabrication_plan(package["fabrication_plan"], doc_name=doc_name)
+
+# File-backed harnesses may also pass artifact paths:
+package = await compile_intent(intent_path="/path/to/intent.json")
+result = await execute_fabrication_plan(plan_path="/path/to/plan.json", doc_name=doc_name)
+```
+
+Debug / handoff workflow when the full FabricationPlan is explicitly needed:
+
+```text
 plan = await resolve_template(intent)
 
-# 3. Deterministic CAD execution
-result = await execute_fabrication_plan(plan)
+result = await execute_fabrication_plan(plan, doc_name=doc_name)
 ```
 
 For RL training on Layer 1 tool trajectories, the agent can call primitives

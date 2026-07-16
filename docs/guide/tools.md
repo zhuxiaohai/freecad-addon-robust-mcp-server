@@ -583,9 +583,9 @@ parsing happens upstream in the Intent Model — not in template tools.
 
 ### Batch Execution
 
-| Tool                       | Description                                                                                          |
-| -------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `execute_fabrication_plan` | Batch-execute a complete `FabricationPlan` dict after template or plan validation.                   |
+| Tool                       | Description                                                               |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `execute_fabrication_plan` | Batch-execute a `FabricationPlan` after validation; accepts `plan_path`.  |
 
 ### Standard Workflow Example
 
@@ -633,7 +633,7 @@ feat = await execute_extrude(geo["sketch_name"], towards=30.0,
 # combined["boolean_mode_used"] is "parametric" or "static_shape"
 
 # Step 5: Get edge midpoints for filleting
-snap = await get_body_snapshot()
+snap = await get_body_snapshot(doc_name=doc_name)
 # snap["edge_samples"] → [{near_point:[x,y,z], length:..., curve_type:...}, ...]
 
 # Step 6: Fillet by proximity

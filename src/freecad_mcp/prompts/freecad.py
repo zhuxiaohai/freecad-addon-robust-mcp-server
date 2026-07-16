@@ -731,7 +731,7 @@ works at Layer 1 when exploring constraint strategies, or calls
    (base and tool must be named explicitly; do not infer an accumulated
     solid from feature order)
 
-7. get_body_snapshot()   → edge_samples for fillet near_points
+7. get_body_snapshot(doc_name=doc_name)   → edge_samples for fillet near_points
 
 8. feature_fillet(near_points=[[10,0,30]], radius=2.0)
    → feature_name
@@ -839,8 +839,11 @@ intent = {
         }
     ],
 }
-plan = await resolve_template(intent)
-result = await execute_fabrication_plan(plan)
+package = await compile_intent(intent)
+plan = package["fabrication_plan"]
+doc_name = "FabricationDoc_123"
+await create_document(name=doc_name)
+result = await execute_fabrication_plan(plan, doc_name=doc_name)
 # → result["tunable_params"] for frontend slider panel
 # → result["bounding_box"] for downstream assembly
 ```

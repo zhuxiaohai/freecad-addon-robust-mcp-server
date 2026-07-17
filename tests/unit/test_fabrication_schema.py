@@ -9,7 +9,6 @@ from freecad_mcp.tools.fabrication_schema import (
     FinishSpec,
     SketchSpec,
     block_with_corner_hole_example,
-    describe_fabrication_plan_schema,
     minimal_fabrication_plan_example,
     validate_fabrication_plan,
 )
@@ -266,44 +265,6 @@ class TestFabricationPlan:
         assert plan2.finishes[0].type == "fillet"
 
         assert plan2.metadata["material"] == "aluminium"
-
-    def test_describe_fabrication_plan_schema_is_agent_readable(self) -> None:
-        """Schema description exposes examples and primitive contracts."""
-        schema = describe_fabrication_plan_schema()
-
-        assert schema["schema_name"] == "FabricationPlan"
-        assert "coordinate_systems" in schema["top_level_fields"]
-        assert "line_N" in schema["sketch_entity_conventions"]
-        assert "extrude" in schema["feature_spec"]["types"]
-        assert "Distance" in schema["constraint_entry_formats"]
-        assert "vertical" in schema["distance_semantics"]
-        assert schema["examples"][0]["features"][0]["type"] == "extrude"
-        assert "parametric_linkage" in schema
-        assert schema["parametric_linkage"]["extrude_feature_example"][
-            "param_aliases"
-        ] == {"towards": "thickness"}
-        assert "diameter_note" in schema["parametric_linkage"]
-        assert "expression" not in schema["parametric_linkage"]["diameter_example"][1]
-        assert schema["schema_source_policy"]["unique_source"].startswith("MCP")
-        assert schema["handoff_policy"]["artifact_bridge_tools"] is False
-        assert any(
-            route.startswith("execute_fabrication_plan")
-            for route in schema["recommended_routes"]["template"]
-        )
-        assert schema["plan_levels"]["L3"].startswith("FabricationPlan")
-        assert schema["special_ref_policy"]["allowed_special_point_refs"] == ["origin"]
-        assert schema["special_ref_policy"]["disallowed_axis_tokens"] == [
-            "x_axis",
-            "y_axis",
-            "z_axis",
-        ]
-        length_entries = schema["constraint_entry_formats"]["Length"]
-        assert length_entries[1][1]["alias"] == "base_length"
-        diameter_entries = schema["constraint_entry_formats"]["Diameter"]
-        assert diameter_entries[1][1]["alias"] == "hole_diameter"
-        assert "expression" not in diameter_entries[1][1]
-        assert schema["feature_spec"]["revolve"]["param_aliases_note"]
-        assert schema["feature_spec"]["helix"]["param_aliases_note"]
 
     def test_validate_fabrication_plan_accepts_minimal_example(self) -> None:
         """The published minimal example validates successfully."""

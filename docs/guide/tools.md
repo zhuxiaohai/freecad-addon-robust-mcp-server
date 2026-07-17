@@ -574,12 +574,13 @@ parsing happens upstream in the Intent Model — not in template tools.
 | ------------------- | ---------------------------------------------------------------------------------------------------- |
 | `get_body_snapshot` | Get bounding box, volume, feature list, and `edge_samples` of a PartDesign Body for fillet/chamfer.  |
 
-### FabricationPlan Contract
+### PrimitivePlan Contract
 
-| Tool                               | Description                                                                                 |
-| ---------------------------------- | ------------------------------------------------------------------------------------------- |
-| `describe_fabrication_plan_schema` | Describe the agent-facing `FabricationPlan` contract for no-template workflows.             |
-| `validate_fabrication_plan`        | Validate a `FabricationPlan` before execution without touching FreeCAD.                     |
+| Tool                             | Description                                                                                   |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| `describe_primitive_plan_schema` | Describe the agent-facing primitive tool plan contract for no-template workflows.             |
+| `validate_primitive_plan`        | Validate a primitive plan envelope against known tool names and complete args where present.  |
+| `validate_fabrication_plan`      | Validate a deterministic `FabricationPlan` batch input before execution without touching CAD. |
 
 ### Batch Execution
 

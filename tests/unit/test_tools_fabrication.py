@@ -87,11 +87,108 @@ class TestFabricationTools:
             "set_tunable_param",
             "evaluate_editability",
             "get_body_snapshot",
-            "describe_fabrication_plan_schema",
+            "describe_primitive_plan_schema",
+            "validate_primitive_plan",
             "validate_fabrication_plan",
             "execute_fabrication_plan",
         }
         assert set(register_tools.keys()) == expected
+
+    @pytest.mark.asyncio
+    async def test_describe_primitive_plan_schema_uses_tool_signatures(
+        self, register_tools: dict
+    ) -> None:
+        """Primitive schema discovery is derived from registered tool signatures."""
+        result = await register_tools["describe_primitive_plan_schema"]()
+
+        assert result["schema_name"] == "PrimitivePlan"
+        tools = result["primitive_tools"]
+        assert "create_coordinate_system" in tools
+        assert "execute_extrude" in tools
+        assert tools["create_sketch_geometry"]["argument_examples"]
+        assert tools["apply_sketch_constraints"]["argument_examples"]
+        assert "block_with_through_hole" in result["workflow_recipes"]
+        cs_schema = tools["create_coordinate_system"]["args_schema"]
+        assert cs_schema["source"] == "python_function_signature"
+        assert cs_schema["required"] == ["euler_angles", "translation"]
+        assert cs_schema["properties"]["name"]["nullable"] is True
+        extrude_schema = tools["execute_extrude"]["args_schema"]
+        assert "sketch_name" in extrude_schema["required"]
+        assert "towards" in extrude_schema["properties"]
+        assert result["guidance"]["special_refs"]["allowed_special_point_refs"] == [
+            "origin"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_validate_primitive_plan_checks_known_tools_and_complete_args(
+        self, register_tools: dict
+    ) -> None:
+        """PrimitivePlan validation checks tool names and complete step args."""
+        valid_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L3",
+                "steps": [
+                    {
+                        "tool_name": "create_coordinate_system",
+                        "args": {
+                            "euler_angles": [0.0, 0.0, 0.0],
+                            "translation": [0.0, 0.0, 0.0],
+                        },
+                    }
+                ],
+            }
+        )
+        assert valid_result["valid"] is True
+
+        partial_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L2",
+                "steps": [
+                    {
+                        "tool_name": "create_sketch_geometry",
+                        "args": {"sketch_name": "BlockProfile"},
+                        "missing_args": ["sketch", "coordinate_system_name"],
+                    }
+                ],
+            }
+        )
+        assert partial_result["valid"] is True
+
+        invalid_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L3",
+                "steps": [
+                    {
+                        "tool_name": "create_coordinate_system",
+                        "args": {"euler_angles": [0.0, 0.0, 0.0]},
+                    },
+                    {"tool_name": "unknown_tool", "args": {}},
+                ],
+            }
+        )
+        assert invalid_result["valid"] is False
+        messages = "\n".join(error["message"] for error in invalid_result["errors"])
+        assert "required arg 'translation' is missing" in messages
+        assert "unknown tool 'unknown_tool'" in messages
+
+        internal_constraint_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L3",
+                "steps": [
+                    {
+                        "tool_name": "apply_sketch_constraints",
+                        "args": {
+                            "sketch_name": "Sketch",
+                            "constraints": {
+                                "c1": {"type": "Horizontal", "references": [0]}
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+        assert internal_constraint_result["valid"] is False
+        assert "FreeCAD internal" in internal_constraint_result["errors"][0]["message"]
 
     # ------------------------------------------------------------------
     # create_coordinate_system

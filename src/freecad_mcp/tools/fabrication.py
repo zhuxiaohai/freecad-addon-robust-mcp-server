@@ -5,12 +5,17 @@ the HistCAD middleware paradigm.  The LLM or RL agent specifies geometry and
 constraints using kernel-independent JSON schemas; the adapter translates
 these deterministically to FreeCAD API calls.
 
-Two-layer architecture
-----------------------
+Execution contracts
+-------------------
 
-Layer 2 (tools/templates/) converts domain-specific user intent into a
-``FabricationPlan``.  Layer 1 (this module) executes it.  The contract
-between layers is the ``FabricationPlan`` schema (fabrication_schema.py).
+``FabricationPlan`` is the deterministic batch DSL used by templates,
+converters, and explicit full-plan callers.  ``execute_fabrication_plan``
+validates it, dispatches the fixed primitive sequence, and returns structured
+diagnostics.
+
+Agentic no-template callers use ``describe_primitive_plan_schema`` instead.
+That contract is derived from the real primitive tool function signatures, so
+primitive tool args have a single maintenance source.
 
 Tool groups
 -----------
@@ -81,8 +86,10 @@ Angle, Diameter, Radius, MajorRadius, MinorRadius, Length, Distance.
 from __future__ import annotations
 
 import contextlib
+import inspect
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import UnionType
+from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from freecad_mcp.tools.coordinate_system import validate_coordinate_system_payload
 from freecad_mcp.tools.sketch_editability import (
@@ -101,6 +108,366 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _SPREADSHEET_NAME = "FabricationParams"
+
+_PRIMITIVE_OUTPUT_EXPORTS: dict[str, list[str]] = {
+    "create_coordinate_system": ["cs_name", "cs_internal_name", "label", "placement"],
+    "create_sketch_geometry": [
+        "sketch_name",
+        "cs_name",
+        "geometry_count",
+        "profile",
+        "fully_constrained",
+    ],
+    "apply_sketch_constraints": [
+        "sketch_name",
+        "constraint_catalog",
+        "constraint_catalog_summary",
+        "bound_params",
+    ],
+    "execute_extrude": ["body_name", "feature_name", "object_name", "bound_params"],
+    "execute_boolean": ["feature_name", "object_name"],
+    "execute_revolve": ["body_name", "feature_name", "object_name", "bound_params"],
+    "execute_helix": ["body_name", "feature_name", "object_name", "bound_params"],
+    "feature_fillet": ["feature_name", "object_name"],
+    "feature_chamfer": ["feature_name", "object_name"],
+    "get_body_snapshot": ["bounding_box", "volume", "features"],
+}
+
+_PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
+    "create_coordinate_system": [
+        {
+            "name": "base_xy",
+            "args": {
+                "name": "BaseXY",
+                "euler_angles": [0.0, 0.0, 0.0],
+                "translation": [0.0, 0.0, 0.0],
+            },
+        }
+    ],
+    "create_sketch_geometry": [
+        {
+            "name": "rectangle_40_by_20",
+            "args": {
+                "sketch_name": "BlockProfile",
+                "coordinate_system_name": "BaseXY",
+                "sketch": {
+                    "line_1": {"start": [0.0, 0.0], "end": [40.0, 0.0]},
+                    "line_2": {"start": [40.0, 0.0], "end": [40.0, 20.0]},
+                    "line_3": {"start": [40.0, 20.0], "end": [0.0, 20.0]},
+                    "line_4": {"start": [0.0, 20.0], "end": [0.0, 0.0]},
+                },
+            },
+        },
+        {
+            "name": "arc_uses_middle_point",
+            "args": {
+                "sketch_name": "ArcProfile",
+                "coordinate_system_name": "BaseXY",
+                "sketch": {
+                    "arc_1": {
+                        "start": [0.0, 10.0],
+                        "middle": [7.0, 7.0],
+                        "end": [10.0, 0.0],
+                    }
+                },
+            },
+            "notes": (
+                "The canonical arc field is middle. Do not use mid in generated "
+                "primitive args."
+            ),
+        },
+        {
+            "name": "circle_near_origin",
+            "args": {
+                "sketch_name": "HoleProfile",
+                "coordinate_system_name": "BaseXY",
+                "sketch": {"circle_1": {"center": [8.0, 8.0], "radius": 2.5}},
+            },
+        },
+    ],
+    "apply_sketch_constraints": [
+        {
+            "name": "parametric_rectangle_constraints",
+            "args": {
+                "sketch_name": "BlockProfile",
+                "constraints": {
+                    "Coincident": [
+                        ["line_1.end", "line_2.start"],
+                        ["line_2.end", "line_3.start"],
+                        ["line_3.end", "line_4.start"],
+                        ["line_4.end", "line_1.start"],
+                    ],
+                    "Horizontal": ["line_1", "line_3"],
+                    "Vertical": ["line_2", "line_4"],
+                    "Fix": ["line_1.start"],
+                    "Length": [
+                        [
+                            "line_1",
+                            {
+                                "length": "40 mm",
+                                "alias": "block_length",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "line_2",
+                            {
+                                "length": "20 mm",
+                                "alias": "block_width",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                },
+            },
+        },
+        {
+            "name": "hole_origin_offset_constraints",
+            "args": {
+                "sketch_name": "HoleProfile",
+                "constraints": {
+                    "Diameter": [
+                        [
+                            "circle_1",
+                            {
+                                "diameter": "5 mm",
+                                "alias": "hole_diameter",
+                                "role": "sketch_dimension",
+                            },
+                        ]
+                    ],
+                    "Distance": [
+                        [
+                            "origin",
+                            "circle_1.center",
+                            {
+                                "length": "8 mm",
+                                "direction": "HORIZONTAL",
+                                "alias": "hole_offset_x",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "origin",
+                            "circle_1.center",
+                            {
+                                "length": "8 mm",
+                                "direction": "VERTICAL",
+                                "alias": "hole_offset_y",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                },
+            },
+        },
+    ],
+    "execute_extrude": [
+        {
+            "name": "parametric_block_extrude",
+            "args": {
+                "sketch_name": "BlockProfile",
+                "towards": 10.0,
+                "opposite": 0.0,
+                "feature_name": "BlockSolid",
+                "param_aliases": {"towards": "block_height"},
+            },
+        },
+        {
+            "name": "through_hole_tool_extrude",
+            "args": {
+                "sketch_name": "HoleProfile",
+                "towards": 12.0,
+                "opposite": 1.0,
+                "feature_name": "HoleTool",
+            },
+        },
+    ],
+    "execute_boolean": [
+        {
+            "name": "cut_hole_tool_from_block",
+            "args": {
+                "base_object_name": "BlockSolid",
+                "tool_object_name": "HoleTool",
+                "operation": "Cut",
+                "result_name": "BlockWithHole",
+            },
+        }
+    ],
+}
+
+
+def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
+    if annotation is inspect.Signature.empty or annotation is Any:
+        return {"type": "any"}
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin in {UnionType, Union}:
+        non_null = [arg for arg in args if arg is not type(None)]
+        schema = (
+            _annotation_to_schema(non_null[0])
+            if len(non_null) == 1
+            else {"anyOf": [_annotation_to_schema(arg) for arg in non_null]}
+        )
+        if len(non_null) != len(args):
+            schema["nullable"] = True
+        return schema
+    if origin is list:
+        return {
+            "type": "array",
+            "items": _annotation_to_schema(args[0]) if args else {"type": "any"},
+        }
+    if origin is dict:
+        return {
+            "type": "object",
+            "additionalProperties": (
+                _annotation_to_schema(args[1]) if len(args) == 2 else {"type": "any"}
+            ),
+        }
+    mapping = {
+        str: "string",
+        int: "integer",
+        float: "number",
+        bool: "boolean",
+        dict: "object",
+        list: "array",
+    }
+    if annotation in mapping:
+        return {"type": mapping[annotation]}
+    return {"type": "any", "python_type": str(annotation)}
+
+
+def _tool_args_schema(func: Any) -> dict[str, Any]:
+    signature = inspect.signature(func)
+    type_hints = get_type_hints(func)
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, parameter in signature.parameters.items():
+        if name in {"self", "args", "kwargs"}:
+            continue
+        properties[name] = _annotation_to_schema(
+            type_hints.get(name, parameter.annotation)
+        )
+        if parameter.default is inspect.Signature.empty:
+            required.append(name)
+        else:
+            properties[name]["default"] = parameter.default
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+        "source": "python_function_signature",
+    }
+
+
+def _first_doc_line(func: Any) -> str:
+    doc = inspect.getdoc(func)
+    if not doc:
+        return ""
+    return doc.splitlines()[0]
+
+
+def _primitive_tool_catalog(tool_functions: dict[str, Any]) -> dict[str, Any]:
+    return {
+        name: {
+            "tool_name": name,
+            "args_schema": _tool_args_schema(func),
+            "output_exports": _PRIMITIVE_OUTPUT_EXPORTS.get(name, []),
+            "argument_examples": _PRIMITIVE_ARGUMENT_EXAMPLES.get(name, []),
+            "doc": _first_doc_line(func),
+        }
+        for name, func in tool_functions.items()
+    }
+
+
+def _validate_primitive_plan_payload(
+    plan: Any,
+    tool_functions: dict[str, Any],
+) -> dict[str, Any]:
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    if not isinstance(plan, dict):
+        return {
+            "valid": False,
+            "errors": [{"path": "$", "message": "plan must be an object"}],
+            "warnings": [],
+        }
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        errors.append({"path": "$.steps", "message": "steps must be a list"})
+        steps = []
+    for index, step in enumerate(steps):
+        path = f"$.steps[{index}]"
+        if not isinstance(step, dict):
+            errors.append({"path": path, "message": "step must be an object"})
+            continue
+        tool_name = step.get("tool_name") or step.get("primitive_tool")
+        if tool_name is None:
+            warnings.append(
+                {
+                    "path": f"{path}.tool_name",
+                    "message": "tool_name is missing; acceptable for L0/L1 partial plans",
+                }
+            )
+            continue
+        if tool_name not in tool_functions:
+            errors.append(
+                {"path": f"{path}.tool_name", "message": f"unknown tool {tool_name!r}"}
+            )
+            continue
+        args = step.get("args", {})
+        if not isinstance(args, dict):
+            errors.append({"path": f"{path}.args", "message": "args must be an object"})
+            continue
+        if step.get("missing_args"):
+            continue
+        schema = _tool_args_schema(tool_functions[tool_name])
+        for required in schema["required"]:
+            if required not in args:
+                errors.append(
+                    {
+                        "path": f"{path}.args.{required}",
+                        "message": f"required arg {required!r} is missing",
+                    }
+                )
+        if tool_name == "apply_sketch_constraints":
+            _validate_primitive_constraint_shape(
+                args.get("constraints", {}),
+                f"{path}.args.constraints",
+                errors,
+            )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "summary": (
+            "PrimitivePlan validation passed."
+            if not errors
+            else f"PrimitivePlan validation failed with {len(errors)} error(s)."
+        ),
+    }
+
+
+def _validate_primitive_constraint_shape(
+    constraints: Any,
+    path: str,
+    errors: list[dict[str, str]],
+) -> None:
+    if not isinstance(constraints, dict):
+        errors.append({"path": path, "message": "constraints must be an object"})
+        return
+    for constraint_name, entries in constraints.items():
+        if isinstance(entries, dict) and {"type", "references"} <= set(entries):
+            errors.append(
+                {
+                    "path": f"{path}.{constraint_name}",
+                    "message": (
+                        "FreeCAD internal constraint objects are not accepted; "
+                        "use MCP adapter format grouped by constraint type"
+                    ),
+                }
+            )
 
 
 def _build_editability_validation_code(
@@ -247,6 +614,15 @@ def _rebuild_arc_endpoint_map(sketch_obj, idx_map, entity_dict):
     return _rebuild_endpoint_map(sketch_obj, idx_map, entity_dict)
 
 
+def _arc_middle(spec: dict[str, Any]) -> list[float]:
+    middle = spec.get("middle")
+    if middle is None:
+        middle = spec.get("mid")
+    if middle is None:
+        raise KeyError("middle")
+    return middle
+
+
 def _build_sketch_entities(sketch_obj, entity_dict):
     # Add HistCAD geometry entities to a Sketcher object.
     # Returns (entity_index_map, endpoint_map).
@@ -270,7 +646,8 @@ def _build_sketch_entities(sketch_obj, entity_dict):
             )
         elif name.startswith("arc_"):
             s = FreeCAD.Vector(spec["start"][0],  spec["start"][1],  0)
-            m = FreeCAD.Vector(spec["middle"][0], spec["middle"][1], 0)
+            middle = _arc_middle(spec)
+            m = FreeCAD.Vector(middle[0], middle[1], 0)
             e = FreeCAD.Vector(spec["end"][0],    spec["end"][1],    0)
             geo = Part.ArcOfCircle(s, m, e)
         elif name.startswith("ellipse_"):
@@ -1177,8 +1554,9 @@ def register_fabrication_tools(
     - Group F — Parametric Control: ``list_tunable_params``,
       ``set_tunable_param``
     - Group G — Observation: ``get_body_snapshot``
-    - Plan Contract: ``describe_fabrication_plan_schema``,
-      ``validate_fabrication_plan``
+    - Agentic Plan Contract: ``describe_primitive_plan_schema``,
+      ``validate_primitive_plan``
+    - Deterministic Batch Contract: ``validate_fabrication_plan``
     - Batch: ``execute_fabrication_plan``
 
     Args:
@@ -2735,7 +3113,10 @@ try:
                         FreeCAD.Vector(_sp["end"][0],   _sp["end"][1],   0)))
                 elif _nm.startswith("arc_"):
                     _s2 = FreeCAD.Vector(_sp["start"][0],  _sp["start"][1],  0)
-                    _m2 = FreeCAD.Vector(_sp["middle"][0], _sp["middle"][1], 0)
+                    _mid = _sp.get("middle", _sp.get("mid"))
+                    if _mid is None:
+                        raise KeyError("middle")
+                    _m2 = FreeCAD.Vector(_mid[0], _mid[1], 0)
                     _e2 = FreeCAD.Vector(_sp["end"][0],    _sp["end"][1],    0)
                     _ee.append(_PM.Edge(_PM.ArcOfCircle(_s2, _m2, _e2)))
                 elif _nm.startswith("circle_"):
@@ -4814,22 +5195,336 @@ _result_ = {{
         raise ValueError(result.error_traceback or "Failed to get body snapshot")
 
     # ------------------------------------------------------------------
-    # Plan Contract — schema discovery and validation
+    # Agentic primitive plan discovery and deterministic batch validation
     # ------------------------------------------------------------------
 
     @mcp.tool()
-    async def describe_fabrication_plan_schema() -> dict[str, Any]:
-        """Describe the FabricationPlan contract for no-template agents.
+    async def describe_primitive_plan_schema() -> dict[str, Any]:
+        """Describe the primitive-tool plan contract for agentic no-template runs.
 
-        Agents should call this before generating a direct FabricationPlan when
-        no registered domain template fits the user request.  This tool is
+        The returned primitive args schemas are derived from the actual Python
+        function signatures of the registered primitive MCP tools.  This tool is
         deterministic and does not touch FreeCAD.
         """
-        from freecad_mcp.tools.fabrication_schema import (
-            describe_fabrication_plan_schema as _describe_schema,
-        )
+        primitive_tools = {
+            "create_coordinate_system": create_coordinate_system,
+            "create_sketch_geometry": create_sketch_geometry,
+            "apply_sketch_constraints": apply_sketch_constraints,
+            "execute_extrude": execute_extrude,
+            "execute_boolean": execute_boolean,
+            "execute_revolve": execute_revolve,
+            "execute_helix": execute_helix,
+            "feature_fillet": feature_fillet,
+            "feature_chamfer": feature_chamfer,
+            "get_body_snapshot": get_body_snapshot,
+        }
+        return {
+            "schema_name": "PrimitivePlan",
+            "version": "v1",
+            "deterministic": True,
+            "schema_source_policy": {
+                "unique_source": "Primitive MCP tool function signatures are the args schema source.",
+                "agent_rule": (
+                    "Agents may maintain graph state, trace, artifacts, selectors, "
+                    "and a PrimitivePlan envelope, but must not maintain a second "
+                    "primitive args schema."
+                ),
+            },
+            "plan_levels": {
+                "L0": "rough intent; route and high-level decomposition may still be missing",
+                "L1": "workflow-level steps such as create document and observe result",
+                "L2": "primitive tool sequence with some missing args/selectors",
+                "L3": "primitive tool sequence with concrete tool_name and args/selectors",
+            },
+            "primitive_plan_envelope": {
+                "required": ["plan_level", "steps"],
+                "step_fields": {
+                    "step_id": "stable optional id",
+                    "tool_name": "primitive MCP tool name; may be omitted for L0/L1 partial plans",
+                    "args": "ordinary JSON args for tool_name; complete for L3 steps",
+                    "selectors": "agent-side structured selectors resolved before MCP call",
+                    "missing_args": "args that the agent must infer before execution",
+                    "diagnostics": "planner assumptions and warnings",
+                },
+            },
+            "primitive_tools": _primitive_tool_catalog(primitive_tools),
+            "primitive_plan_examples": [
+                {
+                    "name": "L0 rough intent",
+                    "plan_level": "L0",
+                    "description": "Use when the user intent is too rough to pick CAD operations yet.",
+                    "example": {
+                        "plan_level": "L0",
+                        "steps": [],
+                        "missing_args": ["primitive_plan_steps"],
+                        "diagnostics": {
+                            "intent": "Need to infer shape, dimensions, and operation sequence."
+                        },
+                    },
+                },
+                {
+                    "name": "L1 workflow scaffold",
+                    "plan_level": "L1",
+                    "description": "Use when only high-level workflow is known.",
+                    "example": {
+                        "plan_level": "L1",
+                        "diagnostics": {
+                            "harness_note": "The agent harness creates the session document before primitive plan execution."
+                        },
+                        "steps": [
+                            {
+                                "step_id": "create_base_frame",
+                                "primitive_tool": "create_coordinate_system",
+                                "missing_args": ["euler_angles", "translation"],
+                            },
+                            {
+                                "step_id": "observe_after_build",
+                                "primitive_tool": "get_body_snapshot",
+                                "missing_args": ["doc_name", "body_name"],
+                            },
+                        ],
+                    },
+                },
+                {
+                    "name": "L2 block with through hole scaffold",
+                    "plan_level": "L2",
+                    "description": (
+                        "Useful for a simple block-hole prompt.  The planner gives "
+                        "the operation sequence and intent; the agent resolves exact "
+                        "tool args step by step during execution."
+                    ),
+                    "example": {
+                        "plan_level": "L2",
+                        "steps": [
+                            {
+                                "step_id": "base_cs",
+                                "primitive_tool": "create_coordinate_system",
+                                "args": {
+                                    "name": "BaseXY",
+                                    "euler_angles": [0.0, 0.0, 0.0],
+                                    "translation": [0.0, 0.0, 0.0],
+                                },
+                            },
+                            {
+                                "step_id": "block_profile",
+                                "primitive_tool": "create_sketch_geometry",
+                                "args": {
+                                    "sketch_name": "BlockProfile",
+                                    "coordinate_system_name": "BaseXY",
+                                },
+                                "missing_args": ["sketch"],
+                                "diagnostics": {
+                                    "intent": "Sketch a rectangle 40 mm by 20 mm on BaseXY."
+                                },
+                            },
+                            {
+                                "step_id": "block_constraints",
+                                "primitive_tool": "apply_sketch_constraints",
+                                "args": {"sketch_name": "BlockProfile"},
+                                "missing_args": ["constraints"],
+                                "diagnostics": {
+                                    "intent": (
+                                        "Constrain rectangle closed, horizontal/vertical, "
+                                        "with length aliases block_length and block_width."
+                                    )
+                                },
+                            },
+                            {
+                                "step_id": "block_extrude",
+                                "primitive_tool": "execute_extrude",
+                                "args": {
+                                    "sketch_name": "BlockProfile",
+                                    "towards": 10.0,
+                                    "opposite": 0.0,
+                                    "feature_name": "BlockSolid",
+                                    "param_aliases": {"towards": "block_height"},
+                                },
+                            },
+                            {
+                                "step_id": "hole_profile",
+                                "primitive_tool": "create_sketch_geometry",
+                                "args": {
+                                    "sketch_name": "HoleProfile",
+                                    "coordinate_system_name": "BaseXY",
+                                },
+                                "missing_args": ["sketch"],
+                                "diagnostics": {
+                                    "intent": (
+                                        "Sketch a circle near one corner; diameter is 5 mm. "
+                                        "Use origin offsets in constraints rather than axis tokens."
+                                    )
+                                },
+                            },
+                            {
+                                "step_id": "hole_constraints",
+                                "primitive_tool": "apply_sketch_constraints",
+                                "args": {"sketch_name": "HoleProfile"},
+                                "missing_args": ["constraints"],
+                                "diagnostics": {
+                                    "intent": (
+                                        "Use Diameter alias hole_diameter and Distance "
+                                        "from origin to circle_1.center with HORIZONTAL "
+                                        "and VERTICAL offsets."
+                                    )
+                                },
+                            },
+                            {
+                                "step_id": "hole_tool",
+                                "primitive_tool": "execute_extrude",
+                                "args": {
+                                    "sketch_name": "HoleProfile",
+                                    "towards": 12.0,
+                                    "opposite": 1.0,
+                                    "feature_name": "HoleTool",
+                                },
+                            },
+                            {
+                                "step_id": "cut_hole",
+                                "primitive_tool": "execute_boolean",
+                                "args": {
+                                    "base_object_name": "BlockSolid",
+                                    "tool_object_name": "HoleTool",
+                                    "operation": "Cut",
+                                    "result_name": "BlockWithHole",
+                                },
+                            },
+                        ],
+                    },
+                },
+                {
+                    "name": "L3 minimal rectangle extrude",
+                    "plan_level": "L3",
+                    "description": "All primitive args are concrete and can be called directly.",
+                    "example": {
+                        "plan_level": "L3",
+                        "steps": [
+                            {
+                                "step_id": "cs",
+                                "primitive_tool": "create_coordinate_system",
+                                "args": {
+                                    "name": "BaseXY",
+                                    "euler_angles": [0.0, 0.0, 0.0],
+                                    "translation": [0.0, 0.0, 0.0],
+                                },
+                            },
+                            {
+                                "step_id": "sketch",
+                                "primitive_tool": "create_sketch_geometry",
+                                "args": {
+                                    "sketch_name": "RectProfile",
+                                    "coordinate_system_name": "BaseXY",
+                                    "sketch": {
+                                        "line_1": {
+                                            "start": [0.0, 0.0],
+                                            "end": [40.0, 0.0],
+                                        },
+                                        "line_2": {
+                                            "start": [40.0, 0.0],
+                                            "end": [40.0, 20.0],
+                                        },
+                                        "line_3": {
+                                            "start": [40.0, 20.0],
+                                            "end": [0.0, 20.0],
+                                        },
+                                        "line_4": {
+                                            "start": [0.0, 20.0],
+                                            "end": [0.0, 0.0],
+                                        },
+                                    },
+                                },
+                            },
+                            {
+                                "step_id": "extrude",
+                                "primitive_tool": "execute_extrude",
+                                "args": {
+                                    "sketch_name": "RectProfile",
+                                    "towards": 10.0,
+                                    "opposite": 0.0,
+                                    "feature_name": "BlockSolid",
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+            "workflow_recipes": {
+                "block_with_through_hole": [
+                    "create_coordinate_system for the base sketch plane",
+                    "create_sketch_geometry for the rectangular block profile",
+                    "apply_sketch_constraints for rectangle closure and parametric length/width",
+                    "execute_extrude for the base solid with a height alias",
+                    "create_sketch_geometry for a circular hole tool profile",
+                    "apply_sketch_constraints using Diameter plus origin Distance HORIZONTAL/VERTICAL offsets",
+                    "execute_extrude for the hole tool body through the block",
+                    "execute_boolean with operation='Cut'",
+                ],
+                "boolean_intersect": [
+                    "create the base body",
+                    "create the intersecting tool as its own body",
+                    "call execute_boolean with operation='Intersect'",
+                ],
+                "histcad_arc_geometry": [
+                    "For arc_N sketch entities, use {'start': [x, y], 'middle': [x, y], 'end': [x, y]}",
+                    "The point described as 'via' in NLT maps to the canonical 'middle' field",
+                    "Do not use 'mid' in generated primitive args",
+                ],
+                "local_sketch_offsets": [
+                    "Use only 'origin' as the special point reference",
+                    "Use Distance with direction HORIZONTAL for local X",
+                    "Use Distance with direction VERTICAL for local Y",
+                    "Do not emit x_axis, y_axis, or z_axis refs",
+                ],
+            },
+            "guidance": {
+                "no_artifact_bridge_tools": True,
+                "ordinary_json_args": True,
+                "special_refs": {
+                    "allowed_special_point_refs": ["origin"],
+                    "disallowed_axis_tokens": ["x_axis", "y_axis", "z_axis"],
+                    "local_offset_rule": (
+                        "Use Distance from origin to a sketch point with direction "
+                        "HORIZONTAL or VERTICAL for local X/Y offsets."
+                    ),
+                },
+                "boolean_intersect_rule": (
+                    "For Intersect, create the tool as its own NewBody feature, "
+                    "then call execute_boolean with base_object_name, "
+                    "tool_object_name, and operation='Intersect'."
+                ),
+                "sketch_geometry_rule": {
+                    "line_N": {"start": "[x, y]", "end": "[x, y]"},
+                    "circle_N": {"center": "[x, y]", "radius": "number"},
+                    "arc_N": {
+                        "start": "[x, y]",
+                        "middle": "[x, y]",
+                        "end": "[x, y]",
+                        "note": "canonical field is middle; NLT 'via' point maps here",
+                    },
+                },
+                "batch_service_boundary": (
+                    "execute_fabrication_plan is a deterministic FabricationPlan "
+                    "batch service for templates/converters, not the default "
+                    "agentic no-template route."
+                ),
+            },
+        }
 
-        return _describe_schema()
+    @mcp.tool()
+    async def validate_primitive_plan(plan: dict[str, Any]) -> dict[str, Any]:
+        """Validate a PrimitivePlan envelope without executing CAD."""
+        primitive_tools = {
+            "create_coordinate_system": create_coordinate_system,
+            "create_sketch_geometry": create_sketch_geometry,
+            "apply_sketch_constraints": apply_sketch_constraints,
+            "execute_extrude": execute_extrude,
+            "execute_boolean": execute_boolean,
+            "execute_revolve": execute_revolve,
+            "execute_helix": execute_helix,
+            "feature_fillet": feature_fillet,
+            "feature_chamfer": feature_chamfer,
+            "get_body_snapshot": get_body_snapshot,
+        }
+        return _validate_primitive_plan_payload(plan, primitive_tools)
 
     @mcp.tool()
     async def validate_fabrication_plan(

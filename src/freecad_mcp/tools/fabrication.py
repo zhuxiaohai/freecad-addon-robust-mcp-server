@@ -2008,6 +2008,8 @@ _result_ = {{
                   constraints dict (before adapter additions).
                 - constraint_catalog: Per-constraint rows mapping FreeCAD
                   indices to input constraint entries and entity refs.
+                - constraint_catalog_summary: Small stable summary with count,
+                  FreeCAD type counts, redundant_count, and conflicting_count.
                 - redundant: Catalog rows flagged redundant by the solver.
                 - conflicting: Catalog rows flagged conflicting by the solver.
                 - purged_redundant: Constraints removed after apply because the
@@ -2337,6 +2339,16 @@ try:
 
     _redundant_entries = [_row for _row in _catalog if _row["redundant"]]
     _conflicting_entries = [_row for _row in _catalog if _row["conflicting"]]
+    _catalog_type_counts = {{}}
+    for _row in _catalog:
+        _typ = _row.get("freecad_type") or "Unknown"
+        _catalog_type_counts[_typ] = _catalog_type_counts.get(_typ, 0) + 1
+    _constraint_catalog_summary = {{
+        "count": len(_catalog),
+        "freecad_type_counts": _catalog_type_counts,
+        "redundant_count": len(_redundant_entries),
+        "conflicting_count": len(_conflicting_entries),
+    }}
 
     def _constraint_names(_idxs):
         # Legacy helper — prefer constraint_catalog for agent debugging.
@@ -2441,6 +2453,7 @@ try:
         "applied_count":           applied_count,
         "input_constraint_count":  sum(len(v) for v in constraints_in.values()),
         "constraint_catalog":      _catalog,
+        "constraint_catalog_summary": _constraint_catalog_summary,
         "applied_log":             applied_log,
         "applied_constraints":     _catalog,
         "redundant":               _redundant_entries,
@@ -4893,7 +4906,8 @@ _result_ = {{
                 - volume: Final volume in cubic millimetres.
                 - sketch_constraint_results: Per-sketch constraint diagnostics,
                   including ``constraint_catalog`` rows with actual FreeCAD
-                  types such as ``Distance``, ``DistanceX``, and ``DistanceY``.
+                  types such as ``Distance``, ``DistanceX``, and ``DistanceY``,
+                  plus ``constraint_catalog_summary`` for compact harness traces.
                 - steps_completed: Number of successfully completed steps.
                 - success: ``True`` if all steps completed without error.
 
@@ -5001,6 +5015,9 @@ _result_ = {{
                         "spec_sketch_name": sk_spec.sketch_name,
                         "constraint_catalog": constraint_result.get(
                             "constraint_catalog", []
+                        ),
+                        "constraint_catalog_summary": constraint_result.get(
+                            "constraint_catalog_summary", {}
                         ),
                         "applied_constraints": constraint_result.get(
                             "applied_constraints", []

@@ -1367,10 +1367,32 @@ class TestFabricationSourceConventions:
             encoding="utf-8"
         )
         assert '"constraint_catalog":      _catalog' in source
+        assert '"constraint_catalog_summary": _constraint_catalog_summary' in source
         assert '"applied_constraints":     _catalog' in source
         assert '"redundant":               _redundant_entries' in source
         assert '"purged_redundant":        purged_redundant' in source
         assert '"applied_log":             applied_log' in source
+
+    def test_execute_fabrication_plan_returns_stable_summary_fields(self) -> None:
+        """Agent harness depends on structured execute_fabrication_plan summary."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        execute_block = source.split("async def execute_fabrication_plan", 1)[1]
+        for field in [
+            '"body_name": last_body_name',
+            '"feature_names": feature_names',
+            '"tunable_params": tunable',
+            '"bounding_box": snapshot.get("bounding_box", {})',
+            '"volume": snapshot.get("volume", 0.0)',
+            '"sketch_constraint_results": sketch_constraint_results',
+            '"parametric_binding_diagnostics": parametric_binding_diagnostics',
+            '"steps_completed": steps_completed',
+            '"success": True',
+        ]:
+            assert field in execute_block
 
     def test_directional_distance_feedback_is_exposed(self) -> None:
         """Directional Distance execution exposes actual FreeCAD constraint type."""
@@ -1685,6 +1707,76 @@ class TestConnectorTemplates:
         assert result["fabrication_plan_summary"]["sketch_count"] > 0
         written = json.loads(plan_path.read_text(encoding="utf-8"))
         assert written["metadata"]["template"] == "l_connector"
+
+    @pytest.mark.asyncio
+    async def test_compile_l_connector_two_top_holes_prompt_contract(
+        self, mock_mcp: MagicMock, tmp_path
+    ) -> None:
+        """The natural-language fixture maps to two top-face hole groups."""
+        from freecad_mcp.tools.templates import register_template_tools
+
+        async def get_bridge() -> AsyncMock:
+            return AsyncMock()
+
+        register_template_tools(mock_mcp, get_bridge)
+        plan_path = tmp_path / "artifacts" / "l-connector-top-holes.json"
+        intent = {
+            "template_name": "l_connector",
+            "slots": {
+                "arm_x_length": 50.0,
+                "arm_y_length": 80.0,
+                "width": 30.0,
+                "thickness": 10.0,
+            },
+            "slot_bindings": [
+                "arm_x_width = width",
+                "arm_y_width = width",
+            ],
+            "hole_groups": [
+                {
+                    "face_id": "arm_x_top",
+                    "pattern": "rectangular",
+                    "count_u": 1,
+                    "count_v": 1,
+                    "diameter": 6.0,
+                    "margin_u": 10.0,
+                    "margin_v": 10.0,
+                },
+                {
+                    "face_id": "arm_y_top",
+                    "pattern": "rectangular",
+                    "count_u": 1,
+                    "count_v": 1,
+                    "diameter": 6.0,
+                    "margin_u": 10.0,
+                    "margin_v": 10.0,
+                },
+            ],
+            "assumptions": ["unit=mm", "through holes", "top faces only"],
+        }
+
+        result = await mock_mcp._registered_tools["compile_intent"](
+            intent,
+            output_plan_path=str(plan_path),
+        )
+
+        assert "fabrication_plan" not in result
+        assert result["fabrication_plan_path"] == str(plan_path.resolve())
+        assert result["fabrication_plan_summary"]["feature_count"] >= 3
+        written = json.loads(plan_path.read_text(encoding="utf-8"))
+        assert written["metadata"]["template"] == "l_connector"
+        assert (
+            written["metadata"]["intent_spec"]["hole_groups"][0]["face_id"]
+            == "arm_x_top"
+        )
+        assert (
+            written["metadata"]["intent_spec"]["hole_groups"][1]["face_id"]
+            == "arm_y_top"
+        )
+        assert all(
+            group["diameter"] == 6.0
+            for group in written["metadata"]["intent_spec"]["hole_groups"]
+        )
 
     @pytest.mark.asyncio
     async def test_compile_intent_reports_bad_path(self, mock_mcp: MagicMock) -> None:

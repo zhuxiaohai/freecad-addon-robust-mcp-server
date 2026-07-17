@@ -367,6 +367,23 @@ class TestFabricationPlan:
         }
         assert validate_fabrication_plan(plan)["valid"] is True
 
+    def test_validate_fabrication_plan_accepts_no_template_block_contract(
+        self, simple_plan: FabricationPlan
+    ) -> None:
+        """LangGraph no-template route emits ordinary FabricationPlan JSON."""
+        plan = simple_plan.to_dict()
+        plan["metadata"] = {
+            "route": "no_template",
+            "generated_by": "ai_fabrication_agent",
+        }
+        plan["features"][0]["feature_name"] = "Block"
+        plan["features"][0]["param_aliases"] = {"towards": "block_height"}
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is True
+        assert result["errors"] == []
+
     def test_validate_fabrication_plan_rejects_self_distance(
         self, simple_plan: FabricationPlan
     ) -> None:

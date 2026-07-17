@@ -212,7 +212,9 @@ package = await compile_intent(intent)
 # or trace storage; do not ask the LLM to recopy this JSON.
 result = await execute_fabrication_plan(package["fabrication_plan"], doc_name=doc_name)
 
-# File-backed harnesses may also pass artifact paths:
+# File-backed harnesses may also pass JSON file paths accepted by this batch
+# tool. Generic artifact storage, selectors, and arg composition stay in the
+# agent harness; MCP tools do not expose separate artifact bridge tools.
 package = await compile_intent(intent_path="/path/to/intent.json")
 result = await execute_fabrication_plan(plan_path="/path/to/plan.json", doc_name=doc_name)
 ```

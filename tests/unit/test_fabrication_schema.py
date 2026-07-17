@@ -8,6 +8,7 @@ from freecad_mcp.tools.fabrication_schema import (
     FeatureSpec,
     FinishSpec,
     SketchSpec,
+    block_with_corner_hole_example,
     describe_fabrication_plan_schema,
     minimal_fabrication_plan_example,
     validate_fabrication_plan,
@@ -283,6 +284,19 @@ class TestFabricationPlan:
         ] == {"towards": "thickness"}
         assert "diameter_note" in schema["parametric_linkage"]
         assert "expression" not in schema["parametric_linkage"]["diameter_example"][1]
+        assert schema["schema_source_policy"]["unique_source"].startswith("MCP")
+        assert schema["handoff_policy"]["artifact_bridge_tools"] is False
+        assert any(
+            route.startswith("execute_fabrication_plan")
+            for route in schema["recommended_routes"]["template"]
+        )
+        assert schema["plan_levels"]["L3"].startswith("FabricationPlan")
+        assert schema["special_ref_policy"]["allowed_special_point_refs"] == ["origin"]
+        assert schema["special_ref_policy"]["disallowed_axis_tokens"] == [
+            "x_axis",
+            "y_axis",
+            "z_axis",
+        ]
         length_entries = schema["constraint_entry_formats"]["Length"]
         assert length_entries[1][1]["alias"] == "base_length"
         diameter_entries = schema["constraint_entry_formats"]["Diameter"]
@@ -297,6 +311,23 @@ class TestFabricationPlan:
 
         assert result["valid"] is True
         assert result["errors"] == []
+
+    def test_validate_fabrication_plan_accepts_block_with_corner_hole_example(
+        self,
+    ) -> None:
+        """The no-template direct L3 block-hole example is executable schema."""
+        plan = block_with_corner_hole_example()
+
+        result = validate_fabrication_plan(plan)
+
+        assert result["valid"] is True
+        assert result["errors"] == []
+        assert plan["features"][2]["type"] == "boolean"
+        assert plan["features"][2]["operation"] == "Cut"
+        hole_constraints = plan["sketches"][1]["constraints"]
+        assert hole_constraints["Distance"][0][0] == "origin"
+        assert hole_constraints["Distance"][0][2]["direction"] == "HORIZONTAL"
+        assert hole_constraints["Diameter"][0][1]["alias"] == "hole_diameter"
 
     def test_validate_fabrication_plan_rejects_unknown_coordinate_system(
         self,

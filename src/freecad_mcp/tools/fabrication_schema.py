@@ -418,6 +418,129 @@ def minimal_fabrication_plan_example() -> dict[str, Any]:
     ).to_dict()
 
 
+def block_with_corner_hole_example() -> dict[str, Any]:
+    """Return a no-template L3 block + through-hole example for agents."""
+    return FabricationPlan(
+        coordinate_systems=[
+            CoordinateSystemSpec([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], name="XY_Base"),
+        ],
+        sketches=[
+            SketchSpec(
+                sketch={
+                    "line_1": {"start": [0.0, 0.0], "end": [40.0, 0.0]},
+                    "line_2": {"start": [40.0, 0.0], "end": [40.0, 20.0]},
+                    "line_3": {"start": [40.0, 20.0], "end": [0.0, 20.0]},
+                    "line_4": {"start": [0.0, 20.0], "end": [0.0, 0.0]},
+                },
+                constraints={
+                    "Coincident": [
+                        ["line_1.end", "line_2.start"],
+                        ["line_2.end", "line_3.start"],
+                        ["line_3.end", "line_4.start"],
+                        ["line_4.end", "line_1.start"],
+                    ],
+                    "Horizontal": ["line_1", "line_3"],
+                    "Vertical": ["line_2", "line_4"],
+                    "Fix": ["line_1.start"],
+                    "Length": [
+                        [
+                            "line_1",
+                            {
+                                "length": "40 mm",
+                                "alias": "block_length",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "line_2",
+                            {
+                                "length": "20 mm",
+                                "alias": "block_width",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                },
+                coordinate_system_name="XY_Base",
+                sketch_name="BlockProfile",
+            ),
+            SketchSpec(
+                sketch={"circle_1": {"center": [8.0, 8.0], "radius": 2.5}},
+                constraints={
+                    "Distance": [
+                        [
+                            "origin",
+                            "circle_1.center",
+                            {
+                                "length": "8 mm",
+                                "direction": "HORIZONTAL",
+                                "alias": "hole_offset_x",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "origin",
+                            "circle_1.center",
+                            {
+                                "length": "8 mm",
+                                "direction": "VERTICAL",
+                                "alias": "hole_offset_y",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                    "Diameter": [
+                        [
+                            "circle_1",
+                            {
+                                "diameter": "5 mm",
+                                "alias": "hole_diameter",
+                                "role": "sketch_dimension",
+                            },
+                        ]
+                    ],
+                },
+                coordinate_system_name="XY_Base",
+                sketch_name="HoleProfile",
+            ),
+        ],
+        features=[
+            FeatureSpec(
+                type="extrude",
+                sketch_name="BlockProfile",
+                operation="NewBody",
+                params={"towards": 10.0, "opposite": 0.0},
+                param_aliases={"towards": "block_height"},
+                feature_name="BlockSolid",
+            ),
+            FeatureSpec(
+                type="extrude",
+                sketch_name="HoleProfile",
+                operation="NewBody",
+                params={"towards": 12.0, "opposite": 1.0},
+                feature_name="HoleTool",
+            ),
+            FeatureSpec(
+                type="boolean",
+                sketch_name="",
+                operation="Cut",
+                params={
+                    "base_object_name": "BlockSolid",
+                    "tool_object_name": "HoleTool",
+                    "operation": "Cut",
+                },
+                feature_name="BlockWithHole",
+            ),
+        ],
+        metadata={
+            "route": "no_template",
+            "plan_level": "L3",
+            "example": "block_with_corner_through_hole",
+            "use_spreadsheet_aliases": True,
+        },
+    ).to_dict()
+
+
 def describe_fabrication_plan_schema() -> dict[str, Any]:
     """Return the agent-facing FabricationPlan contract."""
     return {
@@ -429,6 +552,59 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
             "when no registered template fits, then call validate_fabrication_plan "
             "before execute_fabrication_plan."
         ),
+        "schema_source_policy": {
+            "unique_source": "MCP tool contracts are the final CAD schema source.",
+            "agent_rule": (
+                "Agents may keep graph state, trace, artifact, and selector schemas, "
+                "but must not maintain a second CAD/FabricationPlan schema."
+            ),
+            "validation_rule": (
+                "Generated FabricationPlan JSON must be checked with "
+                "validate_fabrication_plan before execute_fabrication_plan."
+            ),
+            "primitive_rule": (
+                "For stepwise L0/L1/L2 execution, compose ordinary JSON args "
+                "from MCP primitive tool schemas and structured artifact/state values."
+            ),
+        },
+        "plan_levels": {
+            "L0": "rough user intent; choose template or no-template route first",
+            "L1": "workflow-level steps such as create document, validate, compile, execute",
+            "L2": "CAD operation-level plan with some missing primitive args",
+            "L3": "FabricationPlan or primitive calls with concrete coordinates, dimensions, and vectors",
+        },
+        "recommended_routes": {
+            "template": [
+                "list_templates",
+                "describe_template",
+                "validate_intent",
+                "compile_intent(output_plan_path)",
+                "execute_fabrication_plan(plan_path)",
+            ],
+            "no_template_direct_l3": [
+                "describe_fabrication_plan_schema",
+                "generate FabricationPlan",
+                "validate_fabrication_plan",
+                "execute_fabrication_plan",
+            ],
+            "no_template_stepwise_l0_l2": [
+                "describe_fabrication_plan_schema",
+                "generate/repair missing primitive args step by step",
+                "call primitive tools with ordinary JSON args",
+            ],
+        },
+        "handoff_policy": {
+            "artifact_bridge_tools": False,
+            "file_inputs": {
+                "validate_fabrication_plan": ["plan_path"],
+                "execute_fabrication_plan": ["plan_path"],
+                "compile_intent": ["intent_path", "output_plan_path"],
+            },
+            "agent_responsibility": (
+                "Artifact storage, selectors, trace, replay, and arg composition "
+                "belong to the agent harness."
+            ),
+        },
         "top_level_fields": {
             "coordinate_systems": "list[CoordinateSystemSpec], created before sketches",
             "sketches": "list[SketchSpec], ordered 2D profiles and constraints",
@@ -703,7 +879,27 @@ def describe_fabrication_plan_schema() -> dict[str, Any]:
             ),
         },
         "point_ref_format": "entity.point, e.g. line_1.start or circle_1.center; 'origin' is the sketch-local origin",
-        "examples": [minimal_fabrication_plan_example()],
+        "special_ref_policy": {
+            "allowed_special_point_refs": ["origin"],
+            "disallowed_axis_tokens": ["x_axis", "y_axis", "z_axis"],
+            "local_offset_rule": (
+                "Use Distance from origin to a sketch point with direction "
+                "HORIZONTAL or VERTICAL for local X/Y offsets."
+            ),
+            "example": [
+                "origin",
+                "circle_1.center",
+                {
+                    "length": "8 mm",
+                    "direction": "HORIZONTAL",
+                    "alias": "hole_offset_x",
+                },
+            ],
+        },
+        "examples": [
+            minimal_fabrication_plan_example(),
+            block_with_corner_hole_example(),
+        ],
     }
 
 

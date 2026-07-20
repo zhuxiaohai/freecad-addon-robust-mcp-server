@@ -26,8 +26,8 @@ For now, Cursor may act as both roles in one workflow:
 
 ```text
 Intent role:    NL → L3 notes → IntentSpec
-Compiler step:  IntentSpec → FabricationPlan package
-Execution role: FabricationPlan → FreeCAD model → feedback
+Compiler step:  IntentSpec → OperationPlan package
+Execution role: OperationPlan → FreeCAD model → feedback
 Repair loop:    feedback → revised IntentSpec
 ```
 
@@ -76,7 +76,7 @@ Use this structure when collecting debug cases:
   "user_query": "",
   "expanded_l3_prompt": "",
   "intent_spec": {},
-  "fabrication_plan": {},
+  "operation_plan": {},
   "execution_result": {},
   "validation_feedback": {},
   "repair_action": ""
@@ -84,7 +84,7 @@ Use this structure when collecting debug cases:
 ```
 
 Prefer `compile_intent(intent)` when you want a complete handoff package with
-`intent_spec`, deterministic `fabrication_plan`, provenance, assumptions, and
+`intent_spec`, deterministic `operation_plan`, provenance, assumptions, and
 compile diagnostics. Use `resolve_template(intent)` when you only need the plan.
 
 ## Default inference rules
@@ -115,9 +115,9 @@ Before returning IntentSpec JSON:
 1. Present Parameter Table; confirm with user if ambiguous
 2. `list_templates()` / `describe_template("l_connector")` when template choice is uncertain
 3. `validate_intent(intent)` for structured slot/template feedback
-4. `compile_intent(intent)` to produce the deterministic FabricationPlan
+4. `compile_intent(intent)` to produce the deterministic OperationPlan
    package and write it directly to trace/process memory.
-5. `execute_fabrication_plan(plan, doc_name=<session_doc_name>)`, passing the
+5. `execute_operation_plan(plan, doc_name=<session_doc_name>)`, passing the
    compiled plan from memory/trace rather than asking an LLM to copy the JSON.
    File-backed harnesses may pass `plan_path` instead of recopying the plan.
 6. `validate_document(doc_name=<session_doc_name>)` /
@@ -129,7 +129,7 @@ Store assumptions and the final IntentSpec JSON for reward attribution. Template
 compilation and CAD execution are deterministic — reward intent expansion separately
 from geometry success. If execution succeeds but geometry violates the user query,
 repair the IntentSpec first; only blame the template compiler when the IntentSpec is
-correct and the deterministic FabricationPlan is wrong.
+correct and the deterministic OperationPlan is wrong.
 
 ## Local agent debugging
 

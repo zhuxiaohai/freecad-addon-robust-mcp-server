@@ -91,8 +91,6 @@ class TestFabricationTools:
             "validate_primitive_plan",
             "validate_operation_plan",
             "execute_operation_plan",
-            "validate_fabrication_plan",
-            "execute_fabrication_plan",
         }
         assert set(register_tools.keys()) == expected
 
@@ -466,7 +464,7 @@ class TestFabricationTools:
     def test_apply_sketch_constraints_uses_diameter_constraint_for_diameter(
         self,
     ) -> None:
-        """Diameter FabricationPlan entries create Diameter constraints."""
+        """Diameter constraint entries create Diameter constraints."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
@@ -771,10 +769,10 @@ class TestFabricationTools:
             await register_tools["set_tunable_param"](alias="unknown_param", value=10.0)
 
     @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_summarizes_binding_diagnostics(
+    async def test_execute_operation_plan_summarizes_binding_diagnostics(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
-        """Batch execution exposes sketch and feature binding diagnostics."""
+        """Ordered batch execution exposes sketch and feature binding diagnostics."""
         mock_bridge.execute_python.side_effect = [
             self._success({"cs_name": "XY_Base", "success": True}),
             self._success({"sketch_name": "PlateProfile", "success": True}),
@@ -826,115 +824,170 @@ class TestFabricationTools:
             ),
         ]
         plan = {
-            "coordinate_systems": [
+            "operations": [
                 {
-                    "euler_angles": [0, 0, 0],
-                    "translation": [0, 0, 0],
-                    "name": "XY_Base",
-                }
-            ],
-            "sketches": [
-                {
-                    "sketch_name": "PlateProfile",
-                    "coordinate_system_name": "XY_Base",
-                    "sketch": {
-                        "line_1": {"start": [0, 0], "end": [80, 0]},
+                    "tool_name": "create_coordinate_system",
+                    "args": {
+                        "euler_angles": [0, 0, 0],
+                        "translation": [0, 0, 0],
+                        "name": "XY_Base",
                     },
-                    "constraints": {
-                        "Length": [
-                            [
-                                "line_1",
-                                {
-                                    "length": 80,
-                                    "alias": "plate_length",
-                                },
+                },
+                {
+                    "tool_name": "create_sketch_geometry",
+                    "args": {
+                        "sketch_name": "PlateProfile",
+                        "coordinate_system_name": "XY_Base",
+                        "sketch": {
+                            "line_1": {"start": [0, 0], "end": [80, 0]},
+                        },
+                    },
+                },
+                {
+                    "tool_name": "apply_sketch_constraints",
+                    "args": {
+                        "sketch_name": "PlateProfile",
+                        "constraints": {
+                            "Length": [
+                                [
+                                    "line_1",
+                                    {
+                                        "length": 80,
+                                        "alias": "plate_length",
+                                    },
+                                ]
                             ]
-                        ]
+                        },
                     },
-                }
-            ],
-            "features": [
+                },
                 {
-                    "type": "extrude",
-                    "sketch_name": "PlateProfile",
-                    "operation": "NewBody",
-                    "params": {"towards": 6.0, "opposite": 0.0},
-                    "param_aliases": {"towards": "thickness"},
-                    "feature_name": "PlateSolid",
-                }
-            ],
+                    "tool_name": "execute_extrude",
+                    "args": {
+                        "sketch_name": "PlateProfile",
+                        "towards": 6.0,
+                        "opposite": 0.0,
+                        "param_aliases": {"towards": "thickness"},
+                        "feature_name": "PlateSolid",
+                    },
+                },
+            ]
         }
-        result = await register_tools["execute_fabrication_plan"](plan)
+        result = await register_tools["execute_operation_plan"](plan)
         diagnostics = result["parametric_binding_diagnostics"]
         assert diagnostics[0]["alias"] == "plate_length"
         assert diagnostics[0]["role"] == "unbound_solver_guard"
         assert diagnostics[0]["bound"] is False
         assert diagnostics[1]["alias"] == "thickness"
         assert diagnostics[1]["bound"] is True
+        assert result["operation_count"] == 4
 
     @pytest.mark.asyncio
-    async def test_validate_fabrication_plan_accepts_json_string_and_path(
+    async def test_validate_operation_plan_accepts_json_string_and_path(
         self, register_tools: dict, tmp_path
     ) -> None:
-        """validate_fabrication_plan accepts dict-equivalent JSON inputs."""
-        plan: dict[str, Any] = {
-            "coordinate_systems": [],
-            "sketches": [],
-            "features": [],
-        }
-        from_json = await register_tools["validate_fabrication_plan"](json.dumps(plan))
+        """validate_operation_plan accepts dict-equivalent JSON inputs."""
+        plan: dict[str, Any] = {"operations": []}
+        from_json = await register_tools["validate_operation_plan"](json.dumps(plan))
         assert from_json["valid"] is True
 
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
-        from_path = await register_tools["validate_fabrication_plan"](
+        from_path = await register_tools["validate_operation_plan"](
             plan_path=str(plan_path)
         )
         assert from_path["valid"] is True
 
     @pytest.mark.asyncio
-    async def test_validate_fabrication_plan_reports_bad_json(
+    async def test_validate_operation_plan_reports_bad_json(
         self, register_tools: dict
     ) -> None:
         """Invalid JSON is reported as validation feedback, not CAD execution."""
-        result = await register_tools["validate_fabrication_plan"]("{bad")
+        result = await register_tools["validate_operation_plan"]("{bad")
         assert result["valid"] is False
         assert "failed to parse plan" in result["errors"][0]
 
     @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_accepts_plan_path(
+    async def test_execute_operation_plan_accepts_plan_path(
         self, register_tools: dict, mock_bridge: AsyncMock, tmp_path
     ) -> None:
-        """execute_fabrication_plan can load plan JSON directly from a file."""
+        """execute_operation_plan can load plan JSON directly from a file."""
         mock_bridge.execute_python.return_value = self._success(
             {"params": [], "spreadsheet_name": None}
         )
-        plan: dict[str, Any] = {
-            "coordinate_systems": [],
-            "sketches": [],
-            "features": [],
-        }
+        plan: dict[str, Any] = {"operations": []}
         plan_path = tmp_path / "plan.json"
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
 
-        result = await register_tools["execute_fabrication_plan"](
+        result = await register_tools["execute_operation_plan"](
             plan_path=str(plan_path),
             doc_name="Doc",
         )
 
         assert result["success"] is True
+        assert result["operation_count"] == 0
 
     @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_rejects_missing_plan_path_without_cad(
+    async def test_execute_operation_plan_rejects_missing_plan_path_without_cad(
         self, register_tools: dict, mock_bridge: AsyncMock
     ) -> None:
         """Bad plan_path fails before calling the FreeCAD bridge."""
         with pytest.raises(ValueError, match="plan_path does not exist"):
-            await register_tools["execute_fabrication_plan"](
+            await register_tools["execute_operation_plan"](
                 plan_path="/no/such/plan.json",
                 doc_name="Doc",
             )
         mock_bridge.execute_python.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_operation_plan_runs_explicit_boolean_operation(
+        self, register_tools: dict, mock_bridge: AsyncMock
+    ) -> None:
+        """Ordered batch executor dispatches explicit boolean operations."""
+        mock_bridge.execute_python.side_effect = [
+            self._success(
+                {
+                    "feature_name": "Intersection",
+                    "type_id": "Part::Common",
+                    "operation": "Intersect",
+                    "base_object_name": "BaseSolid",
+                    "tool_object_name": "ToolSolid",
+                    "dependency_preserved": True,
+                    "success": True,
+                }
+            ),
+            self._success(
+                {
+                    "bounding_box": {},
+                    "volume": 5.0,
+                    "features": [],
+                    "edge_samples": [],
+                    "success": True,
+                }
+            ),
+            self._success({"params": [], "spreadsheet_name": None}),
+        ]
+        plan = {
+            "operations": [
+                {
+                    "tool_name": "execute_boolean",
+                    "args": {
+                        "base_object_name": "BaseSolid",
+                        "tool_object_name": "ToolSolid",
+                        "operation": "Intersect",
+                        "result_name": "Intersection",
+                    },
+                }
+            ]
+        }
+
+        result = await register_tools["execute_operation_plan"](plan)
+
+        assert result["feature_names"] == ["Intersection"]
+        assert result["body_name"] == "Intersection"
+        assert result["operation_count"] == 1
+        boolean_code = mock_bridge.execute_python.call_args_list[0].args[0]
+        assert "BaseSolid" in boolean_code
+        assert "ToolSolid" in boolean_code
 
     @pytest.mark.asyncio
     async def test_evaluate_editability_success(
@@ -1163,119 +1216,6 @@ class TestFabricationTools:
         assert len(result["edge_samples"]) == 1
         assert result["edge_samples"][0]["curve_type"] == "Circle"
 
-    @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_rejects_implicit_extrude_boolean(
-        self, register_tools: dict
-    ) -> None:
-        """Batch plans must use explicit boolean features, not extrude.operation."""
-        plan = {
-            "coordinate_systems": [],
-            "sketches": [],
-            "features": [
-                {
-                    "type": "extrude",
-                    "sketch_name": "ToolSketch",
-                    "operation": "Join",
-                    "params": {"towards": 10.0},
-                    "feature_name": "ToolSolid",
-                }
-            ],
-        }
-
-        with pytest.raises(ValueError, match="explicit boolean features"):
-            await register_tools["execute_fabrication_plan"](plan)
-
-    @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_boolean_requires_base_and_tool(
-        self, register_tools: dict
-    ) -> None:
-        """Boolean features must explicitly identify both operands."""
-        plan = {
-            "coordinate_systems": [],
-            "sketches": [],
-            "features": [
-                {
-                    "type": "boolean",
-                    "operation": "Intersect",
-                    "params": {"base_object_name": "BaseSolid"},
-                    "feature_name": "Intersection",
-                }
-            ],
-        }
-
-        with pytest.raises(ValueError, match="base_object_name"):
-            await register_tools["execute_fabrication_plan"](plan)
-
-    @pytest.mark.asyncio
-    async def test_execute_fabrication_plan_runs_explicit_boolean_feature(
-        self, register_tools: dict, mock_bridge: AsyncMock
-    ) -> None:
-        """Batch executor dispatches boolean features with explicit base/tool."""
-        mock_bridge.execute_python.side_effect = [
-            self._success(
-                {
-                    "feature_name": "Intersection",
-                    "type_id": "Part::Common",
-                    "operation": "Intersect",
-                    "base_object_name": "BaseSolid",
-                    "tool_object_name": "ToolSolid",
-                    "dependency_preserved": True,
-                    "boolean_mode_used": "parametric",
-                    "fallback_reason": None,
-                    "base": {
-                        "name": "BaseSolid",
-                        "global_center": [0, 0, 0],
-                        "volume_mm3": 10.0,
-                    },
-                    "tool": {
-                        "name": "ToolSolid",
-                        "global_center": [0, 0, 0],
-                        "volume_mm3": 10.0,
-                    },
-                    "result": {
-                        "global_center": [0, 0, 0],
-                        "bounding_box": {},
-                        "volume_mm3": 5.0,
-                    },
-                    "center_distance": 0.0,
-                    "success": True,
-                }
-            ),
-            self._success(
-                {
-                    "bounding_box": {},
-                    "volume": 5.0,
-                    "features": [],
-                    "edge_samples": [],
-                    "success": True,
-                }
-            ),
-            self._success({"params": [], "spreadsheet_name": None}),
-        ]
-        plan = {
-            "coordinate_systems": [],
-            "sketches": [],
-            "features": [
-                {
-                    "type": "boolean",
-                    "operation": "Intersect",
-                    "params": {
-                        "base_object_name": "BaseSolid",
-                        "tool_object_name": "ToolSolid",
-                    },
-                    "feature_name": "Intersection",
-                }
-            ],
-        }
-
-        result = await register_tools["execute_fabrication_plan"](plan)
-
-        assert result["feature_names"] == ["Intersection"]
-        assert result["body_name"] == "Intersection"
-        boolean_code = mock_bridge.execute_python.call_args_list[0].args[0]
-        assert "BaseSolid" in boolean_code
-        assert "ToolSolid" in boolean_code
-
 
 class TestFabricationSourceConventions:
     """Static checks that fabrication.py matches Fusion adapter semantics."""
@@ -1491,14 +1431,14 @@ class TestFabricationSourceConventions:
         assert '"purged_redundant":        purged_redundant' in source
         assert '"applied_log":             applied_log' in source
 
-    def test_execute_fabrication_plan_returns_stable_summary_fields(self) -> None:
-        """Agent harness depends on structured execute_fabrication_plan summary."""
+    def test_execute_operation_plan_returns_stable_summary_fields(self) -> None:
+        """Agent harness depends on structured execute_operation_plan summary."""
         from pathlib import Path
 
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
             encoding="utf-8"
         )
-        execute_block = source.split("async def execute_fabrication_plan", 1)[1]
+        execute_block = source.split("async def execute_operation_plan", 1)[1]
         for field in [
             '"body_name": last_body_name',
             '"feature_names": feature_names',
@@ -1508,6 +1448,7 @@ class TestFabricationSourceConventions:
             '"sketch_constraint_results": sketch_constraint_results',
             '"parametric_binding_diagnostics": parametric_binding_diagnostics',
             '"steps_completed": steps_completed',
+            '"operation_count": len(op_plan.operations)',
             '"success": True',
         ]:
             assert field in execute_block

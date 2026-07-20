@@ -502,7 +502,7 @@ Intent Model (external — Cursor, skill/RAG, Policy 1)
     │
     ▼
 Layer 2 — Domain Template Tools  (tools/templates/)
-    resolve_template(intent) → FabricationPlan   [deterministic]
+    resolve_template(intent) → OperationPlan   [deterministic]
     │
     ▼
 Layer 1 — Generic Fabrication Primitives  (these tools)
@@ -517,7 +517,7 @@ Layer 1 — Generic Fabrication Primitives  (these tools)
 
 | Tool                           | Description                                                                           |
 | ------------------------------ | ------------------------------------------------------------------------------------- |
-| `resolve_template`             | Compile an IntentSpec dict into a FabricationPlan (deterministic).                    |
+| `resolve_template`             | Compile an IntentSpec dict into an OperationPlan (deterministic).                     |
 | `resolve_l_connector_template` | Build an L connector plan from resolved dimension slots (mm).                         |
 
 IntentSpec schema: ``freecad_mcp.intent.schema.IntentSpec``.  Natural language
@@ -576,17 +576,17 @@ parsing happens upstream in the Intent Model — not in template tools.
 
 ### PrimitivePlan Contract
 
-| Tool                             | Description                                                                                   |
-| -------------------------------- | --------------------------------------------------------------------------------------------- |
-| `describe_primitive_plan_schema` | Describe the agent-facing primitive tool plan contract for no-template workflows.             |
-| `validate_primitive_plan`        | Validate a primitive plan envelope against known tool names and complete args where present.  |
-| `validate_fabrication_plan`      | Validate a deterministic `FabricationPlan` batch input before execution without touching CAD. |
+| Tool                             | Description                                                                                     |
+| -------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `describe_primitive_plan_schema` | Describe the agent-facing primitive tool plan contract for no-template workflows.               |
+| `validate_primitive_plan`        | Validate a primitive plan envelope against known tool names and complete args where present.    |
+| `validate_operation_plan`        | Validate a deterministic `OperationPlan` batch input before execution without touching CAD.     |
 
 ### Batch Execution
 
-| Tool                       | Description                                                               |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `execute_fabrication_plan` | Batch-execute a `FabricationPlan` after validation; accepts `plan_path`.  |
+| Tool                     | Description                                                              |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `execute_operation_plan` | Batch-execute an `OperationPlan` after validation; accepts `plan_path`.  |
 
 ### Standard Workflow Example
 

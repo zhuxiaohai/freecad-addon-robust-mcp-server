@@ -685,12 +685,12 @@ tools (`list_templates`, `describe_template`, `validate_intent`) to discover the
 machine-readable IntentSpec contract exposed by this MCP server.
 
 **Layer 2** (domain templates in tools/templates/) compiles IntentSpec into a
-FabricationPlan **deterministically** — no LLM at this stage.  Use
+OperationPlan **deterministically** — no LLM at this stage.  Use
 `resolve_template(intent)`.
 
 **Layer 1** (this module) executes the plan deterministically.  The RL CAD agent
 works at Layer 1 when exploring constraint strategies, or calls
-`execute_fabrication_plan` for batch execution.
+`execute_operation_plan` for batch execution.
 
 ## Standard Workflow (step-by-step)
 
@@ -812,7 +812,7 @@ create_sketch_geometry(
 
 ## RL Training Tips
 
-- Call primitives individually (not `execute_fabrication_plan`) for per-step rewards.
+- Call primitives individually (not `execute_operation_plan`) for per-step rewards.
 - `execute_extrude` returns `local_obb` / `global_center`; `execute_boolean`
   returns `center_distance` — all directly comparable to NLT ground truth.
 - `apply_sketch_constraints` returns `dof_after` (0 = fully constrained = dense reward).
@@ -843,10 +843,10 @@ intent = {
     ],
 }
 package = await compile_intent(intent)
-plan = package["fabrication_plan"]
+plan = package["operation_plan"]
 doc_name = "FabricationDoc_123"
 await create_document(name=doc_name)
-result = await execute_fabrication_plan(plan, doc_name=doc_name)
+result = await execute_operation_plan(plan, doc_name=doc_name)
 # → result["tunable_params"] for frontend slider panel
 # → result["bounding_box"] for downstream assembly
 ```

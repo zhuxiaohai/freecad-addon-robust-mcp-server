@@ -1587,8 +1587,8 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         "apply_sketch_constraints → execute_extrude/revolve/helix → "
                         "execute_boolean with explicit base/tool object names "
                         "(Join/Cut/Intersect) → feature_fillet/chamfer. "
-                        "Use execute_fabrication_plan for batch execution from a "
-                        "FabricationPlan dict produced by a Layer 2 template tool."
+                        "Use execute_operation_plan for batch execution from a "
+                        "OperationPlan dict produced by a Layer 2 template tool."
                     ),
                     "tools": [
                         {
@@ -1862,7 +1862,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                 "templates": {
                     "description": (
                         "Layer 2 domain template tools. Compile a structured IntentSpec "
-                        "into a FabricationPlan deterministically. Natural language parsing "
+                        "into a OperationPlan deterministically. Natural language parsing "
                         "happens upstream in the Intent Model — not here. Use "
                         "list_templates and describe_template for the machine-readable "
                         "template contract."

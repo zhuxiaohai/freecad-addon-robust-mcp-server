@@ -92,7 +92,7 @@ class TestApplySlotBindings:
 
 
 class TestResolveIntentToPlan:
-    """Tests for deterministic IntentSpec → FabricationPlan compilation."""
+    """Tests for deterministic IntentSpec → OperationPlan compilation."""
 
     def test_l_connector_with_width_binding(self) -> None:
         """resolve_intent_to_plan compiles L connector from IntentSpec."""
@@ -155,7 +155,7 @@ class TestResolveIntentToPlan:
             validate_intent(intent)
 
     def test_resolve_intent_to_plan_is_deterministic(self) -> None:
-        """Same IntentSpec produces identical FabricationPlan dicts."""
+        """Same IntentSpec produces identical OperationPlan dicts."""
         intent = IntentSpec(
             template_name="l_connector",
             slots={

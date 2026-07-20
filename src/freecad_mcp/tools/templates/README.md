@@ -1,7 +1,7 @@
 # Layer 2: Domain Template Tools
 
 This directory contains scene-specific template tools that compile a structured
-**IntentSpec** (from an external Intent Model) into a **FabricationPlan** for
+**IntentSpec** (from an external Intent Model) into a **OperationPlan** for
 Layer 1 generic fabrication primitives.
 
 ## Architecture Overview
@@ -15,11 +15,11 @@ User: "生成一个L型连接件，一边5cm，一边8cm，宽3cm"
           │
           ▼
    Layer 2 Template Tool  [deterministic, no LLM]
-   resolve_template(intent) → FabricationPlan
+   resolve_template(intent) → OperationPlan
           │
           ▼
    Layer 1 Generic Primitives
-   execute_fabrication_plan(plan, doc_name=doc_name)
+   execute_operation_plan(plan, doc_name=doc_name)
 ```
 
 Natural language parsing is **not** done in this package.  The Intent Model
@@ -33,8 +33,8 @@ During early validation, Cursor may temporarily play both roles:
   into an ``IntentSpec``.
 - **Execution Agent**: traceable production TUI agents should call
   ``compile_intent(intent)`` after ``validate_intent``, write the returned
-  ``fabrication_plan`` directly to trace/process memory, then call
-  ``execute_fabrication_plan`` with that plan without asking the LLM to copy the
+  ``operation_plan`` directly to trace/process memory, then call
+  ``execute_operation_plan`` with that plan without asking the LLM to copy the
   JSON. Tools accept structured dicts, JSON strings, or ``intent_path`` /
   ``plan_path`` file inputs for file-backed harness handoff.
 
@@ -43,8 +43,8 @@ can move to a dedicated agent repo later without changing the contracts:
 
 ```text
 NL / L3 prompt → IntentSpec
-IntentSpec → FabricationPlan
-FabricationPlan → FreeCAD model
+IntentSpec → OperationPlan
+OperationPlan → FreeCAD model
 Execution feedback → IntentSpec repair
 ```
 
@@ -58,8 +58,8 @@ template shortcut as a separate primary action:
 | ``list_templates`` | Intent Agent | List aliases, use cases, slots, features, face IDs, examples |
 | ``describe_template`` | Intent Agent | Inspect one template contract before slot filling |
 | ``validate_intent`` | Intent/repair loop | Validate IntentSpec and return structured failure attribution |
-| ``compile_intent`` | Handoff | Return IntentSpec + deterministic FabricationPlan package |
-| ``resolve_template`` | Compiler shortcut | Return only the FabricationPlan for an IntentSpec |
+| ``compile_intent`` | Handoff | Return IntentSpec + deterministic OperationPlan package |
+| ``resolve_template`` | Compiler shortcut | Return only the OperationPlan for an IntentSpec |
 | ``resolve_l_connector_template`` | Debug/manual | Bypass IntentSpec with resolved slots; not the main agent path |
 
 The underlying implementation is ordinary Python.  MCP tools are thin wrappers
@@ -97,7 +97,7 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
 ```
 
 - ``slot_bindings``: semantic slot coupling — compiled by the template, **not**
-  passed through to FabricationPlan geometric constraints.
+  passed through to OperationPlan geometric constraints.
 - ``placement``: optional sketch-plane placement — passed through as ``plane``.
 - ``hole_groups``: optional per-face rectangular hole arrays (see
   ``face_catalog.py`` for nine exterior ``face_id`` values).
@@ -105,12 +105,12 @@ See ``freecad_mcp.intent.schema.IntentSpec``.  Example for an L connector:
 ## IntentSpec Package
 
 When an Intent Agent hands work to an Execution Agent, prefer a package rather
-than a bare FabricationPlan:
+than a bare OperationPlan:
 
 ```json
 {
   "intent_spec": {},
-  "fabrication_plan": {},
+  "operation_plan": {},
   "assumptions": [],
   "template_provenance": {
     "template_name": "l_connector",
@@ -119,13 +119,13 @@ than a bare FabricationPlan:
   },
   "compile_diagnostics": {
     "ok": true,
-    "stage": "intent_to_fabrication_plan",
+    "stage": "intent_to_operation_plan",
     "failure_attribution": null
   }
 }
 ```
 
-The model learns ``NL → IntentSpec``.  ``IntentSpec → FabricationPlan`` is
+The model learns ``NL → IntentSpec``.  ``IntentSpec → OperationPlan`` is
 deterministic post-processing, but the resulting plan is still included as the
 executable handoff payload.
 
@@ -135,7 +135,7 @@ executable handoff payload.
 - Unknown template, missing slot, invalid binding, or unknown ``face_id``:
   Intent Agent template/slot/capability error.
 - Valid IntentSpec compiles to wrong geometry: template compiler bug.
-- Valid FabricationPlan fails in FreeCAD: Layer 1 adapter/execution bug.
+- Valid OperationPlan fails in FreeCAD: Layer 1 adapter/execution bug.
 - Execution succeeds but violates user intent: repair the IntentSpec first.
 
 ## L-Connector Modules
@@ -162,9 +162,9 @@ tools/templates/
 ### 2. Implement the plan builder
 
 ```python
-def build_my_part_plan(*, slots: dict[str, float], plane: dict | None = None) -> FabricationPlan:
+def build_my_part_plan(*, slots: dict[str, float], plane: dict | None = None) -> OperationPlan:
   # validate slots, build sketch + constraints + features
-  return FabricationPlan(...)
+  return OperationPlan(...)
 ```
 
 ### 3. Register in intent registry
@@ -189,7 +189,7 @@ async def resolve_my_part_template(slots: dict[str, float], ...) -> dict:
 Every template tool MUST:
 
 1. Accept structured ``slots`` or a full ``IntentSpec`` dict — **never** natural language.
-2. Return ``FabricationPlan.to_dict()`` — a plain ``dict[str, Any]``.
+2. Return ``OperationPlan.to_dict()`` — a plain ``dict[str, Any]``.
 3. Never call the FreeCAD API directly — all CAD execution is Layer 1's job.
 4. Document which ``param_aliases`` it exposes (these become frontend sliders).
 5. Validate required slots and raise ``ValueError`` for infeasible geometry.
@@ -208,23 +208,23 @@ intent = {
 doc_name = "FabricationDoc_123"
 await create_document(name=doc_name)
 package = await compile_intent(intent)
-# The orchestrator should pass package["fabrication_plan"] directly from memory
+# The orchestrator should pass package["operation_plan"] directly from memory
 # or trace storage; do not ask the LLM to recopy this JSON.
-result = await execute_fabrication_plan(package["fabrication_plan"], doc_name=doc_name)
+result = await execute_operation_plan(package["operation_plan"], doc_name=doc_name)
 
 # File-backed harnesses may also pass JSON file paths accepted by this batch
 # tool. Generic artifact storage, selectors, and arg composition stay in the
 # agent harness; MCP tools do not expose separate artifact bridge tools.
 package = await compile_intent(intent_path="/path/to/intent.json")
-result = await execute_fabrication_plan(plan_path="/path/to/plan.json", doc_name=doc_name)
+result = await execute_operation_plan(plan_path="/path/to/plan.json", doc_name=doc_name)
 ```
 
-Debug / handoff workflow when the full FabricationPlan is explicitly needed:
+Debug / handoff workflow when the full OperationPlan is explicitly needed:
 
 ```text
 plan = await resolve_template(intent)
 
-result = await execute_fabrication_plan(plan, doc_name=doc_name)
+result = await execute_operation_plan(plan, doc_name=doc_name)
 ```
 
 For RL training on Layer 1 tool trajectories, the agent can call primitives

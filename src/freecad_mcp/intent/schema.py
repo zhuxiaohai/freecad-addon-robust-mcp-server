@@ -123,7 +123,7 @@ class IntentSpec:
             metadata for logging and RL attribution only.
         slot_bindings: Semantic slot coupling rules (e.g. ``arm_x_width = width``).
             Compiled by the template layer into concrete slot values — not passed
-            through to FabricationPlan geometric constraints.
+            through to OperationPlan geometric constraints.
         placement: Optional sketch-plane placement; passed through to the template
             as ``plane`` and compiled into ``CoordinateSystemSpec``.
         hole_groups: Optional per-face hole array specifications for templates

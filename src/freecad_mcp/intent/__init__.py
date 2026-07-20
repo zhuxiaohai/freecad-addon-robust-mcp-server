@@ -2,7 +2,7 @@
 
 The Intent Model (external LLM, Cursor, or trained Policy 1) converts natural
 language into a structured :class:`IntentSpec`.  Layer 2 templates compile
-``IntentSpec`` into a :class:`~freecad_mcp.tools.fabrication_schema.FabricationPlan`
+``IntentSpec`` into a :class:`~freecad_mcp.tools.operation_plan_schema.OperationPlan`
 deterministically — no LLM involvement at this stage.
 """
 

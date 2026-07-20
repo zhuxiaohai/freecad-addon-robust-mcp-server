@@ -97,8 +97,8 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
         """Validate an IntentSpec and return structured attribution.
 
         This tool is for Agent1/repair workflows.  It does not execute CAD.  A
-        valid result means the deterministic template compiler can produce a
-        FabricationPlan from the supplied IntentSpec. ``intent`` may be a dict
+        valid result means the deterministic template compiler can produce an
+        OperationPlan from the supplied IntentSpec. ``intent`` may be a dict
         or JSON string; ``intent_path`` may point to a UTF-8 JSON file.
         """
         try:

@@ -14,10 +14,10 @@ expects FreeCAD fabrication tools to generate the model.
 ## Contract
 
 - The learned/agent output is `IntentSpec`.
-- `IntentSpec -> FabricationPlan` is deterministic post-processing via MCP.
+- `IntentSpec -> OperationPlan` is deterministic post-processing via MCP.
 - Prefer MCP tools in this order: `list_templates`, `describe_template`,
-  `validate_intent`, `compile_intent`, `execute_fabrication_plan`,
+  `validate_intent`, `compile_intent`, `execute_operation_plan`,
   `validate_document`, `get_body_snapshot`.
 - Keep trace fields separate: `user_query`, `expanded_l3_prompt`,
-  `intent_spec`, `fabrication_plan`, `execution_result`,
+  `intent_spec`, `operation_plan`, `execution_result`,
   `validation_feedback`, `repair_action`.

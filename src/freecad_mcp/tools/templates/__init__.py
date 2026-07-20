@@ -2,7 +2,7 @@
 
 This package contains scene-specific template tools that compile a structured
 :class:`~freecad_mcp.intent.schema.IntentSpec` into a
-:class:`~freecad_mcp.tools.fabrication_schema.FabricationPlan` that Layer 1
+:class:`~freecad_mcp.tools.operation_plan_schema.OperationPlan` that Layer 1
 generic fabrication primitives can execute.
 
 Architecture
@@ -18,17 +18,17 @@ Architecture
         │
         ▼
     Layer 2 — Domain Template Tools  (this package)
-        resolve_template()  → FabricationPlan   [deterministic, no LLM]
+        resolve_template()  → OperationPlan   [deterministic, no LLM]
         │
         ▼
     Layer 1 — Generic Fabrication Primitives  (tools/fabrication.py)
-        execute_fabrication_plan()
+        execute_operation_plan()
 
 Adding a New Domain Template
 -----------------------------
 
 1. Create ``tools/templates/<domain>.py`` (e.g. ``connectors.py``).
-2. Implement ``build_*_plan(slots, plane)`` returning a ``FabricationPlan``.
+2. Implement ``build_*_plan(slots, plane)`` returning an ``OperationPlan``.
 3. Register a builder in ``freecad_mcp.intent.registry.TEMPLATE_BUILDERS``.
 4. Add a ``register_<domain>_templates(mcp, get_bridge)`` function if needed.
 5. Import and call it in ``register_template_tools()`` below.
@@ -38,11 +38,11 @@ Contract
 
 Every template tool MUST:
 - Accept structured ``slots`` or a full ``IntentSpec`` dict — never natural language.
-- Return a ``FabricationPlan`` serialised as ``dict[str, Any]``.
+- Return an ``OperationPlan`` serialised as ``dict[str, Any]``.
 - Never call FreeCAD API directly — all CAD execution goes through Layer 1.
 - Document which ``param_aliases`` it exposes (these become frontend sliders).
 
-See ``freecad_mcp.intent.schema`` and ``tools/fabrication_schema.py``.
+See ``freecad_mcp.intent.schema`` and ``tools/operation_plan_schema.py``.
 """
 
 import json
@@ -120,7 +120,7 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
 
     @mcp.tool()
     async def resolve_template(intent: dict[str, Any]) -> dict[str, Any]:
-        """Compile an IntentSpec into a FabricationPlan via the template registry.
+        """Compile an IntentSpec into an OperationPlan via the template registry.
 
         This step is fully deterministic.  The Intent Model (LLM or Cursor)
         must produce the ``intent`` dict upstream; this tool does not parse
@@ -131,7 +131,7 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
                 optional ``assumptions``, ``slot_bindings``, ``placement``.
 
         Returns:
-            FabricationPlan dict ready for ``execute_fabrication_plan()``.
+            OperationPlan dict ready for ``execute_operation_plan()``.
 
         Example:
             >>> intent = {
@@ -159,43 +159,55 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
         intent_path: str | None = None,
         output_plan_path: str | None = None,
     ) -> dict[str, object]:
-        """Compile IntentSpec into an executable FabricationPlan package.
+        """Compile IntentSpec into an executable OperationPlan package.
 
         Agent1 may expose this package as its handoff artifact: the model output
-        remains the IntentSpec, while ``fabrication_plan`` is deterministic
+        remains the IntentSpec, while ``operation_plan`` is deterministic
         post-processing.  When ``output_plan_path`` is supplied, the plan is
         written as UTF-8 JSON and omitted from the response.  Agent harnesses
         should use this file-backed handoff and pass the same path as
-        ``plan_path`` to ``execute_fabrication_plan``; this prevents a large
+        ``plan_path`` to ``execute_operation_plan``; this prevents a large
         plan from being copied through model-visible MCP text.
         """
         try:
             intent_data = load_structured_input(intent, intent_path, "intent")
             spec = IntentSpec.from_dict(intent_data)
             package = intent_registry.compile_intent_package(spec)
-            fabrication_plan = cast("dict[str, Any]", package["fabrication_plan"])
+            operation_plan = cast("dict[str, Any]", package["operation_plan"])
             if not output_plan_path:
                 return package
 
             plan_path = Path(output_plan_path).expanduser().resolve()
             plan_path.parent.mkdir(parents=True, exist_ok=True)
             plan_path.write_text(
-                json.dumps(fabrication_plan, ensure_ascii=False, indent=2),
+                json.dumps(operation_plan, ensure_ascii=False, indent=2),
                 encoding="utf-8",
+            )
+            operations = operation_plan.get("operations", [])
+            tool_names = sorted(
+                {
+                    str(op["tool_name"])
+                    for op in operations
+                    if isinstance(op, dict) and isinstance(op.get("tool_name"), str)
+                }
             )
             return {
                 **{
                     key: value
                     for key, value in package.items()
-                    if key != "fabrication_plan"
+                    if key != "operation_plan"
                 },
-                "fabrication_plan_path": str(plan_path),
-                "fabrication_plan_summary": {
-                    "coordinate_system_count": len(
-                        fabrication_plan.get("coordinate_systems", [])
-                    ),
-                    "sketch_count": len(fabrication_plan.get("sketches", [])),
-                    "feature_count": len(fabrication_plan.get("features", [])),
+                "operation_plan_path": str(plan_path),
+                "operation_plan_summary": {
+                    "operation_count": len(operations),
+                    "tool_counts": {
+                        tool_name: sum(
+                            1
+                            for op in operations
+                            if isinstance(op, dict) and op.get("tool_name") == tool_name
+                        )
+                        for tool_name in tool_names
+                    },
                 },
             }
         except Exception as exc:
@@ -203,7 +215,7 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
             fallback_intent = intent if isinstance(intent, dict) else {}
             return {
                 "intent_spec": fallback_intent,
-                "fabrication_plan": None,
+                "operation_plan": None,
                 "assumptions": list(fallback_intent.get("assumptions", [])),
                 "template_provenance": {
                     "template_name": fallback_intent.get("template_name"),
@@ -213,7 +225,7 @@ def register_template_tools(mcp: Any, get_bridge: Callable[[], Awaitable[Any]]) 
                 },
                 "compile_diagnostics": {
                     "ok": False,
-                    "stage": "intent_to_fabrication_plan",
+                    "stage": "intent_to_operation_plan",
                     "error": message,
                     "failure_attribution": intent_registry.classify_compile_error(
                         message

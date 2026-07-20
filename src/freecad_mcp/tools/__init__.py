@@ -15,14 +15,14 @@ Tools are organized by category:
 - validation: Object and document validation tools
 - assembly: Assembly semantics and coordinate-system alignment tools
 - fabrication: Layer 1 generic HistCAD-style fabrication primitives
-- templates: Layer 2 domain-specific template tools (IntentSpec → FabricationPlan)
+- templates: Layer 2 domain-specific template tools (IntentSpec → OperationPlan)
 
 Two-layer architecture
 ----------------------
 
 Layer 2 (tools/templates/) compiles a structured IntentSpec (intent/) into a
-``FabricationPlan`` (fabrication_schema.py).  Layer 1 (tools/fabrication.py)
-executes it via ``execute_fabrication_plan()``.  See
+``OperationPlan`` (operation_plan_schema.py).  Layer 1 (tools/fabrication.py)
+executes it via ``execute_operation_plan()``.  See
 ``tools/templates/README.md`` for how to add new domain templates.
 """
 

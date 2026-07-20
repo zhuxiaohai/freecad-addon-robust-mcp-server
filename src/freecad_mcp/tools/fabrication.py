@@ -882,20 +882,65 @@ def _apply_histcad_constraints(
     def _ground_truth_xy(ref):
         return ground_truth_xy(ground_truth, ref)
 
-    def _fix_constraint(geo_idx, point_pos=None):
-        # HistCAD Fix: entity_ref -> Block(geo); point_ref -> Lock/Block point.
-        # FreeCAD 1.1 Block(geo, point) is invalid; whole-entity uses Block(geo).
-        if point_pos is None or point_pos == MID:
-            return Sketcher.Constraint("Block", geo_idx)
-        for factory in (
-            lambda: Sketcher.Constraint("Lock", geo_idx, point_pos),
-            lambda: Sketcher.Constraint("Block", geo_idx, point_pos),
-        ):
-            try:
-                return factory()
-            except (TypeError, ValueError):
-                continue
+    def _fix_constraint(geo_idx):
+        # HistCAD Fix on a whole entity maps to FreeCAD's Block(geo).
         return Sketcher.Constraint("Block", geo_idx)
+
+    def _point_xy_for_fix(ref, geo_idx, point_pos):
+        try:
+            xy = _ground_truth_xy(ref)
+            if xy is not None:
+                return [float(xy[0]), float(xy[1])]
+        except Exception:
+            pass
+        try:
+            if point_pos != NONE:
+                pt = sketch_obj.getPoint(geo_idx, point_pos)
+                return [float(pt.x), float(pt.y)]
+        except Exception:
+            pass
+        try:
+            center = getattr(sketch_obj.Geometry[geo_idx], "Center", None)
+            if center is not None:
+                return [float(center.x), float(center.y)]
+        except Exception:
+            pass
+        return None
+
+    def _apply_point_fix_as_distances(ref, geo_idx, point_pos, entry_index=None):
+        # FreeCAD point-level Lock/Block overloads are version-sensitive. Lowering
+        # a point Fix to origin-relative X/Y distances is stable for lines/arcs/circles.
+        if ref == "origin":
+            return
+        xy = _point_xy_for_fix(ref, geo_idx, point_pos)
+        if xy is None:
+            before_count = len(sketch_obj.Constraints)
+            c = _fix_constraint(geo_idx)
+            sketch_obj.addConstraint(c)
+            _log_applied(
+                before_count,
+                source="adapter",
+                input_type="Fix",
+                entry_index=entry_index,
+                entry=ref,
+                entity_refs=[ref],
+                freecad_type=c.Type,
+                adapter_reason="point_fix_fell_back_to_block",
+            )
+            added.append("Fix")
+            return
+        for direction, length in (
+            ("HORIZONTAL", abs(float(xy[0]))),
+            ("VERTICAL", abs(float(xy[1]))),
+        ):
+            _apply_distance_entry(
+                ["origin", ref, {"length": length, "direction": direction}],
+                source="adapter",
+                input_type="Fix",
+                entry_index=entry_index,
+                adapter_reason="point_fix_lowered_to_distance",
+            )
+        added.append("Fix")
 
     def _primitive_from_ref(ref):
         text = str(ref)
@@ -1114,6 +1159,7 @@ def _apply_histcad_constraints(
         entry,
         entity_refs,
         freecad_type=None,
+        adapter_reason=None,
     ):
         applied_log.append(
             {
@@ -1131,7 +1177,9 @@ def _apply_histcad_constraints(
                 ),
                 "entity_refs": entity_refs,
                 "adapter_reason": (
-                    "axis_aligned_orientation" if source == "adapter" else None
+                    adapter_reason
+                    if adapter_reason is not None
+                    else ("axis_aligned_orientation" if source == "adapter" else None)
                 ),
             }
         )
@@ -1152,6 +1200,7 @@ def _apply_histcad_constraints(
         source="input",
         input_type="Distance",
         entry_index=None,
+        adapter_reason=None,
     ):
         dim_meta = None
         i1, p1 = _resolve_point(entry[0])
@@ -1198,6 +1247,7 @@ def _apply_histcad_constraints(
             entry=entry,
             entity_refs=[str(entry[0]), str(entry[1])],
             freecad_type=c.Type,
+            adapter_reason=adapter_reason,
         )
         if dim_meta and (dim_meta.get("alias") or dim_meta.get("expression")):
             binding = dict(dim_meta)
@@ -1290,10 +1340,11 @@ def _apply_histcad_constraints(
         elif ctype == "Fix":
             if "." in entry:
                 i, p = _resolve_point(entry)
+                _apply_point_fix_as_distances(entry, i, p, entry_index=entry_index)
+                return
             else:
                 i, _ = _resolve_entity(entry)
-                p = None
-            c = _fix_constraint(i, p)
+            c = _fix_constraint(i)
         elif ctype == "Midpoint":
             if isinstance(entry[1], list):
                 i_mid, p_mid = _resolve_point(entry[0])
@@ -5239,13 +5290,16 @@ _result_ = {{
             "primitive_plan_envelope": {
                 "required": ["plan_level", "steps"],
                 "step_fields": {
-                    "step_id": "stable optional id",
                     "tool_name": "primitive MCP tool name; may be omitted for L0/L1 partial plans",
                     "args": "ordinary JSON args for tool_name; complete for L3 steps",
                     "selectors": "agent-side structured selectors resolved before MCP call",
                     "missing_args": "args that the agent must infer before execution",
                     "diagnostics": "planner assumptions and warnings",
                 },
+                "ordering": (
+                    "The steps array order is the execution order. Agents should "
+                    "not ask the model to generate step ids or dependency lists."
+                ),
             },
             "primitive_tools": _primitive_tool_catalog(primitive_tools),
             "primitive_plan_examples": [
@@ -5273,12 +5327,10 @@ _result_ = {{
                         },
                         "steps": [
                             {
-                                "step_id": "create_base_frame",
                                 "primitive_tool": "create_coordinate_system",
                                 "missing_args": ["euler_angles", "translation"],
                             },
                             {
-                                "step_id": "observe_after_build",
                                 "primitive_tool": "get_body_snapshot",
                                 "missing_args": ["doc_name", "body_name"],
                             },
@@ -5297,7 +5349,6 @@ _result_ = {{
                         "plan_level": "L2",
                         "steps": [
                             {
-                                "step_id": "base_cs",
                                 "primitive_tool": "create_coordinate_system",
                                 "args": {
                                     "name": "BaseXY",
@@ -5306,7 +5357,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "block_profile",
                                 "primitive_tool": "create_sketch_geometry",
                                 "args": {
                                     "sketch_name": "BlockProfile",
@@ -5318,19 +5368,18 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "block_constraints",
                                 "primitive_tool": "apply_sketch_constraints",
                                 "args": {"sketch_name": "BlockProfile"},
                                 "missing_args": ["constraints"],
                                 "diagnostics": {
                                     "intent": (
-                                        "Constrain rectangle closed, horizontal/vertical, "
+                                        "Constrain rectangle closed, anchored to origin, "
+                                        "horizontal/vertical, "
                                         "with length aliases block_length and block_width."
                                     )
                                 },
                             },
                             {
-                                "step_id": "block_extrude",
                                 "primitive_tool": "execute_extrude",
                                 "args": {
                                     "sketch_name": "BlockProfile",
@@ -5341,7 +5390,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "hole_profile",
                                 "primitive_tool": "create_sketch_geometry",
                                 "args": {
                                     "sketch_name": "HoleProfile",
@@ -5356,7 +5404,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "hole_constraints",
                                 "primitive_tool": "apply_sketch_constraints",
                                 "args": {"sketch_name": "HoleProfile"},
                                 "missing_args": ["constraints"],
@@ -5369,7 +5416,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "hole_tool",
                                 "primitive_tool": "execute_extrude",
                                 "args": {
                                     "sketch_name": "HoleProfile",
@@ -5379,7 +5425,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "cut_hole",
                                 "primitive_tool": "execute_boolean",
                                 "args": {
                                     "base_object_name": "BlockSolid",
@@ -5399,7 +5444,6 @@ _result_ = {{
                         "plan_level": "L3",
                         "steps": [
                             {
-                                "step_id": "cs",
                                 "primitive_tool": "create_coordinate_system",
                                 "args": {
                                     "name": "BaseXY",
@@ -5408,7 +5452,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "sketch",
                                 "primitive_tool": "create_sketch_geometry",
                                 "args": {
                                     "sketch_name": "RectProfile",
@@ -5434,7 +5477,6 @@ _result_ = {{
                                 },
                             },
                             {
-                                "step_id": "extrude",
                                 "primitive_tool": "execute_extrude",
                                 "args": {
                                     "sketch_name": "RectProfile",
@@ -5502,7 +5544,7 @@ _result_ = {{
                     },
                 },
                 "batch_service_boundary": (
-                    "execute_fabrication_plan is a deterministic FabricationPlan "
+                    "execute_operation_plan is a deterministic OperationPlan "
                     "batch service for templates/converters, not the default "
                     "agentic no-template route."
                 ),
@@ -5525,6 +5567,224 @@ _result_ = {{
             "get_body_snapshot": get_body_snapshot,
         }
         return _validate_primitive_plan_payload(plan, primitive_tools)
+
+    @mcp.tool()
+    async def validate_operation_plan(
+        plan: dict[str, Any] | str | None = None,
+        plan_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate an ordered OperationPlan before batch execution."""
+        from freecad_mcp.tools.operation_plan_schema import (
+            validate_operation_plan as _validate_plan,
+        )
+        from freecad_mcp.tools.structured_input import load_structured_input
+
+        try:
+            plan_data = load_structured_input(plan, plan_path, "plan")
+        except ValueError as exc:
+            return {"valid": False, "errors": [str(exc)]}
+        return _validate_plan(plan_data)
+
+    @mcp.tool()
+    async def execute_operation_plan(  # noqa: PLR0912
+        plan: dict[str, Any] | str | None = None,
+        doc_name: str | None = None,
+        plan_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute an ordered OperationPlan by dispatching primitive tools in list order."""
+        from freecad_mcp.tools.operation_plan_schema import (
+            OperationPlan,
+        )
+        from freecad_mcp.tools.operation_plan_schema import (
+            validate_operation_plan as _validate_operation_plan,
+        )
+        from freecad_mcp.tools.structured_input import load_structured_input
+
+        plan_data = load_structured_input(plan, plan_path, "plan")
+        op_plan = OperationPlan.from_dict(plan_data)
+        validation = _validate_operation_plan(plan_data)
+        if not validation.get("valid"):
+            raise ValueError(validation)
+
+        feature_names: list[str] = []
+        cs_map: dict[str, str] = {}
+        sketch_name_map: dict[str, str] = {}
+        object_name_map: dict[str, str] = {}
+        sketch_constraint_results: list[dict[str, Any]] = []
+        parametric_binding_diagnostics: list[dict[str, Any]] = []
+        steps_completed = 0
+        last_body_name: str | None = None
+        use_spreadsheet_aliases = bool(
+            op_plan.metadata.get("use_spreadsheet_aliases", True)
+        )
+
+        def _resolve_object_ref(name: str | None) -> str | None:
+            if name is None:
+                return None
+            return object_name_map.get(name, name)
+
+        def _record_bound_params(
+            params: list[dict[str, Any]] | None,
+            *,
+            source: str,
+            spec_name: str | None,
+            actual_name: str | None,
+        ) -> None:
+            for item in params or []:
+                parametric_binding_diagnostics.append(
+                    {
+                        "source": source,
+                        "spec_name": spec_name,
+                        "object_name": actual_name or item.get("object"),
+                        "alias": item.get("alias"),
+                        "role": item.get("role"),
+                        "property": item.get("property"),
+                        "cell": item.get("cell"),
+                        "value": item.get("value"),
+                        "unit": item.get("unit"),
+                        "diagnostic": item.get("diagnostic"),
+                        "bound": bool(item.get("cell") and item.get("property")),
+                    }
+                )
+
+        for op in op_plan.operations:
+            args = dict(op.args)
+            tool_name = op.tool_name
+            if doc_name is not None:
+                args.setdefault("doc_name", doc_name)
+
+            if tool_name == "create_coordinate_system":
+                attachment = args.get("attachment_support")
+                if isinstance(attachment, dict) and attachment.get("target"):
+                    attachment = dict(attachment)
+                    attachment["target"] = _resolve_object_ref(
+                        str(attachment["target"])
+                    )
+                    args["attachment_support"] = attachment
+                if not use_spreadsheet_aliases:
+                    args.pop("param_aliases", None)
+                result = await create_coordinate_system(**args)  # type: ignore[name-defined]
+                spec_name = args.get("name")
+                if spec_name:
+                    cs_map[str(spec_name)] = result["cs_name"]
+                _record_bound_params(
+                    result.get("bound_params", []),
+                    source="coordinate_system",
+                    spec_name=spec_name,
+                    actual_name=result.get("cs_internal_name"),
+                )
+            elif tool_name == "create_sketch_geometry":
+                cs_name = args.get("coordinate_system_name")
+                if cs_name in cs_map:
+                    args["coordinate_system_name"] = cs_map[str(cs_name)]
+                result = await create_sketch_geometry(**args)  # type: ignore[name-defined]
+                spec_name = args.get("sketch_name")
+                actual_name = result["sketch_name"]
+                if spec_name:
+                    sketch_name_map[str(spec_name)] = actual_name
+            elif tool_name == "apply_sketch_constraints":
+                sk_name = args.get("sketch_name")
+                if sk_name in sketch_name_map:
+                    args["sketch_name"] = sketch_name_map[str(sk_name)]
+                args.setdefault("bind_to_spreadsheet", use_spreadsheet_aliases)
+                result = await apply_sketch_constraints(**args)  # type: ignore[name-defined]
+                sketch_constraint_results.append(
+                    {
+                        "sketch_name": args.get("sketch_name"),
+                        "spec_sketch_name": sk_name,
+                        "constraint_catalog": result.get("constraint_catalog", []),
+                        "constraint_catalog_summary": result.get(
+                            "constraint_catalog_summary", {}
+                        ),
+                        "applied_constraints": result.get("applied_constraints", []),
+                        "applied_log": result.get("applied_log", []),
+                        "dof_after": result.get("dof_after"),
+                        "solve_status": result.get("solve_status"),
+                        "geometry_drift": result.get("geometry_drift"),
+                        "bound_params": result.get("bound_params", []),
+                    }
+                )
+                _record_bound_params(
+                    result.get("bound_params", []),
+                    source="sketch_constraints",
+                    spec_name=sk_name,
+                    actual_name=args.get("sketch_name"),
+                )
+            elif tool_name in {"execute_extrude", "execute_revolve", "execute_helix"}:
+                sk_name = args.get("sketch_name")
+                if sk_name in sketch_name_map:
+                    args["sketch_name"] = sketch_name_map[str(sk_name)]
+                if not use_spreadsheet_aliases:
+                    args.pop("param_aliases", None)
+                if tool_name == "execute_extrude":
+                    result = await execute_extrude(**args)  # type: ignore[name-defined]
+                elif tool_name == "execute_revolve":
+                    result = await execute_revolve(**args)  # type: ignore[name-defined]
+                else:
+                    result = await execute_helix(**args)  # type: ignore[name-defined]
+                created_name = result.get("feature_name", "")
+                spec_name = op.args.get("feature_name")
+                if spec_name and created_name:
+                    object_name_map[str(spec_name)] = created_name
+                feature_names.append(created_name)
+                last_body_name = result.get("body_name") or created_name
+                _record_bound_params(
+                    result.get("bound_params", []),
+                    source="feature",
+                    spec_name=str(spec_name) if spec_name else None,
+                    actual_name=created_name,
+                )
+            elif tool_name == "execute_boolean":
+                args["base_object_name"] = _resolve_object_ref(
+                    args.get("base_object_name")
+                )
+                args["tool_object_name"] = _resolve_object_ref(
+                    args.get("tool_object_name")
+                )
+                result = await execute_boolean(**args)  # type: ignore[name-defined]
+                created_name = result.get("feature_name", "")
+                spec_name = op.args.get("result_name") or op.args.get("feature_name")
+                if spec_name and created_name:
+                    object_name_map[str(spec_name)] = created_name
+                feature_names.append(created_name)
+                last_body_name = created_name
+            elif tool_name in {"feature_fillet", "feature_chamfer"}:
+                args.setdefault("body_name", last_body_name)
+                if tool_name == "feature_fillet":
+                    result = await feature_fillet(**args)  # type: ignore[name-defined]
+                else:
+                    result = await feature_chamfer(**args)  # type: ignore[name-defined]
+                created_name = result.get("feature_name", "")
+                feature_names.append(created_name)
+            elif tool_name == "get_body_snapshot":
+                args.setdefault("body_name", last_body_name)
+                result = await get_body_snapshot(**args)  # type: ignore[name-defined]
+            else:
+                raise ValueError(f"Unsupported operation tool: {tool_name!r}")
+            steps_completed += 1
+
+        snapshot: dict[str, Any] = {}
+        tunable: dict[str, Any] = {"params": [], "spreadsheet_name": None}
+        if last_body_name:
+            with contextlib.suppress(Exception):
+                snapshot = await get_body_snapshot(  # type: ignore[name-defined]
+                    body_name=last_body_name, doc_name=doc_name
+                )
+        with contextlib.suppress(Exception):
+            tunable = await list_tunable_params(doc_name=doc_name)  # type: ignore[name-defined]
+
+        return {
+            "body_name": last_body_name,
+            "feature_names": feature_names,
+            "tunable_params": tunable,
+            "bounding_box": snapshot.get("bounding_box", {}),
+            "volume": snapshot.get("volume", 0.0),
+            "sketch_constraint_results": sketch_constraint_results,
+            "parametric_binding_diagnostics": parametric_binding_diagnostics,
+            "steps_completed": steps_completed,
+            "operation_count": len(op_plan.operations),
+            "success": True,
+        }
 
     @mcp.tool()
     async def validate_fabrication_plan(

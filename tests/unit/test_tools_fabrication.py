@@ -89,6 +89,8 @@ class TestFabricationTools:
             "get_body_snapshot",
             "describe_primitive_plan_schema",
             "validate_primitive_plan",
+            "validate_operation_plan",
+            "execute_operation_plan",
             "validate_fabrication_plan",
             "execute_fabrication_plan",
         }
@@ -1397,11 +1399,30 @@ class TestFabricationSourceConventions:
         assert "_fix_constraint" in source
         assert 'Sketcher.Constraint("Block", geo_idx)' in source
         assert (
-            "p = None"
+            "c = _fix_constraint(i)"
             in source.split('elif ctype == "Fix":')[1].split(
                 'elif ctype == "Midpoint":'
             )[0]
         )
+
+    def test_point_fix_lowers_to_origin_distances(self) -> None:
+        """Point-level Fix avoids version-sensitive FreeCAD Lock/Block overloads."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        fix_branch = source.split('elif ctype == "Fix":')[1].split(
+            'elif ctype == "Midpoint":'
+        )[0]
+        assert "_apply_point_fix_as_distances" in source
+        assert "point_fix_lowered_to_distance" in source
+        assert '["origin", ref, {"length": length, "direction": direction}]' in source
+        assert (
+            "_apply_point_fix_as_distances(entry, i, p, entry_index=entry_index)"
+            in fix_branch
+        )
+        assert "return" in fix_branch
 
     def test_directed_vertical_distance_from_ground_truth(self) -> None:
         """VERTICAL Distance uses signed delta from sketch_helpers."""
@@ -1581,7 +1602,7 @@ class TestConnectorTemplates:
 
     @pytest.mark.asyncio
     async def test_l_connector_template_contract(self, mock_mcp: MagicMock) -> None:
-        """L connector template returns a FabricationPlan with tunable aliases."""
+        """L connector template returns an ordered OperationPlan with tunable aliases."""
         from freecad_mcp.tools.templates import register_template_tools
 
         async def get_bridge() -> AsyncMock:
@@ -1598,16 +1619,21 @@ class TestConnectorTemplates:
             },
         )
 
-        assert len(result["coordinate_systems"]) == 1
-        assert len(result["sketches"]) == 1
-        assert len(result["features"]) == 1
-        sketch = result["sketches"][0]
-        assert len(sketch["sketch"]) == 6
-        assert sketch["constraints"]["Length"][0][1]["alias"] == "arm_x_length"
-        assert sketch["constraints"]["Length"][1][1]["alias"] == "arm_x_width"
-        assert sketch["constraints"]["Length"][2][1]["alias"] == "arm_y_width"
-        assert sketch["constraints"]["Length"][3][1]["alias"] == "arm_y_length"
-        assert result["features"][0]["param_aliases"] == {"towards": "thickness"}
+        operations = result["operations"]
+        assert [op["tool_name"] for op in operations] == [
+            "create_coordinate_system",
+            "create_sketch_geometry",
+            "apply_sketch_constraints",
+            "execute_extrude",
+        ]
+        sketch = operations[1]["args"]["sketch"]
+        constraints = operations[2]["args"]["constraints"]
+        assert len(sketch) == 6
+        assert constraints["Length"][0][1]["alias"] == "arm_x_length"
+        assert constraints["Length"][1][1]["alias"] == "arm_x_width"
+        assert constraints["Length"][2][1]["alias"] == "arm_y_width"
+        assert constraints["Length"][3][1]["alias"] == "arm_y_length"
+        assert operations[3]["args"]["param_aliases"] == {"towards": "thickness"}
         assert result["metadata"]["editable_aliases"] == [
             "arm_x_length",
             "arm_x_width",
@@ -1643,7 +1669,7 @@ class TestConnectorTemplates:
 
         assert result["metadata"]["template"] == "l_connector"
         assert result["metadata"]["intent_spec"]["template_name"] == "l_connector"
-        assert result["features"][0]["params"]["towards"] == 6.0
+        assert result["operations"][3]["args"]["towards"] == 6.0
 
     @pytest.mark.asyncio
     async def test_template_catalog_tools(self, mock_mcp: MagicMock) -> None:
@@ -1743,7 +1769,7 @@ class TestConnectorTemplates:
         )
 
         assert package["intent_spec"]["template_name"] == "l_connector"
-        assert package["fabrication_plan"]["metadata"]["template"] == "l_connector"
+        assert package["operation_plan"]["metadata"]["template"] == "l_connector"
         assert package["template_provenance"]["deterministic"] is True
         assert package["compile_diagnostics"]["ok"] is True
 
@@ -1777,13 +1803,13 @@ class TestConnectorTemplates:
         from_path = await mock_mcp._registered_tools["compile_intent"](
             intent_path=str(intent_path)
         )
-        assert from_path["fabrication_plan"]["metadata"]["template"] == "l_connector"
+        assert from_path["operation_plan"]["metadata"]["template"] == "l_connector"
 
     @pytest.mark.asyncio
     async def test_compile_intent_writes_compact_file_backed_handoff(
         self, mock_mcp: MagicMock, tmp_path
     ) -> None:
-        """A requested artifact path keeps the FabricationPlan out of MCP text."""
+        """A requested artifact path keeps the OperationPlan out of MCP text."""
         from freecad_mcp.tools.templates import register_template_tools
 
         async def get_bridge() -> AsyncMock:
@@ -1799,9 +1825,9 @@ class TestConnectorTemplates:
             output_plan_path=str(plan_path),
         )
 
-        assert "fabrication_plan" not in result
-        assert result["fabrication_plan_path"] == str(plan_path.resolve())
-        assert result["fabrication_plan_summary"]["sketch_count"] > 0
+        assert "operation_plan" not in result
+        assert result["operation_plan_path"] == str(plan_path.resolve())
+        assert result["operation_plan_summary"]["operation_count"] > 0
         written = json.loads(plan_path.read_text(encoding="utf-8"))
         assert written["metadata"]["template"] == "l_connector"
 
@@ -1857,9 +1883,9 @@ class TestConnectorTemplates:
             output_plan_path=str(plan_path),
         )
 
-        assert "fabrication_plan" not in result
-        assert result["fabrication_plan_path"] == str(plan_path.resolve())
-        assert result["fabrication_plan_summary"]["feature_count"] >= 3
+        assert "operation_plan" not in result
+        assert result["operation_plan_path"] == str(plan_path.resolve())
+        assert result["operation_plan_summary"]["tool_counts"]["execute_boolean"] >= 2
         written = json.loads(plan_path.read_text(encoding="utf-8"))
         assert written["metadata"]["template"] == "l_connector"
         assert (
@@ -1887,5 +1913,5 @@ class TestConnectorTemplates:
         result = await mock_mcp._registered_tools["compile_intent"](
             intent_path="/no/such/intent.json"
         )
-        assert result["fabrication_plan"] is None
+        assert result["operation_plan"] is None
         assert "intent_path does not exist" in result["compile_diagnostics"]["error"]

@@ -10,7 +10,7 @@ from freecad_mcp.intent.schema import (
     IntentSpec,
     validate_hole_array_spec,
 )
-from freecad_mcp.tools.fabrication_schema import validate_fabrication_plan
+from freecad_mcp.tools.operation_plan_schema import validate_operation_plan
 from freecad_mcp.tools.templates.connectors import build_l_connector_plan
 from freecad_mcp.tools.templates.face_catalog import (
     L_CONNECTOR_EXTERIOR_FACE_IDS,
@@ -21,6 +21,10 @@ from freecad_mcp.tools.templates.hole_arrays import (
     compile_hole_groups,
     validate_hole_array_on_face,
 )
+
+
+def _ops(plan, tool_name: str) -> list:
+    return [op for op in plan.operations if op.tool_name == tool_name]
 
 
 @pytest.fixture
@@ -153,7 +157,7 @@ class TestHoleArrayValidation:
 
 
 class TestHolePlanCompilation:
-    """Tests for FabricationPlan hole feature chains."""
+    """Tests for ordered OperationPlan hole feature chains."""
 
     def test_single_face_adds_sketch_extrude_boolean(
         self, base_slots: dict[str, float]
@@ -173,36 +177,36 @@ class TestHolePlanCompilation:
         ]
         plan = build_l_connector_plan(slots=base_slots, hole_groups=groups)
 
-        assert len(plan.sketches) == 2  # profile + holes
-        assert len(plan.features) == 3  # extrude + tool + cut
+        assert len(_ops(plan, "create_sketch_geometry")) == 2  # profile + holes
+        assert len(_ops(plan, "execute_extrude")) == 2  # base + hole tool
+        assert len(_ops(plan, "execute_boolean")) == 1
         assert plan.metadata["hole_face_ids"] == ["arm_x_top"]
         assert plan.metadata["hole_group_count"] == 1
 
-        hole_sketch = plan.sketches[1]
-        assert hole_sketch.sketch_name == "Holes_arm_x_top_0"
-        assert hole_sketch.coordinate_system_name == "CS_arm_x_top"
+        hole_sketch = _ops(plan, "create_sketch_geometry")[1]
+        assert hole_sketch.args["sketch_name"] == "Holes_arm_x_top_0"
+        assert hole_sketch.args["coordinate_system_name"] == "CS_arm_x_top"
         hole_plane = next(
-            cs for cs in plan.coordinate_systems if cs.name == "CS_arm_x_top"
+            op
+            for op in _ops(plan, "create_coordinate_system")
+            if op.args["name"] == "CS_arm_x_top"
         )
-        assert hole_plane.translation == [20.0, 0.0, 10.0]
-        assert hole_plane.attachment_support == {"target": "L_Connector_Solid"}
-        assert hole_plane.param_aliases == {
+        assert hole_plane.args["translation"] == [20.0, 0.0, 10.0]
+        assert hole_plane.args["attachment_support"] == {"target": "L_Connector_Solid"}
+        assert hole_plane.args["param_aliases"] == {
             "translation.x": "arm_y_width",
             "translation.z": "thickness",
         }
-        assert hole_sketch.attach_after_feature == "L_Connector_Solid"
-        assert "circle_1" in hole_sketch.sketch
-        assert len(hole_sketch.sketch) == 4
+        assert "circle_1" in hole_sketch.args["sketch"]
+        assert len(hole_sketch.args["sketch"]) == 4
         assert "hole_arm_x_top_diameter" in plan.metadata["editable_aliases"]
         assert "hole_arm_x_top_margin_u" in plan.metadata["editable_aliases"]
 
-        tool_feat = plan.features[1]
-        cut_feat = plan.features[2]
-        assert tool_feat.type == "extrude"
-        assert tool_feat.feature_name == "HoleTool_arm_x_top_0"
-        assert cut_feat.type == "boolean"
-        assert cut_feat.params["base_object_name"] == "L_Connector_Solid"
-        assert cut_feat.params["tool_object_name"] == "HoleTool_arm_x_top_0"
+        tool_feat = _ops(plan, "execute_extrude")[1]
+        cut_feat = _ops(plan, "execute_boolean")[0]
+        assert tool_feat.args["feature_name"] == "HoleTool_arm_x_top_0"
+        assert cut_feat.args["base_object_name"] == "L_Connector_Solid"
+        assert cut_feat.args["tool_object_name"] == "HoleTool_arm_x_top_0"
 
     def test_multiple_faces_chain_boolean_base(
         self, base_slots: dict[str, float]
@@ -218,10 +222,10 @@ class TestHolePlanCompilation:
         ]
         plan = build_l_connector_plan(slots=base_slots, hole_groups=groups)
 
-        cuts = [f for f in plan.features if f.type == "boolean"]
+        cuts = _ops(plan, "execute_boolean")
         assert len(cuts) == 2
-        assert cuts[0].params["base_object_name"] == "L_Connector_Solid"
-        assert cuts[1].params["base_object_name"] == "L_After_Holes_arm_x_top_0"
+        assert cuts[0].args["base_object_name"] == "L_Connector_Solid"
+        assert cuts[1].args["base_object_name"] == "L_After_Holes_arm_x_top_0"
 
     def test_inner_side_holes_share_width_cut_depth(self) -> None:
         """Side-face through-hole tools follow shared width aliases."""
@@ -252,14 +256,14 @@ class TestHolePlanCompilation:
         )
 
         tool_aliases = {
-            f.feature_name: f.param_aliases
-            for f in plan.features
-            if (f.feature_name or "").startswith("HoleTool_")
+            op.args["feature_name"]: op.args["param_aliases"]
+            for op in _ops(plan, "execute_extrude")
+            if op.args.get("feature_name", "").startswith("HoleTool_")
         }
         plane_aliases = {
-            cs.name: cs.param_aliases
-            for cs in plan.coordinate_systems
-            if (cs.name or "").startswith("CS_inner_corner_")
+            op.args["name"]: op.args["param_aliases"]
+            for op in _ops(plan, "create_coordinate_system")
+            if op.args.get("name", "").startswith("CS_inner_corner_")
         }
 
         assert tool_aliases == {
@@ -320,8 +324,8 @@ class TestHolePlanCompilation:
 
         plan = build_l_connector_plan(slots=base_slots, hole_groups=groups)
         assert plan.metadata["hole_group_count"] == 9
-        assert len([f for f in plan.features if f.type == "boolean"]) == 9
-        validation = validate_fabrication_plan(plan.to_dict())
+        assert len(_ops(plan, "execute_boolean")) == 9
+        validation = validate_operation_plan(plan.to_dict())
         assert validation["valid"], validation["errors"]
 
 
@@ -357,9 +361,11 @@ class TestIntentWithHoles:
         assert "hole_groups" in plan.metadata["intent_spec"]
         assert "width" in plan.metadata["editable_aliases"]
         hole_plane = next(
-            cs for cs in plan.coordinate_systems if cs.name != "LConnectorPlane"
+            op
+            for op in _ops(plan, "create_coordinate_system")
+            if op.args["name"] != "LConnectorPlane"
         )
-        assert hole_plane.param_aliases["translation.x"] == "width"
+        assert hole_plane.args["param_aliases"]["translation.x"] == "width"
 
     @pytest.mark.parametrize(
         ("arm_x_length", "arm_y_length", "width", "thickness"),
@@ -412,17 +418,17 @@ class TestIntentWithHoles:
             ],
         )
         plan = resolve_intent_to_plan(intent)
-        validation = validate_fabrication_plan(plan.to_dict())
+        validation = validate_operation_plan(plan.to_dict())
 
         assert validation["valid"], validation["errors"]
         assert plan.metadata["editable_aliases"].count("width") == 1
-        assert [f.feature_name for f in plan.features if f.type == "boolean"] == [
+        assert [op.args["result_name"] for op in _ops(plan, "execute_boolean")] == [
             "L_After_Holes_arm_x_top_0",
             "L_After_Holes_arm_y_top_1",
         ]
-        planes = {cs.name: cs for cs in plan.coordinate_systems}
-        assert planes["CS_arm_x_top"].param_aliases["translation.x"] == "width"
-        assert planes["CS_arm_y_top"].param_aliases["translation.y"] == "width"
+        planes = {op.args["name"]: op for op in _ops(plan, "create_coordinate_system")}
+        assert planes["CS_arm_x_top"].args["param_aliases"]["translation.x"] == "width"
+        assert planes["CS_arm_y_top"].args["param_aliases"]["translation.y"] == "width"
 
     def test_unknown_face_in_intent_raises(self) -> None:
         """Invalid face_id in hole_groups raises during validation."""
@@ -446,14 +452,23 @@ class TestCompileHoleGroups:
     def test_returns_plane_attached_sketches(
         self, base_slots: dict[str, float]
     ) -> None:
-        """Each hole group adds a deferred sketch on the face UV plane."""
+        """Each hole group adds ordered face-attached sketch operations."""
         groups = [HoleArraySpec(face_id="bottom", margin_u=30.0, margin_v=40.0)]
-        coordinate_systems, sketches, features, _face_ids, aliases = (
-            compile_hole_groups(groups, slots=base_slots)
-        )
+        operations, _face_ids, aliases = compile_hole_groups(groups, slots=base_slots)
+        sketches = [op for op in operations if op.tool_name == "create_sketch_geometry"]
+        coordinate_systems = [
+            op for op in operations if op.tool_name == "create_coordinate_system"
+        ]
+        features = [
+            op
+            for op in operations
+            if op.tool_name in {"execute_extrude", "execute_boolean"}
+        ]
         assert len(sketches) == 1
         assert len(coordinate_systems) == 1
-        assert sketches[0].coordinate_system_name == coordinate_systems[0].name
-        assert sketches[0].attach_after_feature == "L_Connector_Solid"
+        assert (
+            sketches[0].args["coordinate_system_name"]
+            == coordinate_systems[0].args["name"]
+        )
         assert "hole_bottom_diameter" in aliases
         assert len(features) == 2

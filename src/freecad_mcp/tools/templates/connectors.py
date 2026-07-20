@@ -5,30 +5,25 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from freecad_mcp.intent.schema import HoleArraySpec
-from freecad_mcp.tools.fabrication_schema import (
-    CoordinateSystemSpec,
-    FabricationPlan,
-    FeatureSpec,
-    SketchSpec,
-)
+from freecad_mcp.tools.operation_plan_schema import OperationPlan, OperationSpec
 from freecad_mcp.tools.templates.hole_arrays import compile_hole_groups
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 
-def _plane_to_coordinate_system(plane: dict[str, Any] | None) -> CoordinateSystemSpec:
+def _plane_to_coordinate_system_args(plane: dict[str, Any] | None) -> dict[str, Any]:
     if not plane:
-        return CoordinateSystemSpec(
-            euler_angles=[0.0, 0.0, 0.0],
-            translation=[0.0, 0.0, 0.0],
-            name="LConnectorPlane",
-        )
-    return CoordinateSystemSpec(
-        euler_angles=[float(v) for v in plane.get("euler_angles", [0.0, 0.0, 0.0])],
-        translation=[float(v) for v in plane.get("translation", [0.0, 0.0, 0.0])],
-        name=plane.get("name", "LConnectorPlane"),
-    )
+        return {
+            "euler_angles": [0.0, 0.0, 0.0],
+            "translation": [0.0, 0.0, 0.0],
+            "name": "LConnectorPlane",
+        }
+    return {
+        "euler_angles": [float(v) for v in plane.get("euler_angles", [0.0, 0.0, 0.0])],
+        "translation": [float(v) for v in plane.get("translation", [0.0, 0.0, 0.0])],
+        "name": plane.get("name", "LConnectorPlane"),
+    }
 
 
 def _validate_l_connector_slots(slots: dict[str, float]) -> None:
@@ -64,7 +59,7 @@ def _build_l_connector_profile_plan(
     slots: dict[str, float],
     plane: dict[str, Any] | None = None,
     shared_width_alias: str | None = None,
-) -> FabricationPlan:
+) -> OperationPlan:
     """Build the base L-profile sketch and extrude (no holes)."""
     lx = float(slots["arm_x_length"])
     ly = float(slots["arm_y_length"])
@@ -72,7 +67,7 @@ def _build_l_connector_profile_plan(
     wy = float(slots["arm_y_width"])
     thick = float(slots["thickness"])
 
-    cs = _plane_to_coordinate_system(plane)
+    cs_args = _plane_to_coordinate_system_args(plane)
     sketch = {
         "line_1": {"start": [0.0, 0.0], "end": [lx, 0.0]},
         "line_2": {"start": [lx, 0.0], "end": [lx, wx]},
@@ -146,25 +141,34 @@ def _build_l_connector_profile_plan(
             ],
         ],
     }
-    return FabricationPlan(
-        coordinate_systems=[cs],
-        sketches=[
-            SketchSpec(
-                sketch=sketch,
-                constraints=constraints,
-                coordinate_system_name=cs.name,
-                sketch_name="L_Connector_Profile",
-            )
-        ],
-        features=[
-            FeatureSpec(
-                type="extrude",
-                sketch_name="L_Connector_Profile",
-                operation="NewBody",
-                params={"towards": thick, "opposite": 0.0},
-                param_aliases={"towards": "thickness"},
-                feature_name="L_Connector_Solid",
-            )
+    return OperationPlan(
+        operations=[
+            OperationSpec("create_coordinate_system", cs_args),
+            OperationSpec(
+                "create_sketch_geometry",
+                {
+                    "sketch": sketch,
+                    "coordinate_system_name": cs_args["name"],
+                    "sketch_name": "L_Connector_Profile",
+                },
+            ),
+            OperationSpec(
+                "apply_sketch_constraints",
+                {
+                    "sketch_name": "L_Connector_Profile",
+                    "constraints": constraints,
+                },
+            ),
+            OperationSpec(
+                "execute_extrude",
+                {
+                    "sketch_name": "L_Connector_Profile",
+                    "towards": thick,
+                    "opposite": 0.0,
+                    "param_aliases": {"towards": "thickness"},
+                    "feature_name": "L_Connector_Solid",
+                },
+            ),
         ],
         metadata={
             "template": "l_connector",
@@ -213,8 +217,8 @@ def build_l_connector_plan(
     plane: dict[str, Any] | None = None,
     hole_groups: list[HoleArraySpec] | None = None,
     shared_width_alias: str | None = None,
-) -> FabricationPlan:
-    """Build a FabricationPlan for a fully constrained L connector.
+) -> OperationPlan:
+    """Build an OperationPlan for a fully constrained L connector.
 
     Args:
         slots: Resolved dimension slots in millimetres.  Required keys:
@@ -227,7 +231,7 @@ def build_l_connector_plan(
             widths intentionally share one user-facing parameter.
 
     Returns:
-        FabricationPlan ready for ``execute_fabrication_plan()``.
+        OperationPlan ready for ``execute_operation_plan()``.
 
     Raises:
         ValueError: If required slots are missing or geometry is infeasible.
@@ -240,18 +244,14 @@ def build_l_connector_plan(
     if not hole_groups:
         return plan
 
-    hole_coordinate_systems, hole_sketches, hole_features, face_ids, hole_aliases = (
-        compile_hole_groups(
-            hole_groups,
-            slots=slots,
-            base_body_name="L_Connector_Solid",
-            shared_width_alias=shared_width_alias,
-        )
+    hole_operations, face_ids, hole_aliases = compile_hole_groups(
+        hole_groups,
+        slots=slots,
+        base_body_name="L_Connector_Solid",
+        shared_width_alias=shared_width_alias,
     )
 
-    plan.coordinate_systems.extend(hole_coordinate_systems)
-    plan.sketches.extend(hole_sketches)
-    plan.features.extend(hole_features)
+    plan.operations.extend(hole_operations)
     plan.metadata["hole_face_ids"] = face_ids
     plan.metadata["hole_group_count"] = len(hole_groups)
     editable = list(plan.metadata.get("editable_aliases", []))
@@ -273,7 +273,7 @@ def register_connector_templates(
         plane: dict[str, Any] | None = None,
         hole_groups: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Build an L connector FabricationPlan from resolved dimension slots.
+        """Build an L connector OperationPlan from resolved dimension slots.
 
         Args:
             slots: Dimension values in mm (arm_x_length, arm_y_length,
@@ -283,7 +283,7 @@ def register_connector_templates(
             hole_groups: Optional list of HoleArraySpec dicts (per-face arrays).
 
         Returns:
-            FabricationPlan dict ready for ``execute_fabrication_plan()``.
+            OperationPlan dict ready for ``execute_operation_plan()``.
         """
         parsed_holes = (
             [HoleArraySpec.from_dict(g) for g in hole_groups] if hole_groups else None

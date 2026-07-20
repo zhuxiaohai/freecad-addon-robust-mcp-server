@@ -1835,22 +1835,19 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "key_params": ["plan"],
                         },
                         {
-                            "name": "validate_fabrication_plan",
+                            "name": "validate_operation_plan",
                             "description": (
-                                "Validate a FabricationPlan dict before execution. Checks "
-                                "structure, named references, feature params, sketch entity "
-                                "names, and constraint references without touching FreeCAD. "
+                                "Validate an ordered OperationPlan before batch execution. "
                                 "Accepts plan as a dict, JSON string, or plan_path."
                             ),
                             "key_params": ["plan", "plan_path"],
                         },
                         {
-                            "name": "execute_fabrication_plan",
+                            "name": "execute_operation_plan",
                             "description": (
-                                "Batch-execute a complete FabricationPlan dict produced by a "
-                                "template compiler or direct no-template agent route. Drives "
-                                "all Layer 1 primitives in order: coordinate_systems → "
-                                "sketches → features → finishes. "
+                                "Batch-execute a complete ordered OperationPlan produced by "
+                                "a template compiler or converter. Drives primitive calls in "
+                                "the exact operations list order. "
                                 "Production agents should create a session-owned document "
                                 "with create_document(name=doc_name) first and pass that "
                                 "same doc_name explicitly. Accepts plan as a dict, JSON "
@@ -1900,7 +1897,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "resolve_template",
                             "description": (
-                                "Compile an IntentSpec dict into a FabricationPlan via the "
+                                "Compile an IntentSpec dict into an OperationPlan via the "
                                 "template registry. Fully deterministic — no NL parsing."
                             ),
                             "key_params": ["intent"],
@@ -1909,11 +1906,11 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "name": "compile_intent",
                             "description": (
                                 "Compile an IntentSpec into a handoff package containing "
-                                "intent_spec, deterministic fabrication_plan, provenance, "
+                                "intent_spec, deterministic operation_plan, provenance, "
                                 "assumptions, and compile diagnostics. This is the preferred "
                                 "template compilation boundary for traceable agents: write the "
-                                "fabrication_plan directly to trace/process memory, then call "
-                                "execute_fabrication_plan without model-side JSON copying. "
+                                "operation_plan directly to trace/process memory, then call "
+                                "execute_operation_plan without model-side JSON copying. "
                                 "Accepts intent as a dict, JSON string, or intent_path."
                             ),
                             "key_params": ["intent", "intent_path"],
@@ -1921,7 +1918,7 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                         {
                             "name": "resolve_l_connector_template",
                             "description": (
-                                "Build an L connector FabricationPlan from resolved dimension "
+                                "Build an L connector OperationPlan from resolved dimension "
                                 "slots in mm. Supports optional hole_groups per exterior "
                                 "face (rectangular arrays). Prefer resolve_template for "
                                 "full IntentSpec; this shortcut is mainly for debugging."

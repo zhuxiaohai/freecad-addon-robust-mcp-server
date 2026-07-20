@@ -1,15 +1,11 @@
-"""Compile hole array specifications into FabricationPlan fragments."""
+"""Compile hole array specifications into ordered OperationPlan fragments."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from freecad_mcp.intent.schema import HoleArraySpec, validate_hole_array_spec
-from freecad_mcp.tools.fabrication_schema import (
-    CoordinateSystemSpec,
-    FeatureSpec,
-    SketchSpec,
-)
+from freecad_mcp.tools.operation_plan_schema import OperationSpec
 from freecad_mcp.tools.templates.face_catalog import (
     FaceFrame,
     resolve_l_connector_face_frame,
@@ -397,13 +393,11 @@ def compile_hole_array_features(
     group_index: int,
     shared_width_alias: str | None = None,
 ) -> tuple[
-    list[CoordinateSystemSpec],
-    list[SketchSpec],
-    list[FeatureSpec],
+    list[OperationSpec],
     str,
     list[str],
 ]:
-    """Compile one hole group into deferred face-attached sketches and features.
+    """Compile one hole group into ordered face-attached operations.
 
     Args:
         spec: Hole array on a single semantic face.
@@ -414,8 +408,7 @@ def compile_hole_array_features(
             intentionally share one user-facing parameter.
 
     Returns:
-        Tuple of (coordinate_systems, sketches, features, updated_base_name,
-        editable_aliases).
+        Tuple of (operations, updated_base_name, editable_aliases).
 
     Raises:
         ValueError: If the array is invalid or does not fit the face.
@@ -445,54 +438,62 @@ def compile_hole_array_features(
     # entity coordinates and FabricationParams margin/pitch aliases are always
     # relative to this sketch origin (not L-global).  World position:
     # ``frame.uv_to_world(u, v)``.
-    coordinate_system = CoordinateSystemSpec(
-        euler_angles=list(frame.euler_angles),
-        translation=list(frame.origin),
-        name=frame.cs_name,
-        attachment_support={"target": base_body_name},
-        param_aliases=_face_frame_param_aliases(spec.face_id, shared_width_alias),
-    )
-    sketch = SketchSpec(
-        sketch=sketch_entities,
-        constraints=constraints,
-        coordinate_system_name=frame.cs_name,
-        sketch_name=sketch_name,
-        attach_after_feature=base_body_name,
-    )
-
-    extrude = FeatureSpec(
-        type="extrude",
-        sketch_name=sketch_name,
-        operation="NewBody",
-        params={
-            "towards": _THROUGH_EXTRA,
-            # Keep hole tools fully parametric: cut depth tracks the base
-            # thickness so editing FabricationParams.thickness continues to
-            # produce through-holes after recompute.
-            "opposite": float(frame.cut_depth),
-        },
-        param_aliases={
-            "opposite": _face_frame_cut_depth_alias(frame, shared_width_alias),
-        },
-        feature_name=tool_name,
-    )
-
-    boolean_feat = FeatureSpec(
-        type="boolean",
-        sketch_name="",
-        operation="Cut",
-        params={
-            "base_object_name": base_body_name,
-            "tool_object_name": tool_name,
-            "operation": "Cut",
-        },
-        feature_name=result_name,
-    )
-
     return (
-        [coordinate_system],
-        [sketch],
-        [extrude, boolean_feat],
+        [
+            OperationSpec(
+                "create_coordinate_system",
+                {
+                    "euler_angles": list(frame.euler_angles),
+                    "translation": list(frame.origin),
+                    "name": frame.cs_name,
+                    "attachment_support": {"target": base_body_name},
+                    "param_aliases": _face_frame_param_aliases(
+                        spec.face_id, shared_width_alias
+                    ),
+                },
+            ),
+            OperationSpec(
+                "create_sketch_geometry",
+                {
+                    "sketch": sketch_entities,
+                    "coordinate_system_name": frame.cs_name,
+                    "sketch_name": sketch_name,
+                },
+            ),
+            OperationSpec(
+                "apply_sketch_constraints",
+                {
+                    "sketch_name": sketch_name,
+                    "constraints": constraints,
+                },
+            ),
+            OperationSpec(
+                "execute_extrude",
+                {
+                    "sketch_name": sketch_name,
+                    "towards": _THROUGH_EXTRA,
+                    # Keep hole tools fully parametric: cut depth tracks the base
+                    # thickness so editing FabricationParams.thickness continues to
+                    # produce through-holes after recompute.
+                    "opposite": float(frame.cut_depth),
+                    "param_aliases": {
+                        "opposite": _face_frame_cut_depth_alias(
+                            frame, shared_width_alias
+                        ),
+                    },
+                    "feature_name": tool_name,
+                },
+            ),
+            OperationSpec(
+                "execute_boolean",
+                {
+                    "base_object_name": base_body_name,
+                    "tool_object_name": tool_name,
+                    "operation": "Cut",
+                    "result_name": result_name,
+                },
+            ),
+        ],
         result_name,
         aliases,
     )
@@ -542,9 +543,7 @@ def compile_hole_groups(
     base_body_name: str = "L_Connector_Solid",
     shared_width_alias: str | None = None,
 ) -> tuple[
-    list[CoordinateSystemSpec],
-    list[SketchSpec],
-    list[FeatureSpec],
+    list[OperationSpec],
     list[str],
     list[str],
 ]:
@@ -558,30 +557,24 @@ def compile_hole_groups(
             intentionally share one user-facing parameter.
 
     Returns:
-        (coordinate_systems, sketches, features, hole_face_ids, editable_aliases)
+        (operations, hole_face_ids, editable_aliases)
     """
-    all_coordinate_systems: list[CoordinateSystemSpec] = []
-    all_sketches: list[SketchSpec] = []
-    all_features: list[FeatureSpec] = []
+    all_operations: list[OperationSpec] = []
     face_ids: list[str] = []
     aliases: list[str] = []
 
     current_base = base_body_name
     for idx, group in enumerate(hole_groups):
-        cs_list, sk_list, feat_list, new_base, group_aliases = (
-            compile_hole_array_features(
-                group,
-                slots=slots,
-                base_body_name=current_base,
-                group_index=idx,
-                shared_width_alias=shared_width_alias,
-            )
+        operations, new_base, group_aliases = compile_hole_array_features(
+            group,
+            slots=slots,
+            base_body_name=current_base,
+            group_index=idx,
+            shared_width_alias=shared_width_alias,
         )
-        all_coordinate_systems.extend(cs_list)
-        all_sketches.extend(sk_list)
-        all_features.extend(feat_list)
+        all_operations.extend(operations)
         face_ids.append(group.face_id)
         aliases.extend(group_aliases)
         current_base = new_base
 
-    return all_coordinate_systems, all_sketches, all_features, face_ids, aliases
+    return all_operations, face_ids, aliases

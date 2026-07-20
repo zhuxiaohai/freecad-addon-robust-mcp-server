@@ -1,4 +1,4 @@
-"""Template registry: deterministic IntentSpec → FabricationPlan compilation."""
+"""Template registry: deterministic IntentSpec → OperationPlan compilation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from freecad_mcp.tools.templates.face_catalog import L_CONNECTOR_EXTERIOR_FACE_I
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from freecad_mcp.tools.fabrication_schema import FabricationPlan
+    from freecad_mcp.tools.operation_plan_schema import OperationPlan
 
 
 @dataclass
@@ -188,7 +188,7 @@ def validate_hole_groups_for_template(
             raise ValueError(msg)
 
 
-def _build_l_connector_from_intent(intent: IntentSpec) -> FabricationPlan:
+def _build_l_connector_from_intent(intent: IntentSpec) -> OperationPlan:
     from freecad_mcp.tools.templates.connectors import build_l_connector_plan
 
     schema = TEMPLATE_SLOT_SCHEMAS["l_connector"]
@@ -227,7 +227,7 @@ def _build_l_connector_from_intent(intent: IntentSpec) -> FabricationPlan:
     return plan
 
 
-TEMPLATE_BUILDERS: dict[str, Callable[[IntentSpec], FabricationPlan]] = {
+TEMPLATE_BUILDERS: dict[str, Callable[[IntentSpec], OperationPlan]] = {
     "l_connector": _build_l_connector_from_intent,
 }
 
@@ -252,8 +252,8 @@ def validate_intent(intent: IntentSpec) -> None:
     resolve_intent_to_plan(intent)
 
 
-def resolve_intent_to_plan(intent: IntentSpec) -> FabricationPlan:
-    """Compile an IntentSpec into a FabricationPlan via the template registry.
+def resolve_intent_to_plan(intent: IntentSpec) -> OperationPlan:
+    """Compile an IntentSpec into an OperationPlan via the template registry.
 
     This step is fully deterministic — no LLM involvement.
 
@@ -261,7 +261,7 @@ def resolve_intent_to_plan(intent: IntentSpec) -> FabricationPlan:
         intent: Structured intent with template_name, slots, and optional bindings.
 
     Returns:
-        FabricationPlan ready for ``execute_fabrication_plan()``.
+        OperationPlan ready for ``execute_operation_plan()``.
 
     Raises:
         ValueError: If the template is unknown or slots are invalid.
@@ -277,7 +277,7 @@ def resolve_intent_to_plan(intent: IntentSpec) -> FabricationPlan:
 def compile_intent_package(intent: IntentSpec) -> dict[str, object]:
     """Compile IntentSpec and preserve provenance for downstream repair.
 
-    ``fabrication_plan`` is the executable payload. ``intent_spec`` remains in
+    ``operation_plan`` is the executable payload. ``intent_spec`` remains in
     the package so execution failures can be attributed back to intent parsing,
     deterministic template compilation, or CAD adapter execution.
     """
@@ -285,7 +285,7 @@ def compile_intent_package(intent: IntentSpec) -> dict[str, object]:
     catalog_entry = describe_template(intent.template_name)
     return {
         "intent_spec": intent.to_dict(),
-        "fabrication_plan": plan.to_dict(),
+        "operation_plan": plan.to_dict(),
         "assumptions": list(intent.assumptions),
         "template_provenance": {
             "template_name": intent.template_name,
@@ -295,7 +295,7 @@ def compile_intent_package(intent: IntentSpec) -> dict[str, object]:
         },
         "compile_diagnostics": {
             "ok": True,
-            "stage": "intent_to_fabrication_plan",
+            "stage": "intent_to_operation_plan",
             "failure_attribution": None,
         },
     }

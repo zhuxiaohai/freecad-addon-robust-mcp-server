@@ -108,8 +108,8 @@ class TestResolveIntentToPlan:
             assumptions=["unit=mm", "width applies to both arms"],
         )
         plan = resolve_intent_to_plan(intent)
-        sketch = plan.sketches[0].sketch
-        length_constraints = plan.sketches[0].constraints["Length"]
+        sketch = plan.operations[1].args["sketch"]
+        length_constraints = plan.operations[2].args["constraints"]["Length"]
 
         assert sketch["line_1"]["end"] == [50.0, 0.0]
         assert length_constraints[0][1]["length"] == 50.0
@@ -126,7 +126,7 @@ class TestResolveIntentToPlan:
             "width",
             "thickness",
         ]
-        assert plan.features[0].params["towards"] == 6.0
+        assert plan.operations[3].args["towards"] == 6.0
         assert plan.metadata["intent_spec"]["template_name"] == "l_connector"
         assert plan.metadata["assumptions"] == [
             "unit=mm",
@@ -206,7 +206,7 @@ class TestTemplateCatalog:
         package = cast("dict[str, Any]", compile_intent_package(intent))
 
         assert package["intent_spec"]["template_name"] == "l_connector"
-        assert package["fabrication_plan"]["metadata"]["template"] == "l_connector"
+        assert package["operation_plan"]["metadata"]["template"] == "l_connector"
         assert package["assumptions"] == ["unit=mm"]
         assert package["template_provenance"]["deterministic"] is True
         assert package["compile_diagnostics"]["ok"] is True

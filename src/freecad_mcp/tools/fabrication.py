@@ -23,8 +23,6 @@ Tool groups
 A — Coordinate System:  ``create_coordinate_system``
 B — Sketch Geometry:    ``create_sketch_geometry``, ``parse_freecad_sketch``
 C — Sketch Constraints: ``check_sketch_constraints``, ``apply_sketch_constraints``,
-                        ``build_edited_sketch_constraints``,
-                        ``evaluate_sketch_editability``
 D — Feature Execution:  ``execute_extrude``, ``execute_boolean``,
                         ``execute_revolve``, ``execute_helix``
 E — Finishing:          ``feature_fillet``, ``feature_chamfer``
@@ -64,11 +62,11 @@ Directed ``Distance`` constraints with ``HORIZONTAL``/``VERTICAL`` use signed
 ``DistanceX``/``DistanceY`` values.  Sign polarity is taken from a persisted
 sketch map when available, otherwise from creation-time ground-truth geometry
 (with live endpoint fallback).  Magnitude always comes from the HistCAD length
-(so editability edits keep topology direction stable).
+(so later parameter changes keep topology direction stable).
 
 Optional ``orientation_stabilization`` (default ``False``) may invent additional
-axis-aligned directed dimensions for uncovered segments; leave it off for
-editability-faithful HistCAD replay so free DOFs stay free to link.
+axis-aligned directed dimensions for uncovered segments; leave it off when
+source histories intentionally leave free DOFs unconstrained.
 
 HistCAD constraint types (19 total)
 ------------------------------------
@@ -92,12 +90,6 @@ from types import UnionType
 from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
 
 from freecad_mcp.tools.coordinate_system import validate_coordinate_system_payload
-from freecad_mcp.tools.sketch_editability import (
-    evaluate_sketch_editability as _evaluate_sketch_geometry,
-)
-from freecad_mcp.tools.sketch_editability import (
-    replace_constraint_value,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -340,6 +332,7 @@ def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
 def _tool_args_schema(func: Any) -> dict[str, Any]:
     signature = inspect.signature(func)
     type_hints = get_type_hints(func)
+    descriptions = _doc_arg_descriptions(func)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, parameter in signature.parameters.items():
@@ -348,17 +341,63 @@ def _tool_args_schema(func: Any) -> dict[str, Any]:
         properties[name] = _annotation_to_schema(
             type_hints.get(name, parameter.annotation)
         )
+        if name in descriptions:
+            properties[name]["description"] = descriptions[name]
         if parameter.default is inspect.Signature.empty:
             required.append(name)
         else:
             properties[name]["default"] = parameter.default
-    return {
+    schema: dict[str, Any] = {
         "type": "object",
         "properties": properties,
         "required": required,
         "additionalProperties": False,
         "source": "python_function_signature",
     }
+    if getattr(func, "__name__", "") == "execute_extrude":
+        schema["properties"].setdefault("extrusion_mode", {"type": "string"})
+        schema["properties"]["extrusion_mode"]["enum"] = [
+            "auto",
+            "parametric_sketch",
+            "robust_face",
+        ]
+    if getattr(func, "__name__", "") == "execute_boolean":
+        schema["properties"].setdefault("operation", {"type": "string"})
+        schema["properties"]["operation"]["enum"] = ["Join", "Cut", "Intersect"]
+    return schema
+
+
+def _doc_arg_descriptions(func: Any) -> dict[str, str]:
+    doc = inspect.getdoc(func) or ""
+    descriptions: dict[str, str] = {}
+    in_args = False
+    current_name: str | None = None
+    current_lines: list[str] = []
+    for raw_line in doc.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped == "Args:":
+            in_args = True
+            continue
+        if in_args and stripped in {"Returns:", "Raises:", "Examples:"}:
+            break
+        if not in_args or not stripped:
+            continue
+        if not raw_line.startswith(" ") and not raw_line.startswith("\t"):
+            break
+        if ":" in stripped:
+            maybe_name, body = stripped.split(":", 1)
+            if maybe_name.isidentifier():
+                if current_name is not None:
+                    descriptions[current_name] = " ".join(current_lines).strip()
+                current_name = maybe_name
+                current_lines = [body.strip()]
+                continue
+        if current_name is not None:
+            current_lines.append(stripped)
+    if current_name is not None:
+        descriptions[current_name] = " ".join(current_lines).strip()
+    return descriptions
 
 
 def _first_doc_line(func: Any) -> str:
@@ -431,6 +470,13 @@ def _validate_primitive_plan_payload(
                         "message": f"required arg {required!r} is missing",
                     }
                 )
+        _validate_primitive_args_against_schema(
+            args,
+            schema,
+            path=f"{path}.args",
+            tool_name=str(tool_name),
+            errors=errors,
+        )
         if tool_name == "apply_sketch_constraints":
             _validate_primitive_constraint_shape(
                 args.get("constraints", {}),
@@ -447,6 +493,44 @@ def _validate_primitive_plan_payload(
             else f"PrimitivePlan validation failed with {len(errors)} error(s)."
         ),
     }
+
+
+def _validate_primitive_args_against_schema(
+    args: dict[str, Any],
+    schema: dict[str, Any],
+    *,
+    path: str,
+    tool_name: str,
+    errors: list[dict[str, str]],
+) -> None:
+    properties = schema.get("properties", {})
+    allowed_args = set(properties)
+    for arg_name in args:
+        if arg_name not in allowed_args:
+            errors.append(
+                {
+                    "path": f"{path}.{arg_name}",
+                    "message": (
+                        f"unknown arg {arg_name!r} for tool {tool_name!r}; "
+                        "use only describe_primitive_plan_schema args"
+                    ),
+                }
+            )
+    for arg_name, arg_schema in properties.items():
+        if arg_name not in args or not isinstance(arg_schema, dict):
+            continue
+        enum_values = arg_schema.get("enum")
+        if enum_values is None or args[arg_name] in enum_values:
+            continue
+        allowed = ", ".join(repr(value) for value in enum_values)
+        errors.append(
+            {
+                "path": f"{path}.{arg_name}",
+                "message": (
+                    f"invalid value {args[arg_name]!r}; expected one of {allowed}"
+                ),
+            }
+        )
 
 
 def _validate_primitive_constraint_shape(
@@ -468,66 +552,6 @@ def _validate_primitive_constraint_shape(
                     ),
                 }
             )
-
-
-def _build_editability_validation_code(
-    doc_name: str | None,
-    *,
-    sketch_name: str | None = None,
-) -> str:
-    """Return FreeCAD Python that recomputes and validates post-edit health."""
-    sketch_filter = (
-        f"and obj.Name == {sketch_name!r}" if sketch_name is not None else ""
-    )
-    return f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
-if doc is None:
-    raise ValueError("No active document")
-rebuild_success = True
-exception = None
-try:
-    doc.recompute()
-except Exception as _exc:
-    rebuild_success = False
-    exception = str(_exc)
-
-sketches = []
-shape_errors = []
-for obj in doc.Objects:
-    try:
-        if obj.TypeId == "Sketcher::SketchObject" {sketch_filter}:
-            _constraint_types = []
-            try:
-                _constraint_types = [c.Type for c in obj.Constraints]
-            except Exception:
-                pass
-            sketches.append({{
-                "name": obj.Name,
-                "dof": getattr(obj, "DoF", None),
-                "fully_constrained": getattr(obj, "FullyConstrained", None),
-                "conflicting": list(getattr(obj, "ConflictingConstraints", ())),
-                "redundant": list(getattr(obj, "RedundantConstraints", ())),
-                "constraint_types": _constraint_types,
-            }})
-        if hasattr(obj, "Shape") and not obj.Shape.isNull():
-            try:
-                if not obj.Shape.isValid():
-                    shape_errors.append(obj.Name)
-            except Exception:
-                pass
-    except Exception:
-        pass
-validation_ok = rebuild_success and not shape_errors and all(
-    not item.get("conflicting") for item in sketches
-)
-_result_ = {{
-    "rebuild_success": rebuild_success,
-    "validation_ok": validation_ok,
-    "exception": exception,
-    "shape_errors": shape_errors,
-    "sketches": sketches,
-}}
-"""
 
 
 def _read_sketch_helper_embed() -> str:
@@ -949,8 +973,8 @@ def _apply_histcad_constraints(
     def _orientation_covered_by_json_constraints(line_name, orient_direction):
         # Skip auto-orientation when JSON already fixes segment direction via
         # directed Distance / Horizontal / Vertical / Parallel-to-oriented.
-        # Extra orientation constraints are invisible to editability
-        # preserved-constraint checks but still fight parametric edits.
+        # Extra orientation constraints are not present in source histories
+        # but still fight later parameter changes.
         wanted = str(orient_direction).upper()
         oriented = set()
 
@@ -1231,10 +1255,14 @@ def _apply_histcad_constraints(
             )
             if stored_polarity is None and abs(float(val)) >= 1e-12:
                 _polarities[key] = polarity_from_signed(val)
+            ci1, cp1, ci2, cp2 = i1, p1, i2, p2
+            if float(val) < 0.0:
+                ci1, cp1, ci2, cp2 = i2, p2, i1, p1
+                val = abs(float(val))
             if direction == "HORIZONTAL":
-                c = Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)
+                c = Sketcher.Constraint("DistanceX", ci1, cp1, ci2, cp2, val)
             else:
-                c = Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)
+                c = Sketcher.Constraint("DistanceY", ci1, cp1, ci2, cp2, val)
         else:
             c = Sketcher.Constraint("Distance", i1, p1, i2, p2, val)
         before_count = len(sketch_obj.Constraints)
@@ -1459,7 +1487,7 @@ def _apply_histcad_constraints(
                 pass
 
     # Phase 2: optional axis-aligned orientation from ground truth (opt-in).
-    # Default off: inventing DistanceX/Y locks free DOFs and hurts editability.
+    # Default off: inventing DistanceX/Y locks free DOFs from source histories.
     if orientation_stabilization:
         for orient_entry in _orientation_entries_from_ground_truth():
             try:
@@ -2391,13 +2419,9 @@ _result_ = {{
 
         Translates the HistCAD constraint dict into FreeCAD
         ``Sketcher.Constraint`` objects and adds them to the named sketch.
-        Returns rich feedback — ``dof_after``, ``redundant_constraints``, and
-        ``sketch_valid`` — that serves as a dense RL reward signal for
-        constraint strategy learning.
-
-        This is the key step where the RL agent's policy is exercised: given
-        a sketch with known geometry, the agent must select the constraints
-        that express the design intent (fully constrained, no redundancy).
+        Returns rich backend feedback such as ``dof_after``,
+        ``redundant_constraints``, and ``sketch_valid`` for callers that need
+        to observe the effect of constraint application.
 
         Args:
             sketch_name: Name of the target sketch object.
@@ -2421,7 +2445,7 @@ _result_ = {{
             orientation_stabilization: When ``True``, invent axis-aligned
                 ``DistanceX``/``DistanceY`` rows for uncovered segments to
                 reduce segment-flip.  Default ``False`` — invented dimensions
-                change linkage semantics and hurt HistCAD editability fidelity.
+                change linkage semantics relative to the source history.
                 Enable only when segment flip is observed after solve.
 
         Returns:
@@ -2903,118 +2927,6 @@ except Exception as _e:
         if result.success and result.result:
             return result.result
         raise ValueError(result.error_traceback or "Failed to apply constraints")
-
-    @mcp.tool()
-    async def evaluate_sketch_editability(
-        reference_constraints: dict[str, Any],
-        constraint_type: str,
-        entry_index: int,
-        edited_value_mm: float,
-        sketch_name: str | None = None,
-        sketch: dict[str, Any] | None = None,
-        entities: list[str] | None = None,
-        doc_name: str | None = None,
-        length_tol_mm: float = 0.01,
-        angle_tol_deg: float = 0.5,
-    ) -> dict[str, Any]:
-        """Evaluate HistCAD-style sketch editability (ER / cPCSR / OES).
-
-        Follows ``HistCAD-68C2/editability/metrics.py`` v2 when ``sketch_name``
-        is provided (recompute + sketch health check in FreeCAD):
-
-        - **ER**: ``target_hit AND validation_ok AND rebuild_success``
-        - **cPCSR**: fraction of *other* reference constraints still satisfied
-        - **OES**: ``ER x cPCSR``
-
-        Without ``sketch_name`` (offline ``sketch`` dict only), returns
-        geometric-only scoring for unit tests.
-
-        Workflow (aligned with ``editability/experiment.py``)::
-
-            edited = build_edited_sketch_constraints(...)
-            await apply_sketch_constraints(sketch_name, edited["constraints"])
-            metrics = await evaluate_sketch_editability(
-                reference_constraints=original_constraints,
-                constraint_type="Distance",
-                entry_index=0,
-                edited_value_mm=1.8,
-                sketch_name="Sketch",
-            )
-        """
-        validation: dict[str, Any] | None = None
-        if sketch_name is not None:
-            bridge = await get_bridge()
-            validation_exec = await bridge.execute_python(
-                _build_editability_validation_code(doc_name, sketch_name=sketch_name)
-            )
-            if validation_exec.success and validation_exec.result:
-                validation = validation_exec.result
-            else:
-                validation = {
-                    "rebuild_success": False,
-                    "validation_ok": False,
-                    "exception": validation_exec.error_traceback,
-                    "shape_errors": [],
-                    "sketches": [],
-                }
-
-        live_sketch = sketch
-        if live_sketch is None:
-            if sketch_name is None:
-                raise ValueError("Either sketch or sketch_name must be provided")
-            parsed = await parse_freecad_sketch(  # type: ignore[name-defined]
-                sketch_name=sketch_name,
-                doc_name=doc_name,
-            )
-            live_sketch = parsed.get("sketch")
-            if not live_sketch:
-                raise ValueError(f"No sketch geometry parsed from {sketch_name!r}")
-
-        entity_tuple = tuple(entities) if entities else None
-        metrics = _evaluate_sketch_geometry(
-            live_sketch=live_sketch,
-            reference_constraints=reference_constraints,
-            constraint_type=constraint_type,
-            entry_index=entry_index,
-            edited_value_mm=float(edited_value_mm),
-            entities=entity_tuple,
-            length_tol_mm=float(length_tol_mm),
-            angle_tol_deg=float(angle_tol_deg),
-            rebuild_success=(
-                validation.get("rebuild_success") if validation is not None else None
-            ),
-            validation_ok=(
-                validation.get("validation_ok") if validation is not None else None
-            ),
-        )
-        metrics["sketch_name"] = sketch_name
-        if validation is not None:
-            metrics["validation"] = validation
-        metrics["success"] = True
-        return metrics
-
-    @mcp.tool()
-    def build_edited_sketch_constraints(
-        constraints: dict[str, Any],
-        constraint_type: str,
-        entry_index: int,
-        edited_value_mm: float,
-        entities: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Return a copy of a HistCAD constraint dict with one dimension edited.
-
-        Use the returned ``constraints`` with ``apply_sketch_constraints``, then
-        score the result via ``evaluate_sketch_editability``.
-        """
-        entity_tuple = tuple(entities) if entities else None
-        updated = replace_constraint_value(
-            constraints,
-            constraint_type=constraint_type,
-            entry_index=entry_index,
-            edited_value_mm=float(edited_value_mm),
-            entities=entity_tuple,
-        )
-        return {"constraints": updated, "success": True}
 
     # ------------------------------------------------------------------
     # Group D — Feature Execution
@@ -4657,478 +4569,6 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to set tunable param")
 
-    @mcp.tool()
-    async def evaluate_editability(  # noqa: PLR0912
-        target_alias: str,
-        value: float | None = None,
-        scale: float | None = None,
-        preserved_aliases: list[str] | None = None,
-        design_intent: dict[str, Any] | None = None,
-        doc_name: str | None = None,
-    ) -> dict[str, Any]:
-        """Evaluate one parametric edit and return HistCAD-style reward metrics.
-
-        The evaluator edits one exposed ``FabricationParams`` alias, recomputes
-        the model, checks whether the target value was reached, and verifies
-        that preserved parameters/constraints remain evaluable.  It is generic:
-        any template or OperationPlan that exposes tunable aliases can use it
-        as a process reward during RL.
-        """
-        before = await list_tunable_params(doc_name=doc_name)  # type: ignore[name-defined]
-        params_before = {
-            item.get("alias"): item
-            for item in before.get("params", [])
-            if item.get("alias")
-        }
-        if target_alias not in params_before:
-            raise ValueError(f"Alias {target_alias!r} not found")
-        old_value = params_before[target_alias].get("value")
-        if value is None:
-            if scale is None:
-                raise ValueError("Either value or scale must be provided")
-            value = float(old_value) * float(scale)
-
-        intent = design_intent or {}
-        preserve_aliases = list(
-            preserved_aliases
-            if preserved_aliases is not None
-            else intent.get("preserve_aliases", [])
-        )
-        if not preserve_aliases:
-            preserve_aliases = [
-                alias for alias in params_before if alias != target_alias
-            ]
-        coupled_aliases = list(intent.get("coupled_aliases", []))
-        free_aliases = list(intent.get("free_aliases", []))
-        expected_dof = intent.get("expected_dof")
-        required_constraint_types = set(intent.get("required_constraint_types", []))
-
-        bridge = await get_bridge()
-
-        async def _geometry_snapshot() -> dict[str, Any]:
-            snapshot_code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
-if doc is None:
-    raise ValueError("No active document")
-objects = []
-for obj in doc.Objects:
-    try:
-        if not hasattr(obj, "Shape") or obj.Shape.isNull():
-            continue
-        sh = obj.Shape
-        bb = sh.BoundBox
-        deps = []
-        for attr in ("Base", "Tool"):
-            try:
-                dep = getattr(obj, attr)
-                if dep is not None:
-                    deps.append(dep.Name)
-            except Exception:
-                pass
-        try:
-            deps.extend([dep.Name for dep in (getattr(obj, "Shapes", []) or [])])
-        except Exception:
-            pass
-        objects.append({{
-            "name": obj.Name,
-            "type_id": obj.TypeId,
-            "volume": round(sh.Volume, 6),
-            "bounding_box": [
-                round(bb.XMin, 6), round(bb.XMax, 6),
-                round(bb.YMin, 6), round(bb.YMax, 6),
-                round(bb.ZMin, 6), round(bb.ZMax, 6),
-            ],
-            "dependencies": deps,
-        }})
-    except Exception:
-        pass
-_result_ = {{"objects": objects}}
-"""
-            exec_result = await bridge.execute_python(snapshot_code)
-            if exec_result.success and exec_result.result:
-                return exec_result.result
-            return {"objects": []}
-
-        geometry_before = await _geometry_snapshot()
-
-        edit_result: dict[str, Any] | None = None
-        edit_error: str | None = None
-        try:
-            edit_result = await set_tunable_param(  # type: ignore[name-defined]
-                alias=target_alias,
-                value=float(value),
-                doc_name=doc_name,
-            )
-        except Exception as exc:
-            edit_error = str(exc)
-
-        after = await list_tunable_params(doc_name=doc_name)  # type: ignore[name-defined]
-        params_after = {
-            item.get("alias"): item
-            for item in after.get("params", [])
-            if item.get("alias")
-        }
-        target_after = params_after.get(target_alias, {})
-        try:
-            target_actual = float(target_after.get("value"))
-            target_expected = float(value)
-            target_delta = abs(target_actual - target_expected)
-            target_hit = target_delta <= max(1e-6, abs(target_expected) * 1e-6)
-        except Exception:
-            target_actual = target_after.get("value")
-            target_expected = value
-            target_delta = None
-            target_hit = target_after.get("value") == value
-
-        validation_code = f"""
-doc = FreeCAD.ActiveDocument if {doc_name!r} is None else FreeCAD.getDocument({doc_name!r})
-if doc is None:
-    raise ValueError("No active document")
-rebuild_success = True
-exception = None
-try:
-    doc.recompute()
-except Exception as _exc:
-    rebuild_success = False
-    exception = str(_exc)
-
-sketches = []
-shape_errors = []
-for obj in doc.Objects:
-    try:
-        if obj.TypeId == "Sketcher::SketchObject":
-            _constraint_types = []
-            try:
-                _constraint_types = [c.Type for c in obj.Constraints]
-            except Exception:
-                pass
-            sketches.append({{
-                "name": obj.Name,
-                "dof": getattr(obj, "DoF", None),
-                "fully_constrained": getattr(obj, "FullyConstrained", None),
-                "conflicting": list(getattr(obj, "ConflictingConstraints", ())),
-                "redundant": list(getattr(obj, "RedundantConstraints", ())),
-                "constraint_types": _constraint_types,
-            }})
-        if hasattr(obj, "Shape") and not obj.Shape.isNull():
-            try:
-                if not obj.Shape.isValid():
-                    shape_errors.append(obj.Name)
-            except Exception:
-                pass
-    except Exception:
-        pass
-validation_ok = rebuild_success and not shape_errors and all(
-    not item.get("conflicting") for item in sketches
-)
-_result_ = {{
-    "rebuild_success": rebuild_success,
-    "validation_ok": validation_ok,
-    "exception": exception,
-    "shape_errors": shape_errors,
-    "sketches": sketches,
-}}
-"""
-        validation_exec = await bridge.execute_python(validation_code)
-        validation = (
-            validation_exec.result
-            if validation_exec.success and validation_exec.result
-            else {
-                "rebuild_success": False,
-                "validation_ok": False,
-                "exception": validation_exec.error_traceback,
-                "shape_errors": [],
-                "sketches": [],
-            }
-        )
-
-        geometry_after = await _geometry_snapshot()
-
-        def _shape_signature(item: dict[str, Any]) -> tuple[Any, Any]:
-            return item.get("volume"), tuple(item.get("bounding_box") or [])
-
-        before_shapes = {
-            item.get("name"): item
-            for item in geometry_before.get("objects", [])
-            if item.get("name")
-        }
-        after_shapes = {
-            item.get("name"): item
-            for item in geometry_after.get("objects", [])
-            if item.get("name")
-        }
-        affected_names = set((edit_result or {}).get("affected_features") or [])
-        geometry_records = []
-        for name in sorted(affected_names & set(before_shapes) & set(after_shapes)):
-            before_sig = _shape_signature(before_shapes[name])
-            after_sig = _shape_signature(after_shapes[name])
-            changed = before_sig != after_sig
-            geometry_records.append(
-                {
-                    "kind": "geometry_update",
-                    "object": name,
-                    "before": before_shapes[name],
-                    "after": after_shapes[name],
-                    "changed": changed,
-                    "satisfied": changed,
-                    "supported": True,
-                }
-            )
-        geometry_supported = bool(geometry_records)
-        geometry_update_ok = (
-            all(item["satisfied"] for item in geometry_records)
-            if geometry_supported
-            else True
-        )
-
-        def _numeric_close(a: Any, b: Any) -> bool:
-            try:
-                fa = float(a)
-                fb = float(b)
-                return abs(fa - fb) <= max(1e-6, abs(fb) * 1e-6)
-            except Exception:
-                return a == b
-
-        preserved_records = []
-        for alias in preserve_aliases:
-            before_item = params_before.get(alias)
-            after_item = params_after.get(alias)
-            before_bound = before_item.get("bound_to", []) if before_item else []
-            after_bound = after_item.get("bound_to", []) if after_item else []
-            value_preserved = (
-                before_item is not None
-                and after_item is not None
-                and _numeric_close(before_item.get("value"), after_item.get("value"))
-            )
-            binding_preserved = bool(before_bound) and bool(after_bound)
-            satisfied = (
-                after_item is not None
-                and binding_preserved
-                and value_preserved
-                and validation.get("validation_ok") is True
-            )
-            preserved_records.append(
-                {
-                    "kind": "alias",
-                    "alias": alias,
-                    "before_value": before_item.get("value") if before_item else None,
-                    "after_value": after_item.get("value") if after_item else None,
-                    "value_preserved": value_preserved,
-                    "binding_preserved": binding_preserved,
-                    "before_bound_to": before_bound,
-                    "after_bound_to": after_bound,
-                    "satisfied": satisfied,
-                    "supported": before_item is not None,
-                }
-            )
-
-        sketch_constraint_records = []
-        for sketch in validation.get("sketches", []):
-            conflicting = sketch.get("conflicting") or []
-            redundant = sketch.get("redundant") or []
-            fully = sketch.get("fully_constrained")
-            dof = sketch.get("dof")
-            dof_ok = expected_dof is None or dof == expected_dof
-            present_types = set(sketch.get("constraint_types") or [])
-            required_present = sorted(required_constraint_types & present_types)
-            required_missing = sorted(required_constraint_types - present_types)
-            required_ok = not required_missing
-            satisfied = (
-                not conflicting and (fully is not False) and dof_ok and required_ok
-            )
-            sketch_constraint_records.append(
-                {
-                    "kind": "sketch_constraint_health",
-                    "sketch": sketch.get("name"),
-                    "dof": dof,
-                    "expected_dof": expected_dof,
-                    "dof_ok": dof_ok,
-                    "fully_constrained": fully,
-                    "conflicting": conflicting,
-                    "redundant": redundant,
-                    "required_constraint_types": sorted(required_constraint_types),
-                    "required_present": required_present,
-                    "required_missing": required_missing,
-                    "required_ok": required_ok,
-                    "satisfied": satisfied,
-                    "supported": True,
-                }
-            )
-
-        coupled_records = []
-        for spec in coupled_aliases:
-            if isinstance(spec, str):
-                alias = spec
-                expected_value = value
-            else:
-                alias = spec.get("alias")
-                expected_value = spec.get("expected_value", value)
-            before_item = params_before.get(alias)
-            after_item = params_after.get(alias)
-            target_changed = after_item is not None and _numeric_close(
-                after_item.get("value"), expected_value
-            )
-            coupled_records.append(
-                {
-                    "kind": "coupled_alias",
-                    "alias": alias,
-                    "expected_value": expected_value,
-                    "before_value": before_item.get("value") if before_item else None,
-                    "after_value": after_item.get("value") if after_item else None,
-                    "satisfied": target_changed,
-                    "supported": before_item is not None,
-                }
-            )
-
-        free_records = []
-        for alias in free_aliases:
-            before_item = params_before.get(alias)
-            after_item = params_after.get(alias)
-            binding_after = after_item.get("bound_to", []) if after_item else []
-            free_records.append(
-                {
-                    "kind": "free_alias",
-                    "alias": alias,
-                    "before_value": before_item.get("value") if before_item else None,
-                    "after_value": after_item.get("value") if after_item else None,
-                    "binding_after": binding_after,
-                    "satisfied": after_item is not None,
-                    "supported": before_item is not None,
-                }
-            )
-
-        shape_records = []
-        for shape_name in validation.get("shape_errors", []):
-            shape_records.append(
-                {
-                    "kind": "shape_validity",
-                    "object": shape_name,
-                    "satisfied": False,
-                    "supported": True,
-                }
-            )
-
-        all_preserved_records = [
-            *preserved_records,
-            *coupled_records,
-            *free_records,
-            *sketch_constraint_records,
-            *shape_records,
-            *geometry_records,
-        ]
-
-        supported_count = sum(1 for item in all_preserved_records if item["supported"])
-        satisfied_count = sum(1 for item in all_preserved_records if item["satisfied"])
-        preserved_all_satisfied = (
-            satisfied_count == supported_count if supported_count > 0 else True
-        )
-        cpcsr = (
-            float(satisfied_count) / float(supported_count)
-            if supported_count > 0
-            else 1.0
-        )
-        rebuild_success = validation.get("rebuild_success") is True
-        validation_ok = validation.get("validation_ok") is True and geometry_update_ok
-        target_bound = bool(target_after.get("bound_to"))
-        er = 1.0 if target_hit and rebuild_success and validation_ok else 0.0
-        oes = er * cpcsr
-        alias_preserved_supported = sum(
-            1 for item in preserved_records if item["supported"]
-        )
-        alias_preserved_satisfied = sum(
-            1 for item in preserved_records if item["satisfied"]
-        )
-        sketch_supported = sum(
-            1 for item in sketch_constraint_records if item["supported"]
-        )
-        sketch_satisfied = sum(
-            1 for item in sketch_constraint_records if item["satisfied"]
-        )
-        coupled_supported = sum(1 for item in coupled_records if item["supported"])
-        coupled_satisfied = sum(1 for item in coupled_records if item["satisfied"])
-        free_supported = sum(1 for item in free_records if item["supported"])
-        free_satisfied = sum(1 for item in free_records if item["satisfied"])
-        component_scores = {
-            "target_hit": 1.0 if target_hit else 0.0,
-            "target_binding": 1.0 if target_bound else 0.0,
-            "rebuild_success": 1.0 if rebuild_success else 0.0,
-            "validation_ok": 1.0 if validation_ok else 0.0,
-            "preserved_alias_satisfaction": (
-                float(alias_preserved_satisfied) / float(alias_preserved_supported)
-                if alias_preserved_supported > 0
-                else 1.0
-            ),
-            "sketch_constraint_health": (
-                float(sketch_satisfied) / float(sketch_supported)
-                if sketch_supported > 0
-                else 1.0
-            ),
-            "coupled_alias_satisfaction": (
-                float(coupled_satisfied) / float(coupled_supported)
-                if coupled_supported > 0
-                else 1.0
-            ),
-            "free_alias_reachability": (
-                float(free_satisfied) / float(free_supported)
-                if free_supported > 0
-                else 1.0
-            ),
-            "shape_validity": 0.0 if validation.get("shape_errors") else 1.0,
-            "geometry_update": 1.0 if geometry_update_ok else 0.0,
-        }
-        weighted_reward = (
-            0.25 * component_scores["target_hit"]
-            + 0.15 * component_scores["rebuild_success"]
-            + 0.15 * component_scores["validation_ok"]
-            + 0.20 * component_scores["preserved_alias_satisfaction"]
-            + 0.15 * component_scores["sketch_constraint_health"]
-            + 0.05 * component_scores["coupled_alias_satisfaction"]
-            + 0.05 * component_scores["free_alias_reachability"]
-        )
-
-        return {
-            "target_alias": target_alias,
-            "old_value": old_value,
-            "edited_value": value,
-            "target_actual": target_actual,
-            "target_expected": target_expected,
-            "target_delta": target_delta,
-            "target_hit": target_hit,
-            "target_bound": target_bound,
-            "rebuild_success": rebuild_success,
-            "validation_ok": validation_ok,
-            "preserved_records": preserved_records,
-            "coupled_records": coupled_records,
-            "free_records": free_records,
-            "geometry_records": geometry_records,
-            "sketch_constraint_records": sketch_constraint_records,
-            "shape_records": shape_records,
-            "all_preserved_records": all_preserved_records,
-            "preserved_supported_constraints": supported_count,
-            "preserved_satisfied_constraints": satisfied_count,
-            "preserved_constraints_all_satisfied": preserved_all_satisfied,
-            "ER": er,
-            "cPCSR": cpcsr,
-            "OES": oes,
-            "reward": oes,
-            "weighted_reward": weighted_reward,
-            "component_scores": component_scores,
-            "design_intent": {
-                "preserve_aliases": preserve_aliases,
-                "coupled_aliases": coupled_aliases,
-                "free_aliases": free_aliases,
-                "expected_dof": expected_dof,
-                "required_constraint_types": sorted(required_constraint_types),
-            },
-            "edit_result": edit_result,
-            "edit_error": edit_error,
-            "validation": validation,
-            "geometry_before": geometry_before,
-            "geometry_after": geometry_after,
-            "geometry_update_ok": geometry_update_ok,
-            "success": edit_error is None,
-        }
-
     # ------------------------------------------------------------------
     # Group G — Observation
     # ------------------------------------------------------------------
@@ -5140,11 +4580,12 @@ _result_ = {{
     ) -> dict[str, Any]:
         """Get a geometric snapshot of a PartDesign Body.
 
-        Returns the bounding box, volume, feature list, and a sample of edge
-        midpoints (``edge_samples``).  The ``edge_samples`` list provides 3-D
-        coordinates near each edge, enabling construction of accurate
-        ``near_points`` arguments for ``feature_fillet`` and
-        ``feature_chamfer`` without knowing topological edge names.
+        Returns the bounding box, volume, feature list, cylindrical
+        ``hole_features``, and a sample of edge midpoints (``edge_samples``).
+        The ``edge_samples`` list provides 3-D coordinates near each edge,
+        enabling construction of accurate ``near_points`` arguments for
+        ``feature_fillet`` and ``feature_chamfer`` without knowing topological
+        edge names.
 
         Args:
             body_name: Name of the PartDesign Body. Auto-detected if None.
@@ -5155,6 +4596,8 @@ _result_ = {{
                 - bounding_box: ``{x_min, x_max, y_min, y_max, z_min, z_max}``.
                 - volume: Body volume in cubic millimetres.
                 - features: List of ``{"name": str, "type": str}`` dicts.
+                - hole_features: Cylindrical face groups with axis, radius,
+                  centerline point samples, approximate depth and throughness.
                 - edge_samples: List of
                   ``{"near_point": [x,y,z], "length": float,
                   "curve_type": "Line"|"Circle"|"BSpline"|"Other"}``
@@ -5232,10 +4675,82 @@ try:
 except Exception:
     pass
 
+hole_features = []
+try:
+    _groups = {{}}
+    for _idx, _face in enumerate(body.Shape.Faces, start=1):
+        _surf = _face.Surface
+        if _surf.__class__.__name__ not in ("Cylinder", "Cone"):
+            continue
+        try:
+            _radius = float(getattr(_surf, "Radius", 0.0))
+        except Exception:
+            _radius = 0.0
+        if _radius <= 1e-9:
+            continue
+        _axis = _surf.Axis
+        _center = _surf.Center
+        _axis_key = [
+            round(float(_axis.x), 5),
+            round(float(_axis.y), 5),
+            round(float(_axis.z), 5),
+        ]
+        # Canonicalize opposite cylinder orientation into one grouping key.
+        for _v in _axis_key:
+            if abs(_v) > 1e-9:
+                if _v < 0:
+                    _axis_key = [-_x for _x in _axis_key]
+                break
+        _point_key = [
+            round(float(_center.x), 3),
+            round(float(_center.y), 3),
+            round(float(_center.z), 3),
+        ]
+        # Group by axis plus center projected onto the normal plane.
+        _dot = (
+            _point_key[0] * _axis_key[0]
+            + _point_key[1] * _axis_key[1]
+            + _point_key[2] * _axis_key[2]
+        )
+        _normal_plane_key = [
+            round(_point_key[0] - _dot * _axis_key[0], 3),
+            round(_point_key[1] - _dot * _axis_key[1], 3),
+            round(_point_key[2] - _dot * _axis_key[2], 3),
+        ]
+        _key = (round(_radius, 4), tuple(_axis_key), tuple(_normal_plane_key))
+        _row = _groups.setdefault(_key, {{
+            "radius": round(_radius, 6),
+            "axis": _axis_key,
+            "axis_point": _normal_plane_key,
+            "faces": [],
+            "axis_positions": [],
+            "surface_area": 0.0,
+        }})
+        _row["faces"].append(f"Face{{_idx}}")
+        _row["axis_positions"].append(round(_dot, 6))
+        try:
+            _row["surface_area"] += float(_face.Area)
+        except Exception:
+            pass
+    for _row in _groups.values():
+        _positions = sorted(_row["axis_positions"])
+        _depth = max(_positions) - min(_positions) if len(_positions) > 1 else 0.0
+        _row["axis_positions"] = _positions
+        _row["approx_depth"] = round(_depth, 6)
+        _row["surface_area"] = round(_row["surface_area"], 6)
+        _row["through_candidate"] = len(_row["faces"]) >= 1 and _depth >= 0.0
+        hole_features.append(_row)
+    hole_features.sort(key=lambda _h: (
+        _h["radius"], _h["axis_point"][0], _h["axis_point"][1], _h["axis_point"][2]
+    ))
+except Exception:
+    pass
+
 _result_ = {{
     "bounding_box": bbox,
     "volume":       volume,
     "features":     features,
+    "hole_features": hole_features,
     "edge_samples": edge_samples,
     "success":      True,
 }}

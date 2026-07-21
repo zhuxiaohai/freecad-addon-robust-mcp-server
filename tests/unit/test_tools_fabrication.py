@@ -75,8 +75,6 @@ class TestFabricationTools:
             "parse_freecad_sketch",
             "check_sketch_constraints",
             "apply_sketch_constraints",
-            "evaluate_sketch_editability",
-            "build_edited_sketch_constraints",
             "execute_extrude",
             "execute_boolean",
             "execute_revolve",
@@ -85,7 +83,6 @@ class TestFabricationTools:
             "feature_chamfer",
             "list_tunable_params",
             "set_tunable_param",
-            "evaluate_editability",
             "get_body_snapshot",
             "describe_primitive_plan_schema",
             "validate_primitive_plan",
@@ -115,6 +112,15 @@ class TestFabricationTools:
         extrude_schema = tools["execute_extrude"]["args_schema"]
         assert "sketch_name" in extrude_schema["required"]
         assert "towards" in extrude_schema["properties"]
+        assert (
+            "positive sketch normal"
+            in extrude_schema["properties"]["towards"]["description"]
+        )
+        assert extrude_schema["properties"]["extrusion_mode"]["enum"] == [
+            "auto",
+            "parametric_sketch",
+            "robust_face",
+        ]
         assert result["guidance"]["special_refs"]["allowed_special_point_refs"] == [
             "origin"
         ]
@@ -170,6 +176,27 @@ class TestFabricationTools:
         messages = "\n".join(error["message"] for error in invalid_result["errors"])
         assert "required arg 'translation' is missing" in messages
         assert "unknown tool 'unknown_tool'" in messages
+
+        invalid_enum_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L3",
+                "steps": [
+                    {
+                        "tool_name": "execute_extrude",
+                        "args": {
+                            "sketch_name": "Sketch",
+                            "towards": 1.0,
+                            "extrusion_mode": "NewBody",
+                        },
+                    }
+                ],
+            }
+        )
+        assert invalid_enum_result["valid"] is False
+        enum_messages = "\n".join(
+            error["message"] for error in invalid_enum_result["errors"]
+        )
+        assert "invalid value 'NewBody'" in enum_messages
 
         internal_constraint_result = await register_tools["validate_primitive_plan"](
             {
@@ -349,44 +376,6 @@ class TestFabricationTools:
         assert result["applied_count"] == 7
         assert result["profile"]["closed"] is True
         assert result["geometry_drift"]["max_mm"] == 0.0
-
-    @pytest.mark.asyncio
-    async def test_evaluate_sketch_editability_uses_parse(
-        self, register_tools: dict, mock_bridge: AsyncMock
-    ) -> None:
-        """evaluate_sketch_editability parses sketch geometry when needed."""
-        step0_sketch = {
-            "line_3": {"start": [10.0, -0.75], "end": [10.0, 0.75]},
-            "line_4": {"start": [10.0, 0.75], "end": [3.8611, 1.0717]},
-        }
-        constraints = {
-            "Distance": [
-                [
-                    "line_4.start",
-                    "line_3.start",
-                    {"length": 1.5, "direction": "VERTICAL"},
-                ]
-            ]
-        }
-        mock_bridge.execute_python.return_value = self._success(
-            {
-                "sketch_name": "Sketch001",
-                "sketch": step0_sketch,
-                "entity_index_map": {},
-                "dof_remaining": 0,
-                "existing_constraints": [],
-            }
-        )
-        result = await register_tools["evaluate_sketch_editability"](
-            reference_constraints=constraints,
-            constraint_type="Distance",
-            entry_index=0,
-            edited_value_mm=1.5,
-            sketch_name="Sketch001",
-        )
-        assert result["target_hit"] is True
-        assert result["OES"] is True
-        assert result["ER"] is True
 
     @pytest.mark.asyncio
     async def test_apply_sketch_constraints_redundancy_detected(
@@ -989,197 +978,6 @@ class TestFabricationTools:
         assert "BaseSolid" in boolean_code
         assert "ToolSolid" in boolean_code
 
-    @pytest.mark.asyncio
-    async def test_evaluate_editability_success(
-        self, register_tools: dict, mock_bridge: AsyncMock
-    ) -> None:
-        """evaluate_editability returns HistCAD-style reward metrics."""
-        before_params = {
-            "params": [
-                {
-                    "alias": "arm_x_length",
-                    "value": 50.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
-                },
-                {
-                    "alias": "arm_y_length",
-                    "value": 80.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[16]"}],
-                },
-            ],
-            "spreadsheet_name": "FabricationParams",
-        }
-        after_params = {
-            "params": [
-                {
-                    "alias": "arm_x_length",
-                    "value": 60.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
-                },
-                {
-                    "alias": "arm_y_length",
-                    "value": 80.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[16]"}],
-                },
-            ],
-            "spreadsheet_name": "FabricationParams",
-        }
-        mock_bridge.execute_python.side_effect = [
-            self._success(before_params),
-            self._success(
-                {
-                    "objects": [
-                        {
-                            "name": "L_Connector_Profile",
-                            "type_id": "Sketcher::SketchObject",
-                            "volume": 0.0,
-                            "bounding_box": [0, 50, 0, 80, 0, 0],
-                            "dependencies": [],
-                        }
-                    ]
-                }
-            ),
-            self._success(
-                {
-                    "alias": "arm_x_length",
-                    "old_value": 50.0,
-                    "new_value": 60.0,
-                    "recomputed": True,
-                    "affected_features": ["L_Connector_Profile"],
-                    "success": True,
-                }
-            ),
-            self._success(after_params),
-            self._success(
-                {
-                    "rebuild_success": True,
-                    "validation_ok": True,
-                    "exception": None,
-                    "shape_errors": [],
-                    "sketches": [
-                        {
-                            "name": "Sketch",
-                            "dof": 0,
-                            "fully_constrained": True,
-                            "conflicting": [],
-                            "redundant": [],
-                            "constraint_types": ["Horizontal", "Vertical", "Length"],
-                        }
-                    ],
-                }
-            ),
-            self._success(
-                {
-                    "objects": [
-                        {
-                            "name": "L_Connector_Profile",
-                            "type_id": "Sketcher::SketchObject",
-                            "volume": 0.0,
-                            "bounding_box": [0, 60, 0, 80, 0, 0],
-                            "dependencies": [],
-                        }
-                    ]
-                }
-            ),
-        ]
-
-        result = await register_tools["evaluate_editability"](
-            target_alias="arm_x_length",
-            value=60.0,
-            design_intent={
-                "preserve_aliases": ["arm_y_length"],
-                "coupled_aliases": [],
-                "free_aliases": [],
-                "expected_dof": 0,
-                "required_constraint_types": ["Horizontal", "Vertical", "Length"],
-            },
-        )
-
-        assert result["ER"] == 1.0
-        assert result["cPCSR"] == 1.0
-        assert result["OES"] == 1.0
-        assert result["preserved_satisfied_constraints"] == 3
-        assert len(result["preserved_records"]) == 1
-        assert len(result["sketch_constraint_records"]) == 1
-        assert result["component_scores"]["target_hit"] == 1.0
-        assert result["component_scores"]["preserved_alias_satisfaction"] == 1.0
-        assert result["component_scores"]["sketch_constraint_health"] == 1.0
-        assert result["component_scores"]["geometry_update"] == 1.0
-        assert result["weighted_reward"] == 1.0
-        assert result["design_intent"]["expected_dof"] == 0
-
-    @pytest.mark.asyncio
-    async def test_evaluate_editability_fails_when_affected_geometry_is_static(
-        self, register_tools: dict, mock_bridge: AsyncMock
-    ) -> None:
-        """Editability catches a changed parameter that does not update final shape."""
-        params_before = {
-            "params": [
-                {
-                    "alias": "arm_x_length",
-                    "value": 50.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
-                }
-            ],
-            "spreadsheet_name": "FabricationParams",
-        }
-        params_after = {
-            "params": [
-                {
-                    "alias": "arm_x_length",
-                    "value": 60.0,
-                    "bound_to": [{"object": "Sketch", "property": "Constraints[13]"}],
-                }
-            ],
-            "spreadsheet_name": "FabricationParams",
-        }
-        static_shape = {
-            "objects": [
-                {
-                    "name": "Join",
-                    "type_id": "Part::Feature",
-                    "volume": 178000.0,
-                    "bounding_box": [0, 100, 0, 80, 0, 26],
-                    "dependencies": [],
-                }
-            ]
-        }
-        mock_bridge.execute_python.side_effect = [
-            self._success(params_before),
-            self._success(static_shape),
-            self._success(
-                {
-                    "alias": "arm_x_length",
-                    "old_value": 50.0,
-                    "new_value": 60.0,
-                    "recomputed": True,
-                    "affected_features": ["Join"],
-                    "success": True,
-                }
-            ),
-            self._success(params_after),
-            self._success(
-                {
-                    "rebuild_success": True,
-                    "validation_ok": True,
-                    "exception": None,
-                    "shape_errors": [],
-                    "sketches": [],
-                }
-            ),
-            self._success(static_shape),
-        ]
-
-        result = await register_tools["evaluate_editability"](
-            target_alias="arm_x_length",
-            value=60.0,
-        )
-
-        assert result["geometry_update_ok"] is False
-        assert result["component_scores"]["geometry_update"] == 0.0
-        assert result["ER"] == 0.0
-        assert result["reward"] == 0.0
-
     # ------------------------------------------------------------------
     # get_body_snapshot
     # ------------------------------------------------------------------
@@ -1201,6 +999,15 @@ class TestFabricationTools:
                 },
                 "volume": 12000.0,
                 "features": [{"name": "Pad001", "type": "Pad"}],
+                "hole_features": [
+                    {
+                        "radius": 1.5,
+                        "axis": [0.0, 1.0, 0.0],
+                        "axis_point": [5.9, 0.0, 0.0],
+                        "approx_depth": 6.0,
+                        "faces": ["Face3"],
+                    }
+                ],
                 "edge_samples": [
                     {
                         "near_point": [10.0, 0.0, 30.0],
@@ -1213,6 +1020,7 @@ class TestFabricationTools:
         )
         result = await register_tools["get_body_snapshot"]()
         assert result["volume"] == 12000.0
+        assert result["hole_features"][0]["radius"] == 1.5
         assert len(result["edge_samples"]) == 1
         assert result["edge_samples"][0]["curve_type"] == "Circle"
 
@@ -1375,6 +1183,28 @@ class TestFabricationSourceConventions:
         assert "directed_axis_distance" in source
         assert "ground_truth=ground_truth" in source
 
+    def test_negative_directed_distance_swaps_constraint_endpoints(self) -> None:
+        """FreeCAD Sketcher preserves direction by endpoint order, not negative values."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        distance_block = source.split("def _apply_distance_entry", 1)[1].split(
+            "def _apply_constraint_entry", 1
+        )[0]
+
+        assert "if float(val) < 0.0:" in distance_block
+        assert "ci1, cp1, ci2, cp2 = i2, p2, i1, p1" in distance_block
+        assert (
+            'Sketcher.Constraint("DistanceX", ci1, cp1, ci2, cp2, val)'
+            in distance_block
+        )
+        assert (
+            'Sketcher.Constraint("DistanceY", ci1, cp1, ci2, cp2, val)'
+            in distance_block
+        )
+
     def test_orientation_stabilization_from_ground_truth(self) -> None:
         """Orientation stabilization is opt-in and skips Parallel-covered lines."""
         from pathlib import Path
@@ -1460,10 +1290,25 @@ class TestFabricationSourceConventions:
         source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
             encoding="utf-8"
         )
-        assert 'Sketcher.Constraint("DistanceY", i1, p1, i2, p2, val)' in source
-        assert 'Sketcher.Constraint("DistanceX", i1, p1, i2, p2, val)' in source
+        assert 'Sketcher.Constraint("DistanceY", ci1, cp1, ci2, cp2, val)' in source
+        assert 'Sketcher.Constraint("DistanceX", ci1, cp1, ci2, cp2, val)' in source
         assert '"freecad_type": freecad_type' in source
         assert '"sketch_constraint_results": sketch_constraint_results' in source
+
+    def test_body_snapshot_reports_hole_features(self) -> None:
+        """Snapshot includes structured cylindrical hole evidence."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        snapshot_block = source.split("async def get_body_snapshot", 1)[1].split(
+            "async def describe_primitive_plan_schema", 1
+        )[0]
+
+        assert "hole_features = []" in snapshot_block
+        assert '"hole_features": hole_features' in snapshot_block
+        assert '"approx_depth"' in snapshot_block
 
     def test_redundant_constraints_purged_after_apply(self) -> None:
         """Tangent junction Coincident rows are purged so extrusion stays parametric."""

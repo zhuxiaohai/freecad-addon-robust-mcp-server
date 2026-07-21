@@ -123,13 +123,13 @@ Before returning IntentSpec JSON:
 6. `validate_document(doc_name=<session_doc_name>)` /
    `get_body_snapshot(doc_name=<session_doc_name>)` for verification
 
-## RL / logging
+## Run Logging
 
-Store assumptions and the final IntentSpec JSON for reward attribution. Template
-compilation and CAD execution are deterministic — reward intent expansion separately
-from geometry success. If execution succeeds but geometry violates the user query,
-repair the IntentSpec first; only blame the template compiler when the IntentSpec is
-correct and the deterministic OperationPlan is wrong.
+Store assumptions and the final IntentSpec JSON with each run. Template
+compilation and CAD execution are deterministic, so callers can separate intent
+expansion issues from geometry execution issues. If execution succeeds but geometry
+violates the user query, repair the IntentSpec first; only blame the template compiler
+when the IntentSpec is correct and the deterministic OperationPlan is wrong.
 
 ## Local agent debugging
 

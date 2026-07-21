@@ -2,7 +2,7 @@
 
 These functions are embedded into FreeCAD-executed code by ``fabrication.py``
 and are unit-tested directly so directed Distance sign logic stays correct when
-dimension values are edited (editability benchmark).
+dimension values change.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ def ground_truth_xy(
     Returns:
         Coordinate pair, or ``None`` when the reference cannot be resolved.
     """
+    if str(ref) == "origin":
+        return [0.0, 0.0]
     if not ground_truth or "." not in str(ref):
         return None
     name, point = str(ref).split(".", 1)
@@ -86,7 +88,8 @@ def directed_axis_distance(
     3. Live sketch endpoint coordinates (same fallback purpose).
     4. Unsigned ``+abs(magnitude)`` last resort.
 
-    ``magnitude`` may change during editability edits; polarity must not flip.
+    ``magnitude`` may change during later parameter updates; polarity must not
+    flip.
 
     Args:
         ref_a: First point reference (FreeCAD first argument).

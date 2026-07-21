@@ -26,6 +26,7 @@ class TestSketchHelpers:
         self, step0_ground_truth: dict
     ) -> None:
         assert ground_truth_xy(step0_ground_truth, "line_4.start") == [10.0, 0.75]
+        assert ground_truth_xy(step0_ground_truth, "origin") == [0.0, 0.0]
 
     def test_directed_vertical_distance_original_sign(
         self, step0_ground_truth: dict
@@ -64,6 +65,31 @@ class TestSketchHelpers:
             ground_truth,
         )
         assert val == pytest.approx(6.1372)
+
+    def test_origin_to_circle_center_preserves_negative_offset(self) -> None:
+        """Positive length metadata still uses signed raw geometry for left/bottom holes."""
+        ground_truth = {
+            "circle_left": {"center": [-5.9, 0.0], "radius": 1.5},
+            "circle_bottom": {"center": [0.0, -5.9], "radius": 1.5},
+        }
+
+        left = directed_axis_distance(
+            "origin",
+            "circle_left.center",
+            0,
+            5.9,
+            ground_truth,
+        )
+        bottom = directed_axis_distance(
+            "origin",
+            "circle_bottom.center",
+            1,
+            5.9,
+            ground_truth,
+        )
+
+        assert left == pytest.approx(-5.9)
+        assert bottom == pytest.approx(-5.9)
 
     def test_persisted_polarity_overrides_ground_truth(
         self, step0_ground_truth: dict

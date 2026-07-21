@@ -810,12 +810,13 @@ create_sketch_geometry(
 )
 ```
 
-## RL Training Tips
+## Iterative Feedback
 
-- Call primitives individually (not `execute_operation_plan`) for per-step rewards.
+- Call primitives individually (not `execute_operation_plan`) when the caller
+  needs per-step observations.
 - `execute_extrude` returns `local_obb` / `global_center`; `execute_boolean`
   returns `center_distance` — all directly comparable to NLT ground truth.
-- `apply_sketch_constraints` returns `dof_after` (0 = fully constrained = dense reward).
+- `apply_sketch_constraints` returns `dof_after` (0 = fully constrained).
 - `check_sketch_constraints` enables constraint pruning without burning env steps.
 - `parse_freecad_sketch` is the observation for STEP reverse-engineering episodes.
 - `get_body_snapshot` gives geometric observation after each feature step.

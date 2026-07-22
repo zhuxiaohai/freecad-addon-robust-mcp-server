@@ -104,6 +104,15 @@ class TestFabricationTools:
         assert "execute_extrude" in tools
         assert tools["create_sketch_geometry"]["argument_examples"]
         assert tools["apply_sketch_constraints"]["argument_examples"]
+        constraint_tool = tools["apply_sketch_constraints"]
+        assert "constraint_reference" in constraint_tool
+        assert (
+            "Concentric" in constraint_tool["constraint_reference"]["supported_types"]
+        )
+        assert any(
+            example["name"] == "concentric_hole_pattern_constraints"
+            for example in constraint_tool["argument_examples"]
+        )
         assert "block_with_through_hole" in result["workflow_recipes"]
         cs_schema = tools["create_coordinate_system"]["args_schema"]
         assert cs_schema["source"] == "python_function_signature"
@@ -216,6 +225,27 @@ class TestFabricationTools:
         )
         assert internal_constraint_result["valid"] is False
         assert "FreeCAD internal" in internal_constraint_result["errors"][0]["message"]
+
+        unknown_constraint_result = await register_tools["validate_primitive_plan"](
+            {
+                "plan_level": "L3",
+                "steps": [
+                    {
+                        "tool_name": "apply_sketch_constraints",
+                        "args": {
+                            "sketch_name": "Sketch",
+                            "constraints": {
+                                "DistanceX": [["origin", "circle_1.center"]]
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+        assert unknown_constraint_result["valid"] is False
+        assert "unknown HistCAD constraint type" in "\n".join(
+            error["message"] for error in unknown_constraint_result["errors"]
+        )
 
     # ------------------------------------------------------------------
     # create_coordinate_system

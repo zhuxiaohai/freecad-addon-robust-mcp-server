@@ -253,6 +253,70 @@ _PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
                 },
             },
         },
+        {
+            "name": "concentric_hole_pattern_constraints",
+            "args": {
+                "sketch_name": "HolePatternProfile",
+                "constraints": {
+                    "Fix": ["circle_1.center"],
+                    "Concentric": [["circle_1", "circle_2"]],
+                    "Diameter": [
+                        [
+                            "circle_1",
+                            {
+                                "diameter": "15 mm",
+                                "alias": "outer_dia",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "circle_2",
+                            {
+                                "diameter": "8 mm",
+                                "alias": "center_dia",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "circle_3",
+                            {
+                                "diameter": "3 mm",
+                                "alias": "hole_dia",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                    "Equal": [["circle_3", "circle_4"], ["circle_3", "circle_5"]],
+                    "Distance": [
+                        [
+                            "origin",
+                            "circle_3.center",
+                            {
+                                "length": "5.9 mm",
+                                "direction": "HORIZONTAL",
+                                "alias": "hole_offset_x",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                        [
+                            "origin",
+                            "circle_4.center",
+                            {
+                                "length": "5.9 mm",
+                                "direction": "VERTICAL",
+                                "alias": "hole_offset_y",
+                                "role": "sketch_dimension",
+                            },
+                        ],
+                    ],
+                },
+            },
+            "notes": (
+                "Use origin-to-center Distance entries for local sketch offsets. "
+                "The length is a magnitude; HORIZONTAL/VERTICAL polarity is "
+                "resolved from persisted create_sketch_geometry coordinates."
+            ),
+        },
     ],
     "execute_extrude": [
         {
@@ -285,6 +349,87 @@ _PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
                 "result_name": "BlockWithHole",
             },
         }
+    ],
+}
+
+_HISTCAD_CONSTRAINT_REFERENCE: dict[str, Any] = {
+    "source": "HistCAD constraint schema implemented by apply_sketch_constraints",
+    "supported_types": [
+        "Perpendicular",
+        "Parallel",
+        "Horizontal",
+        "Vertical",
+        "Equal",
+        "Tangent",
+        "Normal",
+        "Coincident",
+        "Concentric",
+        "Fix",
+        "Midpoint",
+        "Mirror",
+        "Angle",
+        "Diameter",
+        "Radius",
+        "MajorRadius",
+        "MinorRadius",
+        "Distance",
+        "Length",
+    ],
+    "reference_syntax": {
+        "entity_ref": "line_1, circle_1, arc_1, ellipse_1, elliptical_arc_1",
+        "point_ref": "line_1.start, line_1.end, circle_1.center, arc_1.middle",
+        "special_point_refs": ["origin"],
+        "value_expr": (
+            "Use strings with units such as '40 mm' or param dicts with alias "
+            "and role='sketch_dimension'."
+        ),
+    },
+    "entry_shapes": {
+        "Coincident": [["point_ref", "point_ref"]],
+        "Horizontal": ["entity_ref", ["point_ref", "point_ref"]],
+        "Vertical": ["entity_ref", ["point_ref", "point_ref"]],
+        "Perpendicular": [["entity_ref", "entity_ref"]],
+        "Parallel": [["entity_ref", "entity_ref"]],
+        "Equal": [["entity_ref", "entity_ref"]],
+        "Tangent": [["entity_ref", "entity_ref"]],
+        "Normal": [["entity_ref", "entity_ref"]],
+        "Concentric": [["entity_ref", "entity_ref"]],
+        "Fix": ["point_ref", "entity_ref"],
+        "Midpoint": [
+            ["point_ref", ["point_ref", "point_ref"]],
+            ["point_ref", "entity_ref"],
+        ],
+        "Mirror": [["entity_ref", "entity_ref", "entity_ref"]],
+        "Angle": [["entity_ref", "entity_ref", "angle_degrees"]],
+        "Diameter": [["entity_ref", "value_expr_or_param_dict"]],
+        "Radius": [["entity_ref", "value_expr_or_param_dict"]],
+        "MajorRadius": [["entity_ref", "value_expr_or_param_dict"]],
+        "MinorRadius": [["entity_ref", "value_expr_or_param_dict"]],
+        "Length": [["entity_ref", "value_expr_or_param_dict"]],
+        "Distance": [
+            [
+                "entity_or_point_ref_a",
+                "entity_or_point_ref_b",
+                {
+                    "length": "value_expr",
+                    "direction": "MINIMUM|HORIZONTAL|VERTICAL",
+                    "alias": "optional_param_name",
+                    "role": "sketch_dimension",
+                },
+            ]
+        ],
+    },
+    "distance_notes": [
+        (
+            "For sketch-local X/Y offsets, use Distance from 'origin' to an "
+            "entity center or point."
+        ),
+        "Do not use axis tokens such as x_axis, y_axis, z_axis.",
+        (
+            "For HORIZONTAL/VERTICAL, length is the dimension magnitude; "
+            "sign/polarity is resolved from persisted sketch geometry and "
+            "endpoint order."
+        ),
     ],
 }
 
@@ -408,16 +553,19 @@ def _first_doc_line(func: Any) -> str:
 
 
 def _primitive_tool_catalog(tool_functions: dict[str, Any]) -> dict[str, Any]:
-    return {
-        name: {
+    catalog: dict[str, Any] = {}
+    for name, func in tool_functions.items():
+        tool = {
             "tool_name": name,
             "args_schema": _tool_args_schema(func),
             "output_exports": _PRIMITIVE_OUTPUT_EXPORTS.get(name, []),
             "argument_examples": _PRIMITIVE_ARGUMENT_EXAMPLES.get(name, []),
             "doc": _first_doc_line(func),
         }
-        for name, func in tool_functions.items()
-    }
+        if name == "apply_sketch_constraints":
+            tool["constraint_reference"] = _HISTCAD_CONSTRAINT_REFERENCE
+        catalog[name] = tool
+    return catalog
 
 
 def _validate_primitive_plan_payload(
@@ -549,6 +697,18 @@ def _validate_primitive_constraint_shape(
                     "message": (
                         "FreeCAD internal constraint objects are not accepted; "
                         "use MCP adapter format grouped by constraint type"
+                    ),
+                }
+            )
+            continue
+        if constraint_name not in _HISTCAD_CONSTRAINT_REFERENCE["supported_types"]:
+            errors.append(
+                {
+                    "path": f"{path}.{constraint_name}",
+                    "message": (
+                        f"unknown HistCAD constraint type {constraint_name!r}; "
+                        "use one of describe_primitive_plan_schema "
+                        "apply_sketch_constraints.constraint_reference.supported_types"
                     ),
                 }
             )

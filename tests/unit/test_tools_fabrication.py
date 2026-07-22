@@ -104,6 +104,17 @@ class TestFabricationTools:
         assert "execute_extrude" in tools
         assert tools["create_sketch_geometry"]["argument_examples"]
         assert tools["apply_sketch_constraints"]["argument_examples"]
+        policy = result["planning_policy"]
+        assert policy["skip_apply_sketch_constraints_by_default"] is True
+        assert (
+            "create_coordinate_system -> create_sketch_geometry -> execute_extrude"
+            in policy["ordinary_no_template_default"]
+        )
+        assert any(
+            "parametric" in condition
+            for condition in policy["use_apply_sketch_constraints_when"]
+        )
+        assert "not a default workflow mandate" in policy["examples_note"]
         constraint_tool = tools["apply_sketch_constraints"]
         assert "constraint_reference" in constraint_tool
         assert (
@@ -1234,6 +1245,42 @@ class TestFabricationSourceConventions:
             'Sketcher.Constraint("DistanceY", ci1, cp1, ci2, cp2, val)'
             in distance_block
         )
+
+    def test_directional_distance_resolves_line_refs_to_point_anchors(self) -> None:
+        """HORIZONTAL/VERTICAL Distance lowers whole-line refs before DistanceX/Y."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "def _directional_distance_anchor" in source
+        assert "def _select_line_endpoint_for_direction" in source
+
+        distance_block = source.split("def _apply_distance_entry", 1)[1].split(
+            "def _apply_constraint_entry", 1
+        )[0]
+        assert "ref1 = _directional_distance_anchor(" in distance_block
+        assert "ref2 = _directional_distance_anchor(" in distance_block
+        assert "i1, p1 = _resolve_point(ref1)" in distance_block
+        assert "i2, p2 = _resolve_point(ref2)" in distance_block
+        assert "live_a=_live_xy(ref1)" in distance_block
+        assert "live_b=_live_xy(ref2)" in distance_block
+
+    def test_redundant_purge_records_removed_dimension_aliases(self) -> None:
+        """Solver-redundant rows are purged even when they carried aliases."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        purge_block = source.split("def _purge_redundant_sketch_constraints", 1)[
+            1
+        ].split("purged_redundant =", 1)[0]
+
+        assert "removed_aliases" in purge_block
+        assert '_binding["_removed"] = True' in purge_block
+        assert "def _is_bound_dimension_pos" not in purge_block
+        assert 'if _c.Type != "Coincident":' not in purge_block
 
     def test_orientation_stabilization_from_ground_truth(self) -> None:
         """Orientation stabilization is opt-in and skips Parallel-covered lines."""

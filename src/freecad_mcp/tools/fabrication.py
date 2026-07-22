@@ -434,6 +434,32 @@ _HISTCAD_CONSTRAINT_REFERENCE: dict[str, Any] = {
 }
 
 
+_PRIMITIVE_PLANNING_POLICY: dict[str, Any] = {
+    "ordinary_no_template_default": (
+        "For ordinary no-template prompts that describe final geometry with "
+        "dimensions, prefer create_coordinate_system -> create_sketch_geometry "
+        "-> execute_extrude and omit apply_sketch_constraints."
+    ),
+    "skip_apply_sketch_constraints_by_default": True,
+    "use_apply_sketch_constraints_when": [
+        (
+            "The user explicitly asks for parametric, editable, configurable, "
+            "or constrained sketch behavior."
+        ),
+        (
+            "The source input contains explicit sketch constraints, such as "
+            "HistCAD/Fusion history constraints."
+        ),
+        "A selected template or workflow explicitly requires sketch constraints.",
+    ],
+    "examples_note": (
+        "Examples under apply_sketch_constraints show how to use the tool when "
+        "selected; they are not a default workflow mandate for ordinary "
+        "no-template prompts."
+    ),
+}
+
+
 def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
     if annotation is inspect.Signature.empty or annotation is Any:
         return {"type": "any"}
@@ -1066,6 +1092,56 @@ def _apply_histcad_constraints(
     def _ground_truth_xy(ref):
         return ground_truth_xy(ground_truth, ref)
 
+    def _line_endpoint_refs(ref, direction, halfspace=None):
+        name = str(ref)
+        if "." in name or name not in idx_map or not name.startswith("line_"):
+            return None
+        start_ref = f"{name}.start"
+        end_ref = f"{name}.end"
+        start_xy = _ground_truth_xy(start_ref)
+        end_xy = _ground_truth_xy(end_ref)
+        if start_xy is None or end_xy is None:
+            try:
+                idx = idx_map[name]
+                start_pos = _json_pos_to_sketch_pos(name, "start")
+                end_pos = _json_pos_to_sketch_pos(name, "end")
+                start_pt = sketch_obj.getPoint(idx, start_pos)
+                end_pt = sketch_obj.getPoint(idx, end_pos)
+                start_xy = [float(start_pt.x), float(start_pt.y)]
+                end_xy = [float(end_pt.x), float(end_pt.y)]
+            except Exception:
+                return start_ref, end_ref
+        return start_ref, end_ref, start_xy, end_xy
+
+    def _select_line_endpoint_for_direction(ref, direction, halfspace=None):
+        endpoints = _line_endpoint_refs(ref, direction, halfspace)
+        if endpoints is None:
+            return ref
+        start_ref, end_ref, start_xy, end_xy = endpoints
+        axis_index = 0 if direction == "HORIZONTAL" else 1
+        choose_max = False
+        normalized_halfspace = str(halfspace or "").upper()
+        if direction == "HORIZONTAL" and normalized_halfspace == "RIGHT":
+            choose_max = True
+        if direction == "VERTICAL" and normalized_halfspace in ("TOP", "UP"):
+            choose_max = True
+        start_value = float(start_xy[axis_index])
+        end_value = float(end_xy[axis_index])
+        if choose_max:
+            return start_ref if start_value >= end_value else end_ref
+        return start_ref if start_value <= end_value else end_ref
+
+    def _directional_distance_anchor(ref, direction, halfspace=None):
+        # Fusion's HistCAD adapter resolves HORIZONTAL/VERTICAL distances to
+        # point anchors first.  Do the same for FreeCAD because DistanceX/Y with
+        # a whole line (PointPos.NONE) can produce malformed Sketcher rows.
+        text = str(ref)
+        if text == "origin" or "." in text:
+            return text
+        if text.startswith("line_"):
+            return _select_line_endpoint_for_direction(text, direction, halfspace)
+        return text
+
     def _fix_constraint(geo_idx):
         # HistCAD Fix on a whole entity maps to FreeCAD's Block(geo).
         return Sketcher.Constraint("Block", geo_idx)
@@ -1394,8 +1470,16 @@ def _apply_histcad_constraints(
         val = dim_meta["value"]
         direction = str(extra.get("direction", "")).upper()
         if direction in ("HORIZONTAL", "VERTICAL"):
+            ref1 = _directional_distance_anchor(
+                entry[0], direction, extra.get("halfSpace0")
+            )
+            ref2 = _directional_distance_anchor(
+                entry[1], direction, extra.get("halfSpace1")
+            )
+            i1, p1 = _resolve_point(ref1)
+            i2, p2 = _resolve_point(ref2)
             axis_index = 0 if direction == "HORIZONTAL" else 1
-            key = distance_polarity_key(str(entry[0]), str(entry[1]), direction)
+            key = distance_polarity_key(str(ref1), str(ref2), direction)
             stored = _polarities.get(key)
             try:
                 stored_polarity = int(stored) if stored is not None else None
@@ -1404,14 +1488,14 @@ def _apply_histcad_constraints(
             if stored_polarity not in (1, -1):
                 stored_polarity = None
             val = directed_axis_distance(
-                entry[0],
-                entry[1],
+                ref1,
+                ref2,
                 axis_index,
                 val,
                 ground_truth=ground_truth,
                 polarity=stored_polarity,
-                live_a=_live_xy(entry[0]),
-                live_b=_live_xy(entry[1]),
+                live_a=_live_xy(ref1),
+                live_b=_live_xy(ref2),
             )
             if stored_polarity is None and abs(float(val)) >= 1e-12:
                 _polarities[key] = polarity_from_signed(val)
@@ -1671,13 +1755,16 @@ def _apply_histcad_constraints(
                 pass
 
     def _purge_redundant_sketch_constraints(max_iterations=10):
-        # Point-specific Tangent constraints make junction Coincident entries
-        # solver-redundant (solve_status -2).  Part::Extrusion then returns a
-        # null shape even though the wire is closed.  Drop redundant rows and
-        # keep applied_log / dimension_bindings indices aligned.
+        # Some LLM/HISTCAD histories include rows that Sketcher can prove from
+        # stronger dimensions (for example a slot-depth Length already implied
+        # by total height and base thickness).  Redundant rows leave the sketch
+        # invalid and can make Part::Extrusion return a null shape.  Drop solver
+        # redundant rows and keep applied_log / dimension_bindings indices
+        # aligned; removed aliases are reported through purged_redundant.
         purged = []
         _pos_labels = {1: "start", 2: "end", 3: "middle"}
         _inv = {int(v): k for k, v in idx_map.items()}
+
         for _ in range(max_iterations):
             try:
                 sketch_obj.solve()
@@ -1697,13 +1784,15 @@ def _apply_histcad_constraints(
                 if not (0 <= _pos < len(sketch_obj.Constraints)):
                     continue
                 _c = sketch_obj.Constraints[_pos]
-                # Tangent + junction Coincident overlap is the known failure mode for
-                # Part::Extrusion.  Leave other redundant types untouched.
-                if _c.Type != "Coincident":
-                    continue
                 _refs = []
                 _f, _fp = int(_c.First), int(_c.FirstPos)
                 _s, _sp = int(_c.Second), int(_c.SecondPos)
+                _removed_aliases = [
+                    _binding.get("alias")
+                    for _binding in dimension_bindings
+                    if _binding.get("constraint_index") == _pos
+                    and _binding.get("alias")
+                ]
                 if _f >= 0 and _f in _inv:
                     _lbl = _pos_labels.get(_fp)
                     _refs.append(
@@ -1720,6 +1809,7 @@ def _apply_histcad_constraints(
                         "freecad_type": _c.Type,
                         "entity_refs": _refs,
                         "reason": "solver_redundant",
+                        "removed_aliases": _removed_aliases,
                     }
                 )
                 sketch_obj.delConstraint(_pos)
@@ -4962,6 +5052,7 @@ _result_ = {{
                 "L2": "primitive tool sequence with some missing args/selectors",
                 "L3": "primitive tool sequence with concrete tool_name and args/selectors",
             },
+            "planning_policy": _PRIMITIVE_PLANNING_POLICY,
             "primitive_plan_envelope": {
                 "required": ["plan_level", "steps"],
                 "step_fields": {

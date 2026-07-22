@@ -1399,6 +1399,7 @@ def _apply_histcad_constraints(
     added = []
     dimension_bindings = []
     applied_log = []
+    failed_or_skipped_constraints = []
 
     def _entity_refs_from_entry(ctype, entry):
         refs = []
@@ -1443,6 +1444,36 @@ def _apply_histcad_constraints(
                 ),
             }
         )
+
+    def _input_payload(input_type, entry_index, entry):
+        if input_type is None:
+            return None
+        return {
+            "type": input_type,
+            "entry_index": entry_index,
+            "entry": entry,
+        }
+
+    def _record_skipped_constraint(
+        *,
+        phase,
+        source,
+        input_type,
+        entry_index,
+        entry,
+        reason,
+        exc=None,
+    ):
+        row = {
+            "phase": phase,
+            "source": source,
+            "input": _input_payload(input_type, entry_index, entry),
+            "reason": reason,
+        }
+        if exc is not None:
+            row["exception_type"] = type(exc).__name__
+            row["message"] = str(exc)
+        failed_or_skipped_constraints.append(row)
 
     def _live_xy(ref):
         try:
@@ -1727,8 +1758,16 @@ def _apply_histcad_constraints(
         for entry_index, entry in enumerate(constraint_dict.get(ctype, [])):
             try:
                 _apply_constraint_entry(ctype, entry, entry_index=entry_index)
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_skipped_constraint(
+                    phase="topology",
+                    source="input",
+                    input_type=ctype,
+                    entry_index=entry_index,
+                    entry=entry,
+                    reason="apply_exception",
+                    exc=_exc,
+                )
 
     # Phase 2: optional axis-aligned orientation from ground truth (opt-in).
     # Default off: inventing DistanceX/Y locks free DOFs from source histories.
@@ -1741,8 +1780,16 @@ def _apply_histcad_constraints(
                     input_type=None,
                     entry_index=None,
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_skipped_constraint(
+                    phase="orientation_stabilization",
+                    source="adapter",
+                    input_type=None,
+                    entry_index=None,
+                    entry=orient_entry,
+                    reason="apply_exception",
+                    exc=_exc,
+                )
 
     # Phase 3: remaining constraints in input order.
     for ctype, entries in constraint_dict.items():
@@ -1751,8 +1798,16 @@ def _apply_histcad_constraints(
         for entry_index, entry in enumerate(entries):
             try:
                 _apply_constraint_entry(ctype, entry, entry_index=entry_index)
-            except Exception:
-                pass
+            except Exception as _exc:
+                _record_skipped_constraint(
+                    phase="remaining",
+                    source="input",
+                    input_type=ctype,
+                    entry_index=entry_index,
+                    entry=entry,
+                    reason="apply_exception",
+                    exc=_exc,
+                )
 
     def _purge_redundant_sketch_constraints(max_iterations=10):
         # Some LLM/HISTCAD histories include rows that Sketcher can prove from
@@ -1784,6 +1839,7 @@ def _apply_histcad_constraints(
                 if not (0 <= _pos < len(sketch_obj.Constraints)):
                     continue
                 _c = sketch_obj.Constraints[_pos]
+                _base = applied_log[_pos] if _pos < len(applied_log) else {}
                 _refs = []
                 _f, _fp = int(_c.First), int(_c.FirstPos)
                 _s, _sp = int(_c.Second), int(_c.SecondPos)
@@ -1808,6 +1864,9 @@ def _apply_histcad_constraints(
                         "freecad_index": _r_idx,
                         "freecad_type": _c.Type,
                         "entity_refs": _refs,
+                        "input": _base.get("input"),
+                        "source": _base.get("source"),
+                        "adapter_reason": _base.get("adapter_reason"),
                         "reason": "solver_redundant",
                         "removed_aliases": _removed_aliases,
                     }
@@ -1854,6 +1913,7 @@ def _apply_histcad_constraints(
         "purged_redundant": purged_redundant,
         "dimension_bindings": dimension_bindings,
         "applied_log": applied_log,
+        "failed_or_skipped_constraints": failed_or_skipped_constraints,
         "polarities": dict(_polarities),
     }
 """
@@ -2803,6 +2863,9 @@ try:
     redundant = constraint_result.get("redundant", [])
     purged_redundant = constraint_result.get("purged_redundant", [])
     applied_log = constraint_result.get("applied_log", [])
+    failed_or_skipped_constraints = constraint_result.get(
+        "failed_or_skipped_constraints", []
+    )
     dimension_bindings = constraint_result.get("dimension_bindings", [])
     # Constraint aliases are native, stable expression references.  A
     # Spreadsheet is an optional UI adapter, not the dependency source.
@@ -3048,6 +3111,15 @@ try:
         _catalog_type_counts[_typ] = _catalog_type_counts.get(_typ, 0) + 1
     _constraint_catalog_summary = {{
         "count": len(_catalog),
+        "final_constraint_count": len(_catalog),
+        "input_constraint_count": sum(len(v) for v in constraints_in.values()),
+        "applied_count": applied_count,
+        "failed_or_skipped_count": len(failed_or_skipped_constraints),
+        "purged_redundant_count": len(purged_redundant),
+        "lossless": (
+            len(failed_or_skipped_constraints) == 0
+            and len(purged_redundant) == 0
+        ),
         "freecad_type_counts": _catalog_type_counts,
         "redundant_count": len(_redundant_entries),
         "conflicting_count": len(_conflicting_entries),
@@ -3161,6 +3233,7 @@ try:
         "applied_constraints":     _catalog,
         "redundant":               _redundant_entries,
         "conflicting":             _conflicting_entries,
+        "failed_or_skipped_constraints": failed_or_skipped_constraints,
         "purged_redundant":        purged_redundant,
         "redundant_constraints":   [_row["freecad_index"] for _row in _redundant_entries],
         "conflicting_constraints": [_row["freecad_index"] for _row in _conflicting_entries],
@@ -5464,6 +5537,14 @@ _result_ = {{
                         ),
                         "applied_constraints": result.get("applied_constraints", []),
                         "applied_log": result.get("applied_log", []),
+                        "input_constraint_count": result.get("input_constraint_count"),
+                        "applied_count": result.get("applied_count"),
+                        "failed_or_skipped_constraints": result.get(
+                            "failed_or_skipped_constraints", []
+                        ),
+                        "purged_redundant": result.get("purged_redundant", []),
+                        "redundant": result.get("redundant", []),
+                        "conflicting": result.get("conflicting", []),
                         "dof_after": result.get("dof_after"),
                         "solve_status": result.get("solve_status"),
                         "geometry_drift": result.get("geometry_drift"),

@@ -810,6 +810,51 @@ class TestFabricationTools:
                 {
                     "dof_after": -1,
                     "solve_status": 1,
+                    "input_constraint_count": 1,
+                    "applied_count": 0,
+                    "failed_or_skipped_constraints": [
+                        {
+                            "phase": "remaining",
+                            "source": "input",
+                            "input": {
+                                "type": "Length",
+                                "entry_index": 0,
+                                "entry": [
+                                    "line_1",
+                                    {
+                                        "length": 80,
+                                        "alias": "plate_length",
+                                    },
+                                ],
+                            },
+                            "reason": "apply_exception",
+                            "exception_type": "ValueError",
+                            "message": "mock failure",
+                        }
+                    ],
+                    "purged_redundant": [
+                        {
+                            "freecad_index": 1,
+                            "freecad_type": "Distance",
+                            "input": {
+                                "type": "Length",
+                                "entry_index": 0,
+                                "entry": [
+                                    "line_1",
+                                    {
+                                        "length": 80,
+                                        "alias": "plate_length",
+                                    },
+                                ],
+                            },
+                            "source": "input",
+                            "adapter_reason": None,
+                            "reason": "solver_redundant",
+                            "removed_aliases": ["plate_length"],
+                        }
+                    ],
+                    "redundant": [],
+                    "conflicting": [],
                     "bound_params": [
                         {
                             "alias": "plate_length",
@@ -910,6 +955,13 @@ class TestFabricationTools:
         assert diagnostics[1]["alias"] == "thickness"
         assert diagnostics[1]["bound"] is True
         assert result["operation_count"] == 4
+        sketch_result = result["sketch_constraint_results"][0]
+        assert sketch_result["input_constraint_count"] == 1
+        assert sketch_result["applied_count"] == 0
+        assert sketch_result["failed_or_skipped_constraints"][0]["phase"] == "remaining"
+        assert sketch_result["purged_redundant"][0]["input"]["type"] == "Length"
+        assert sketch_result["redundant"] == []
+        assert sketch_result["conflicting"] == []
 
     @pytest.mark.asyncio
     async def test_validate_operation_plan_accepts_json_string_and_path(
@@ -1335,8 +1387,33 @@ class TestFabricationSourceConventions:
         assert '"constraint_catalog_summary": _constraint_catalog_summary' in source
         assert '"applied_constraints":     _catalog' in source
         assert '"redundant":               _redundant_entries' in source
+        assert (
+            '"failed_or_skipped_constraints": failed_or_skipped_constraints' in source
+        )
         assert '"purged_redundant":        purged_redundant' in source
         assert '"applied_log":             applied_log' in source
+        assert '"failed_or_skipped_count": len(failed_or_skipped_constraints)' in source
+        assert '"purged_redundant_count": len(purged_redundant)' in source
+        assert '"lossless": (' in source
+
+    def test_apply_sketch_constraints_records_skipped_and_purge_input(self) -> None:
+        """Skipped add attempts and purged rows retain input mapping."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        assert "failed_or_skipped_constraints = []" in source
+        assert "def _record_skipped_constraint(" in source
+        assert 'phase="topology"' in source
+        assert 'phase="orientation_stabilization"' in source
+        assert 'phase="remaining"' in source
+        assert '"reason": reason' in source
+        assert '"exception_type"] = type(exc).__name__' in source
+        assert "_base = applied_log[_pos] if _pos < len(applied_log) else {}" in source
+        assert '"input": _base.get("input")' in source
+        assert '"source": _base.get("source")' in source
+        assert '"adapter_reason": _base.get("adapter_reason")' in source
 
     def test_execute_operation_plan_returns_stable_summary_fields(self) -> None:
         """Agent harness depends on structured execute_operation_plan summary."""
@@ -1357,6 +1434,15 @@ class TestFabricationSourceConventions:
             '"steps_completed": steps_completed',
             '"operation_count": len(op_plan.operations)',
             '"success": True',
+        ]:
+            assert field in execute_block
+        for field in [
+            '"input_constraint_count": result.get("input_constraint_count")',
+            '"applied_count": result.get("applied_count")',
+            '"failed_or_skipped_constraints": result.get(',
+            '"purged_redundant": result.get("purged_redundant", [])',
+            '"redundant": result.get("redundant", [])',
+            '"conflicting": result.get("conflicting", [])',
         ]:
             assert field in execute_block
 

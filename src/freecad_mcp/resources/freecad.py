@@ -1786,15 +1786,6 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                             "key_params": ["body_name", "doc_name"],
                         },
                         {
-                            "name": "describe_primitive_plan_schema",
-                            "description": (
-                                "Describe the agent-facing PrimitivePlan contract for "
-                                "no-template workflows. Primitive args schemas are derived "
-                                "from MCP primitive tool signatures."
-                            ),
-                            "key_params": [],
-                        },
-                        {
                             "name": "validate_primitive_plan",
                             "description": (
                                 "Validate a PrimitivePlan envelope against known primitive "

@@ -411,7 +411,12 @@ _result_ = {{
         name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Add fillet (rounded edges) to an object.
+        """Add fillet (rounded edges) to an object using FreeCAD edge names.
+
+        This is a FreeCAD-native tool.  The ``edges`` argument uses topology
+        names such as ``"Edge1"`` and ``"Edge2"``; no-template fabrication
+        agents should usually prefer ``feature_fillet`` with geometric
+        ``near_points`` selectors.
 
         Args:
             object_name: Name of the object to fillet.
@@ -496,7 +501,12 @@ _result_ = {{
         name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Add chamfer (beveled edges) to an object.
+        """Add chamfer (beveled edges) to an object using FreeCAD edge names.
+
+        This is a FreeCAD-native tool.  The ``edges`` argument uses topology
+        names such as ``"Edge1"`` and ``"Edge2"``; no-template fabrication
+        agents should usually prefer ``feature_chamfer`` with geometric
+        ``near_points`` selectors.
 
         Args:
             object_name: Name of the object to chamfer.

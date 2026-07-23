@@ -13,9 +13,9 @@ converters, and explicit full-plan callers.  ``execute_operation_plan``
 validates it, dispatches primitive tools in list order, and returns structured
 diagnostics.
 
-Agentic no-template callers use ``describe_primitive_plan_schema`` instead.
-That contract is derived from the real primitive tool function signatures, so
-primitive tool args have a single maintenance source.
+Agentic no-template callers consume the MCP ``tools/list`` metadata exposed by
+the primitive tools.  Tool descriptions, input schemas, examples, workflow
+recipes, and planning guidance are maintained on the tools themselves.
 
 Tool groups
 -----------
@@ -122,7 +122,142 @@ _PRIMITIVE_OUTPUT_EXPORTS: dict[str, list[str]] = {
     "execute_helix": ["body_name", "feature_name", "object_name", "bound_params"],
     "feature_fillet": ["feature_name", "object_name"],
     "feature_chamfer": ["feature_name", "object_name"],
-    "get_body_snapshot": ["bounding_box", "volume", "features"],
+    "get_body_snapshot": [
+        "bounding_box",
+        "volume",
+        "features",
+        "edge_samples",
+        "hole_features",
+    ],
+}
+
+_HISTCAD_SKETCH_ENTITY_REFERENCE: dict[str, Any] = {
+    "source": "HistCAD sketch entity schema",
+    "contract_scope": (
+        "Current create_sketch_geometry implementation contract, not the full "
+        "HistCAD dataset superset."
+    ),
+    "entity_name_convention": (
+        "Use stable keys with type prefixes: line_1, circle_1, ellipse_1, "
+        "arc_1, elliptical_arc_1, nurbs_1."
+    ),
+    "coordinate_units": "All 2-D sketch coordinates are in millimetres.",
+    "entities": {
+        "line": {
+            "name_pattern": "line_N",
+            "schema": {"start": ["x1", "y1"], "end": ["x2", "y2"]},
+            "example": {"line_1": {"start": [0.0, 0.0], "end": [40.0, 0.0]}},
+        },
+        "circle": {
+            "name_pattern": "circle_N",
+            "schema": {"center": ["x", "y"], "radius": "r"},
+            "example": {"circle_1": {"center": [8.0, 8.0], "radius": 2.5}},
+        },
+        "ellipse": {
+            "name_pattern": "ellipse_N",
+            "schema": {
+                "center": ["x", "y"],
+                "major": "semi-major radius",
+                "minor": "semi-minor radius",
+                "angle": "major-axis angle in degrees",
+            },
+            "example": {
+                "ellipse_1": {
+                    "center": [0.0, 0.0],
+                    "major": 12.0,
+                    "minor": 6.0,
+                    "angle": 0.0,
+                }
+            },
+        },
+        "arc": {
+            "name_pattern": "arc_N",
+            "schema": {
+                "start": ["x1", "y1"],
+                "middle": ["x2", "y2"],
+                "end": ["x3", "y3"],
+            },
+            "example": {
+                "arc_1": {
+                    "start": [0.0, 10.0],
+                    "middle": [7.0, 7.0],
+                    "end": [10.0, 0.0],
+                }
+            },
+            "notes": "Use middle, not mid.",
+        },
+        "elliptical_arc": {
+            "name_pattern": "elliptical_arc_N",
+            "schema": {
+                "start": ["x1", "y1"],
+                "end": ["x2", "y2"],
+                "major": "semi-major radius",
+                "minor": "semi-minor radius",
+                "angle": "major-axis angle in degrees",
+            },
+            "example": {
+                "elliptical_arc_1": {
+                    "start": [0.0, 5.0],
+                    "end": [10.0, 5.0],
+                    "major": 8.0,
+                    "minor": 4.0,
+                    "angle": 0.0,
+                }
+            },
+            "implementation_notes": (
+                "Current adapter constructs a half ellipse from start/end with "
+                "center at their midpoint. large_arc and sweep from the full "
+                "HistCAD dataset format are not consumed by this tool."
+            ),
+        },
+        "nurbs": {
+            "name_pattern": "nurbs_N",
+            "schema": {
+                "degree": "integer, commonly 3",
+                "periodic": "boolean",
+                "controls": [["x1", "y1"], ["x2", "y2"]],
+                "weights": "optional list of floats; defaults to 1.0",
+                "knots": "knot vector, length = controls + degree + 1",
+            },
+            "example": {
+                "nurbs_1": {
+                    "degree": 3,
+                    "periodic": False,
+                    "controls": [[0.0, 0.0], [5.0, 10.0], [10.0, 0.0]],
+                    "weights": [1.0, 1.0, 1.0],
+                    "knots": [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                }
+            },
+        },
+    },
+    "profile_guidance": [
+        "Closed profiles should have coincident endpoint coordinates across adjacent line/arc entities.",
+        "For extrusion into a solid, create a closed loop; open loops are reported in the profile result.",
+        "Do not put constraints inside sketch; use apply_sketch_constraints when prompt semantics require constraints.",
+    ],
+}
+
+_PRIMITIVE_ARGUMENT_DESCRIPTIONS: dict[str, dict[str, str]] = {
+    "create_sketch_geometry": {
+        "sketch": (
+            "HistCAD 2-D entity dict. Keys are line_N, circle_N, ellipse_N, "
+            "arc_N, elliptical_arc_N, or nurbs_N. Values follow "
+            "meta.histcad_sketch_entity_reference. This is the full sketch "
+            "geometry, not a FreeCAD object name."
+        ),
+        "coordinate_system_name": (
+            "Name of the datum coordinate system returned by create_coordinate_system."
+        ),
+        "body_name": (
+            "Optional PartDesign Body to add the sketch to; normally omit for "
+            "no-template primitive planning."
+        ),
+        "sketch_name": (
+            "Optional explicit FreeCAD sketch object name; use a stable name "
+            "when later steps refer to this sketch."
+        ),
+        "doc_name": "Optional target FreeCAD document; omit to use the active document.",
+    },
 }
 
 _PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
@@ -350,6 +485,76 @@ _PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
             },
         }
     ],
+    "execute_revolve": [
+        {
+            "name": "revolve_profile_around_z_axis",
+            "args": {
+                "sketch_name": "LatheProfile",
+                "axis": [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                "start": 0.0,
+                "end": 360.0,
+                "operation": "NewBody",
+                "feature_name": "RevolvedSolid",
+                "param_aliases": {"end": "revolve_angle"},
+            },
+        }
+    ],
+    "execute_helix": [
+        {
+            "name": "sweep_profile_along_right_handed_helix",
+            "args": {
+                "sketch_name": "ThreadProfile",
+                "axis": [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                "pitch": 2.0,
+                "turns": 8.0,
+                "handedness": "Right",
+                "operation": "NewBody",
+                "feature_name": "HelixSweep",
+                "param_aliases": {"pitch": "thread_pitch", "turns": "thread_turns"},
+            },
+        }
+    ],
+    "get_body_snapshot": [
+        {
+            "name": "snapshot_current_body_for_finishing",
+            "args": {"body_name": "BlockSolid"},
+            "notes": (
+                "Use edge_samples[*].near_point as candidate 3-D selector points "
+                "for feature_fillet.near_points or feature_chamfer.near_points."
+            ),
+        }
+    ],
+    "feature_fillet": [
+        {
+            "name": "fillet_edges_from_snapshot",
+            "args": {
+                "body_name": "BlockSolid",
+                "near_points": [[20.0, 0.0, 10.0], [20.0, 20.0, 10.0]],
+                "radius": 2.0,
+            },
+            "notes": (
+                "Recommended flow: call get_body_snapshot first, choose "
+                "edge_samples near the requested rounded edges, then pass those "
+                "edge_samples[*].near_point values as near_points."
+            ),
+        }
+    ],
+    "feature_chamfer": [
+        {
+            "name": "chamfer_edges_from_snapshot",
+            "args": {
+                "body_name": "BlockSolid",
+                "near_points": [[20.0, 0.0, 10.0], [20.0, 20.0, 10.0]],
+                "dist": 1.0,
+                "angle": 45.0,
+            },
+            "notes": (
+                "Recommended flow: call get_body_snapshot first, choose "
+                "edge_samples near the requested chamfered edges, then pass "
+                "those edge_samples[*].near_point values as near_points."
+            ),
+        }
+    ],
 }
 
 _HISTCAD_CONSTRAINT_REFERENCE: dict[str, Any] = {
@@ -435,29 +640,101 @@ _HISTCAD_CONSTRAINT_REFERENCE: dict[str, Any] = {
 
 
 _PRIMITIVE_PLANNING_POLICY: dict[str, Any] = {
-    "ordinary_no_template_default": (
-        "For ordinary no-template prompts that describe final geometry with "
-        "dimensions, prefer create_coordinate_system -> create_sketch_geometry "
-        "-> execute_extrude and omit apply_sketch_constraints."
+    "tool_selection": (
+        "Choose primitive tools from the user prompt and available structured "
+        "context. Do not add or omit apply_sketch_constraints without prompt evidence."
     ),
-    "skip_apply_sketch_constraints_by_default": True,
-    "use_apply_sketch_constraints_when": [
+    "constraint_selection_policy": "prompt_driven",
+    "include_apply_sketch_constraints_when": [
         (
-            "The user explicitly asks for parametric, editable, configurable, "
-            "or constrained sketch behavior."
+            "The prompt states sketch constraints, constrained dimensions, "
+            "equalities, horizontal/vertical/perpendicular relations, diameters, "
+            "radii, distances, or other constraint semantics."
         ),
         (
-            "The source input contains explicit sketch constraints, such as "
-            "HistCAD/Fusion history constraints."
+            "The user asks for parametric, editable, configurable, or "
+            "constraint-preserving sketch behavior."
         ),
         "A selected template or workflow explicitly requires sketch constraints.",
     ],
+    "omit_apply_sketch_constraints_when": [
+        (
+            "The prompt only asks for final geometry and provides enough concrete "
+            "coordinates/dimensions to create the requested shape without "
+            "preserving sketch constraints."
+        ),
+        (
+            "The prompt lacks enough entity references or values to express the "
+            "constraints; record the missing information in diagnostics."
+        ),
+    ],
     "examples_note": (
-        "Examples under apply_sketch_constraints show how to use the tool when "
-        "selected; they are not a default workflow mandate for ordinary "
-        "no-template prompts."
+        "Examples under apply_sketch_constraints are usage patterns for prompts "
+        "that contain constraint intent. They are not a global default and not a "
+        "reason to ignore explicit constraints."
     ),
 }
+
+_PRIMITIVE_WORKFLOW_RECIPES: dict[str, list[str]] = {
+    "block_with_through_hole": [
+        "create_coordinate_system for the base sketch plane",
+        "create_sketch_geometry for the rectangular block profile",
+        "apply_sketch_constraints only when prompt semantics request constraints",
+        "execute_extrude for the base solid",
+        "create_sketch_geometry and execute_extrude for the cutting tool body",
+        "execute_boolean with operation='Cut'",
+    ],
+    "snapshot_then_fillet_edges": [
+        "create or select the solid object to round",
+        "call get_body_snapshot for that body/object",
+        "choose edge_samples whose near_point is closest to the requested rounded edges",
+        "call feature_fillet with body_name, radius, and near_points from edge_samples",
+    ],
+    "snapshot_then_chamfer_edges": [
+        "create or select the solid object to chamfer",
+        "call get_body_snapshot for that body/object",
+        "choose edge_samples whose near_point is closest to the requested chamfered edges",
+        "call feature_chamfer with body_name, dist/angle, and near_points from edge_samples",
+    ],
+    "extrude_then_boolean_cut": [
+        "create the base solid",
+        "create the cutting tool as its own solid and ensure it intersects/passes through the base",
+        "call execute_boolean with operation='Cut' using base_object_name and tool_object_name",
+    ],
+    "revolve_profile": [
+        "create_coordinate_system and create_sketch_geometry for the revolve profile",
+        "execute_revolve with sketch_name and axis [[base_x, base_y, base_z], [dir_x, dir_y, dir_z]]",
+    ],
+    "helix_sweep": [
+        "create_coordinate_system and create_sketch_geometry for the sweep profile",
+        "execute_helix with sketch_name, axis, pitch, turns, and handedness",
+    ],
+}
+
+
+def _primitive_tool_meta(name: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "agent_facing": True,
+        "planning_policy": _PRIMITIVE_PLANNING_POLICY,
+        "workflow_recipes": _PRIMITIVE_WORKFLOW_RECIPES,
+        "output_exports": _PRIMITIVE_OUTPUT_EXPORTS.get(name, []),
+        "argument_examples": _PRIMITIVE_ARGUMENT_EXAMPLES.get(name, []),
+    }
+    if name in _PRIMITIVE_ARGUMENT_DESCRIPTIONS:
+        meta["argument_descriptions"] = _PRIMITIVE_ARGUMENT_DESCRIPTIONS[name]
+    if name == "create_sketch_geometry":
+        meta["histcad_sketch_entity_reference"] = _HISTCAD_SKETCH_ENTITY_REFERENCE
+        meta["slot_guidance"] = {
+            "sketch": (
+                "Planner-preferred large semantic slot. Fill from the prompt's "
+                "overall profile description whenever possible; use resolver "
+                "only when a structured upstream source provides the missing "
+                "entities."
+            )
+        }
+    if name == "apply_sketch_constraints":
+        meta["constraint_reference"] = _HISTCAD_CONSTRAINT_REFERENCE
+    return meta
 
 
 def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
@@ -594,6 +871,47 @@ def _primitive_tool_catalog(tool_functions: dict[str, Any]) -> dict[str, Any]:
     return catalog
 
 
+def _sync_registered_tool_parameter_descriptions(
+    mcp: Any, tool_functions: dict[str, Any]
+) -> None:
+    """Copy docstring-derived arg descriptions into protocol inputSchema."""
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    if tool_manager is None or not hasattr(tool_manager, "get_tool"):
+        return
+    for name, func in tool_functions.items():
+        registered = tool_manager.get_tool(name)
+        if registered is None:
+            continue
+        schema = _tool_args_schema(func)
+        source_properties = schema.get("properties", {})
+        target_properties = registered.parameters.get("properties", {})
+        if not isinstance(source_properties, dict) or not isinstance(
+            target_properties, dict
+        ):
+            continue
+        for arg_name, source_schema in source_properties.items():
+            description = (
+                source_schema.get("description")
+                if isinstance(source_schema, dict)
+                else None
+            )
+            if not description:
+                continue
+            target_schema = target_properties.get(arg_name)
+            if isinstance(target_schema, dict):
+                target_schema.setdefault("description", description)
+        if name == "execute_extrude":
+            extrusion_mode = target_properties.get("extrusion_mode")
+            if isinstance(extrusion_mode, dict):
+                extrusion_mode.setdefault(
+                    "enum", ["auto", "parametric_sketch", "robust_face"]
+                )
+        if name == "execute_boolean":
+            operation = target_properties.get("operation")
+            if isinstance(operation, dict):
+                operation.setdefault("enum", ["Join", "Cut", "Intersect"])
+
+
 def _validate_primitive_plan_payload(
     plan: Any,
     tool_functions: dict[str, Any],
@@ -686,7 +1004,7 @@ def _validate_primitive_args_against_schema(
                     "path": f"{path}.{arg_name}",
                     "message": (
                         f"unknown arg {arg_name!r} for tool {tool_name!r}; "
-                        "use only describe_primitive_plan_schema args"
+                        "use only args exposed by the MCP tools/list inputSchema"
                     ),
                 }
             )
@@ -733,8 +1051,8 @@ def _validate_primitive_constraint_shape(
                     "path": f"{path}.{constraint_name}",
                     "message": (
                         f"unknown HistCAD constraint type {constraint_name!r}; "
-                        "use one of describe_primitive_plan_schema "
-                        "apply_sketch_constraints.constraint_reference.supported_types"
+                        "use one of apply_sketch_constraints meta."
+                        "constraint_reference.supported_types from MCP tools/list"
                     ),
                 }
             )
@@ -1943,7 +2261,7 @@ def register_fabrication_tools(
     - Group F — Parametric Control: ``list_tunable_params``,
       ``set_tunable_param``
     - Group G — Observation: ``get_body_snapshot``
-    - Agentic Plan Contract: ``describe_primitive_plan_schema``,
+    - Agentic Plan Contract: MCP ``tools/list`` primitive metadata,
       ``validate_primitive_plan``
     - Deterministic Batch Contract: ``validate_operation_plan``
     - Batch: ``execute_operation_plan``
@@ -1956,7 +2274,7 @@ def register_fabrication_tools(
     # Group A — Coordinate System
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("create_coordinate_system"))
     async def create_coordinate_system(
         euler_angles: list[float],
         translation: list[float],
@@ -2180,7 +2498,7 @@ except Exception as _e:
     # Group B — Sketch Geometry
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("create_sketch_geometry"))
     async def create_sketch_geometry(
         sketch: dict[str, Any],
         coordinate_system_name: str,
@@ -2717,7 +3035,7 @@ _result_ = {{
             return result.result
         raise ValueError(result.error_traceback or "Failed to check constraints")
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("apply_sketch_constraints"))
     async def apply_sketch_constraints(
         sketch_name: str,
         constraints: dict[str, Any],
@@ -3255,7 +3573,7 @@ except Exception as _e:
     # Group D — Feature Execution
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("execute_extrude"))
     async def execute_extrude(
         sketch_name: str,
         towards: float,
@@ -3695,13 +4013,16 @@ try:
     doc.recompute()
     doc.commitTransaction()
 
+    def _sci_float(_value):
+        return float(f"{{float(_value):.12e}}")
 
     _result_ = {{
         "feature_name":        feat.Name,
         "local_obb":           local_obb,
         "global_center":       global_center,
         "bounding_box":        bbox,
-        "volume_mm3":          round(volume, 4),
+        "volume_mm3":          _sci_float(volume),
+        "volume_mm3_display":  f"{{float(volume):.12e}}",
         "sketch_normal_world": sketch_normal_world,
         "extrusion_mode_used": extrusion_mode_used,
         "fallback_reason": (
@@ -3719,7 +4040,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute extrude")
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("execute_boolean"))
     async def execute_boolean(
         base_object_name: str,
         tool_object_name: str,
@@ -4079,6 +4400,8 @@ try:
 
     result_shape = feat.Shape
     _rb = result_shape.BoundBox
+    def _sci_float(_value):
+        return float(f"{{float(_value):.12e}}")
     _result_ = {{
         "feature_name": feat.Name,
         "type_id":      feat.TypeId,
@@ -4093,19 +4416,22 @@ try:
         "base": {{
             "name":          {base_object_name!r},
             "global_center": base_center,
-            "volume_mm3":    round(base_shape.Volume, 4),
+            "volume_mm3":    _sci_float(base_shape.Volume),
+            "volume_mm3_display": f"{{float(base_shape.Volume):.12e}}",
         }},
         "tool": {{
             "name":          {tool_object_name!r},
             "global_center": tool_center,
-            "volume_mm3":    round(tool_shape.Volume, 4),
+            "volume_mm3":    _sci_float(tool_shape.Volume),
+            "volume_mm3_display": f"{{float(tool_shape.Volume):.12e}}",
         }},
         "result": {{
             "global_center": _aabb_center(result_shape),
             "bounding_box":  {{"x_min": round(_rb.XMin, 4), "x_max": round(_rb.XMax, 4),
                                "y_min": round(_rb.YMin, 4), "y_max": round(_rb.YMax, 4),
                                "z_min": round(_rb.ZMin, 4), "z_max": round(_rb.ZMax, 4)}},
-            "volume_mm3":    round(result_shape.Volume, 4),
+            "volume_mm3":    _sci_float(result_shape.Volume),
+            "volume_mm3_display": f"{{float(result_shape.Volume):.12e}}",
         }},
         "center_distance": center_distance,
         "success": result_shape.Volume > 1e-9,
@@ -4120,7 +4446,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute boolean")
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("execute_revolve"))
     async def execute_revolve(
         sketch_name: str,
         axis: list[list[float]],
@@ -4236,7 +4562,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute revolve")
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("execute_helix"))
     async def execute_helix(
         sketch_name: str,
         axis: list[list[float]],
@@ -4368,7 +4694,7 @@ except Exception as _e:
     # Group E — Finishing Features
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("feature_fillet"))
     async def feature_fillet(
         near_points: list[list[float]],
         radius: float | list[float],
@@ -4388,8 +4714,8 @@ except Exception as _e:
                 is resolved to the geometrically nearest edge at execution time.
             radius: Fillet radius in millimetres.  Either a single value
                 applied to all edges, or a list with one value per edge.
-            body_name: PartDesign Body containing the edges.  Auto-detected
-                if None.
+            body_name: PartDesign Body or shape-bearing solid object containing
+                the edges.  Auto-detected if None.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
@@ -4472,16 +4798,42 @@ for i, pt_coords in enumerate(near_pts):
 if not resolved_edges:
     raise ValueError("No edges resolved from near_points")
 
+edge_names = [f"Edge{{idx+1}}" for idx, _ in resolved_edges]
+
 doc.openTransaction("Feature Fillet")
 try:
-    fillet = doc.addObject("PartDesign::Fillet", "Fillet")
-    fillet.Base = (body.Tip or body, [f"Edge{{idx+1}}" for idx, _ in resolved_edges])
-    fillet.Size = resolved_edges[0][1]
-    body.addObject(fillet)
+    if body.TypeId == "PartDesign::Body":
+        fillet = doc.addObject("PartDesign::Fillet", "Fillet")
+        base_feature = getattr(body, "Tip", None) or body
+        fillet.Base = (base_feature, edge_names)
+        fillet.Size = resolved_edges[0][1]
+        body.addObject(fillet)
+    else:
+        fillet = doc.addObject("Part::Fillet", "Fillet")
+        fillet.Base = body
+        fillet.Edges = [
+            (idx + 1, radius_value, radius_value)
+            for idx, radius_value in resolved_edges
+        ]
+        try:
+            body.Visibility = False
+        except Exception:
+            pass
     doc.recompute()
+    _state = list(getattr(fillet, "State", []) or [])
+    if any(_s in ("Invalid", "Error") for _s in _state):
+        raise ValueError(f"Fillet failed validation; FreeCAD state={{_state}}")
+    try:
+        if hasattr(fillet, "Shape") and fillet.Shape.isNull():
+            raise ValueError("Fillet produced an empty shape")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     doc.commitTransaction()
     _result_ = {{
         "feature_name":       fillet.Name,
+        "object_name":        fillet.Name,
         "resolved_edge_count": len(resolved_edges),
         "radius":             radius_in,
         "success":            True,
@@ -4495,7 +4847,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to create fillet")
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("feature_chamfer"))
     async def feature_chamfer(
         near_points: list[list[float]],
         dist: float,
@@ -4508,6 +4860,8 @@ except Exception as _e:
 
         Same edge-resolution strategy as ``feature_fillet`` — each entry in
         ``near_points`` is matched to the nearest edge via B-rep distance query.
+        Prefer calling ``get_body_snapshot`` first and passing selected
+        ``edge_samples[*].near_point`` values as ``near_points``.
 
         Args:
             near_points: List of 3-D query points ``[[x,y,z], ...]``.
@@ -4516,7 +4870,8 @@ except Exception as _e:
             plane: Optional normal vector ``[nx, ny, nz]`` of the reference
                 plane for angle measurement.  Defaults to the sketch normal
                 if None.
-            body_name: PartDesign Body. Auto-detected if None.
+            body_name: PartDesign Body or shape-bearing solid object. Auto-
+                detected if None.
             doc_name: Target document. Uses the active document if None.
 
         Returns:
@@ -4545,9 +4900,18 @@ else:
         if obj.TypeId == "PartDesign::Body":
             body = obj
             break
+    if body is None:
+        for obj in reversed(doc.Objects):
+            if hasattr(obj, "Shape"):
+                try:
+                    if not obj.Shape.isNull():
+                        body = obj
+                        break
+                except Exception:
+                    pass
 
 if body is None:
-    raise ValueError("No PartDesign Body found")
+    raise ValueError("No shape-bearing object found")
 
 shape = body.Shape
 
@@ -4575,18 +4939,40 @@ for pt_coords in near_pts:
 if not resolved_edges:
     raise ValueError("No edges resolved from near_points")
 
+edge_names = [f"Edge{{idx+1}}" for idx in resolved_edges]
+
 doc.openTransaction("Feature Chamfer")
 try:
-    chamfer = doc.addObject("PartDesign::Chamfer", "Chamfer")
-    chamfer.Base = (body.Tip or body,
-                    [f"Edge{{idx+1}}" for idx in resolved_edges])
-    chamfer.Size  = dist_v
-    chamfer.Angle = angle_v
-    body.addObject(chamfer)
+    if body.TypeId == "PartDesign::Body":
+        chamfer = doc.addObject("PartDesign::Chamfer", "Chamfer")
+        base_feature = getattr(body, "Tip", None) or body
+        chamfer.Base = (base_feature, edge_names)
+        chamfer.Size  = dist_v
+        chamfer.Angle = angle_v
+        body.addObject(chamfer)
+    else:
+        chamfer = doc.addObject("Part::Chamfer", "Chamfer")
+        chamfer.Base = body
+        chamfer.Edges = [(idx + 1, dist_v, dist_v) for idx in resolved_edges]
+        try:
+            body.Visibility = False
+        except Exception:
+            pass
     doc.recompute()
+    _state = list(getattr(chamfer, "State", []) or [])
+    if any(_s in ("Invalid", "Error") for _s in _state):
+        raise ValueError(f"Chamfer failed validation; FreeCAD state={{_state}}")
+    try:
+        if hasattr(chamfer, "Shape") and chamfer.Shape.isNull():
+            raise ValueError("Chamfer produced an empty shape")
+    except ValueError:
+        raise
+    except Exception:
+        pass
     doc.commitTransaction()
     _result_ = {{
         "feature_name":       chamfer.Name,
+        "object_name":        chamfer.Name,
         "resolved_edge_count": len(resolved_edges),
         "dist":               dist_v,
         "angle":              angle_v,
@@ -4896,12 +5282,12 @@ except Exception as _e:
     # Group G — Observation
     # ------------------------------------------------------------------
 
-    @mcp.tool()
+    @mcp.tool(meta=_primitive_tool_meta("get_body_snapshot"))
     async def get_body_snapshot(
         body_name: str | None = None,
         doc_name: str | None = None,
     ) -> dict[str, Any]:
-        """Get a geometric snapshot of a PartDesign Body.
+        """Get a geometric snapshot of a PartDesign Body or shape-bearing object.
 
         Returns the bounding box, volume, feature list, cylindrical
         ``hole_features``, and a sample of edge midpoints (``edge_samples``).
@@ -4911,7 +5297,8 @@ except Exception as _e:
         edge names.
 
         Args:
-            body_name: Name of the PartDesign Body. Auto-detected if None.
+            body_name: Name of the PartDesign Body or shape-bearing solid
+                object. Auto-detected if None.
             doc_name: Document name. Uses the active document if None.
 
         Returns:
@@ -4949,9 +5336,18 @@ else:
         if obj.TypeId == "PartDesign::Body":
             body = obj
             break
+    if body is None:
+        for obj in reversed(doc.Objects):
+            if hasattr(obj, "Shape"):
+                try:
+                    if not obj.Shape.isNull():
+                        body = obj
+                        break
+                except Exception:
+                    pass
 
 if body is None:
-    raise ValueError("No PartDesign Body found")
+    raise ValueError("No shape-bearing object found")
 
 try:
     bb = body.Shape.BoundBox
@@ -4961,6 +5357,9 @@ try:
     volume = body.Shape.Volume
 except Exception:
     bbox = {{}}; volume = 0.0
+
+def _sci_float(_value):
+    return float(f"{{float(_value):.12e}}")
 
 features = []
 if hasattr(body, "Group"):
@@ -5071,7 +5470,8 @@ except Exception:
 
 _result_ = {{
     "bounding_box": bbox,
-    "volume":       volume,
+    "volume":       _sci_float(volume),
+    "volume_display": f"{{float(volume):.12e}}",
     "features":     features,
     "hole_features": hole_features,
     "edge_samples": edge_samples,
@@ -5086,309 +5486,6 @@ _result_ = {{
     # ------------------------------------------------------------------
     # Agentic primitive plan discovery and deterministic batch validation
     # ------------------------------------------------------------------
-
-    @mcp.tool()
-    async def describe_primitive_plan_schema() -> dict[str, Any]:
-        """Describe the primitive-tool plan contract for agentic no-template runs.
-
-        The returned primitive args schemas are derived from the actual Python
-        function signatures of the registered primitive MCP tools.  This tool is
-        deterministic and does not touch FreeCAD.
-        """
-        primitive_tools = {
-            "create_coordinate_system": create_coordinate_system,
-            "create_sketch_geometry": create_sketch_geometry,
-            "apply_sketch_constraints": apply_sketch_constraints,
-            "execute_extrude": execute_extrude,
-            "execute_boolean": execute_boolean,
-            "execute_revolve": execute_revolve,
-            "execute_helix": execute_helix,
-            "feature_fillet": feature_fillet,
-            "feature_chamfer": feature_chamfer,
-            "get_body_snapshot": get_body_snapshot,
-        }
-        return {
-            "schema_name": "PrimitivePlan",
-            "version": "v1",
-            "deterministic": True,
-            "schema_source_policy": {
-                "unique_source": "Primitive MCP tool function signatures are the args schema source.",
-                "agent_rule": (
-                    "Agents may maintain graph state, trace, artifacts, selectors, "
-                    "and a PrimitivePlan envelope, but must not maintain a second "
-                    "primitive args schema."
-                ),
-            },
-            "plan_levels": {
-                "L0": "rough intent; route and high-level decomposition may still be missing",
-                "L1": "workflow-level steps such as create document and observe result",
-                "L2": "primitive tool sequence with some missing args/selectors",
-                "L3": "primitive tool sequence with concrete tool_name and args/selectors",
-            },
-            "planning_policy": _PRIMITIVE_PLANNING_POLICY,
-            "primitive_plan_envelope": {
-                "required": ["plan_level", "steps"],
-                "step_fields": {
-                    "tool_name": "primitive MCP tool name; may be omitted for L0/L1 partial plans",
-                    "args": "ordinary JSON args for tool_name; complete for L3 steps",
-                    "selectors": "agent-side structured selectors resolved before MCP call",
-                    "missing_args": "args that the agent must infer before execution",
-                    "diagnostics": "planner assumptions and warnings",
-                },
-                "ordering": (
-                    "The steps array order is the execution order. Agents should "
-                    "not ask the model to generate step ids or dependency lists."
-                ),
-            },
-            "primitive_tools": _primitive_tool_catalog(primitive_tools),
-            "primitive_plan_examples": [
-                {
-                    "name": "L0 rough intent",
-                    "plan_level": "L0",
-                    "description": "Use when the user intent is too rough to pick CAD operations yet.",
-                    "example": {
-                        "plan_level": "L0",
-                        "steps": [],
-                        "missing_args": ["primitive_plan_steps"],
-                        "diagnostics": {
-                            "intent": "Need to infer shape, dimensions, and operation sequence."
-                        },
-                    },
-                },
-                {
-                    "name": "L1 workflow scaffold",
-                    "plan_level": "L1",
-                    "description": "Use when only high-level workflow is known.",
-                    "example": {
-                        "plan_level": "L1",
-                        "diagnostics": {
-                            "harness_note": "The agent harness creates the session document before primitive plan execution."
-                        },
-                        "steps": [
-                            {
-                                "primitive_tool": "create_coordinate_system",
-                                "missing_args": ["euler_angles", "translation"],
-                            },
-                            {
-                                "primitive_tool": "get_body_snapshot",
-                                "missing_args": ["doc_name", "body_name"],
-                            },
-                        ],
-                    },
-                },
-                {
-                    "name": "L2 block with through hole scaffold",
-                    "plan_level": "L2",
-                    "description": (
-                        "Useful for a simple block-hole prompt.  The planner gives "
-                        "the operation sequence and intent; the agent resolves exact "
-                        "tool args step by step during execution."
-                    ),
-                    "example": {
-                        "plan_level": "L2",
-                        "steps": [
-                            {
-                                "primitive_tool": "create_coordinate_system",
-                                "args": {
-                                    "name": "BaseXY",
-                                    "euler_angles": [0.0, 0.0, 0.0],
-                                    "translation": [0.0, 0.0, 0.0],
-                                },
-                            },
-                            {
-                                "primitive_tool": "create_sketch_geometry",
-                                "args": {
-                                    "sketch_name": "BlockProfile",
-                                    "coordinate_system_name": "BaseXY",
-                                },
-                                "missing_args": ["sketch"],
-                                "diagnostics": {
-                                    "intent": "Sketch a rectangle 40 mm by 20 mm on BaseXY."
-                                },
-                            },
-                            {
-                                "primitive_tool": "apply_sketch_constraints",
-                                "args": {"sketch_name": "BlockProfile"},
-                                "missing_args": ["constraints"],
-                                "diagnostics": {
-                                    "intent": (
-                                        "Constrain rectangle closed, anchored to origin, "
-                                        "horizontal/vertical, "
-                                        "with length aliases block_length and block_width."
-                                    )
-                                },
-                            },
-                            {
-                                "primitive_tool": "execute_extrude",
-                                "args": {
-                                    "sketch_name": "BlockProfile",
-                                    "towards": 10.0,
-                                    "opposite": 0.0,
-                                    "feature_name": "BlockSolid",
-                                    "param_aliases": {"towards": "block_height"},
-                                },
-                            },
-                            {
-                                "primitive_tool": "create_sketch_geometry",
-                                "args": {
-                                    "sketch_name": "HoleProfile",
-                                    "coordinate_system_name": "BaseXY",
-                                },
-                                "missing_args": ["sketch"],
-                                "diagnostics": {
-                                    "intent": (
-                                        "Sketch a circle near one corner; diameter is 5 mm. "
-                                        "Use origin offsets in constraints rather than axis tokens."
-                                    )
-                                },
-                            },
-                            {
-                                "primitive_tool": "apply_sketch_constraints",
-                                "args": {"sketch_name": "HoleProfile"},
-                                "missing_args": ["constraints"],
-                                "diagnostics": {
-                                    "intent": (
-                                        "Use Diameter alias hole_diameter and Distance "
-                                        "from origin to circle_1.center with HORIZONTAL "
-                                        "and VERTICAL offsets."
-                                    )
-                                },
-                            },
-                            {
-                                "primitive_tool": "execute_extrude",
-                                "args": {
-                                    "sketch_name": "HoleProfile",
-                                    "towards": 12.0,
-                                    "opposite": 1.0,
-                                    "feature_name": "HoleTool",
-                                },
-                            },
-                            {
-                                "primitive_tool": "execute_boolean",
-                                "args": {
-                                    "base_object_name": "BlockSolid",
-                                    "tool_object_name": "HoleTool",
-                                    "operation": "Cut",
-                                    "result_name": "BlockWithHole",
-                                },
-                            },
-                        ],
-                    },
-                },
-                {
-                    "name": "L3 minimal rectangle extrude",
-                    "plan_level": "L3",
-                    "description": "All primitive args are concrete and can be called directly.",
-                    "example": {
-                        "plan_level": "L3",
-                        "steps": [
-                            {
-                                "primitive_tool": "create_coordinate_system",
-                                "args": {
-                                    "name": "BaseXY",
-                                    "euler_angles": [0.0, 0.0, 0.0],
-                                    "translation": [0.0, 0.0, 0.0],
-                                },
-                            },
-                            {
-                                "primitive_tool": "create_sketch_geometry",
-                                "args": {
-                                    "sketch_name": "RectProfile",
-                                    "coordinate_system_name": "BaseXY",
-                                    "sketch": {
-                                        "line_1": {
-                                            "start": [0.0, 0.0],
-                                            "end": [40.0, 0.0],
-                                        },
-                                        "line_2": {
-                                            "start": [40.0, 0.0],
-                                            "end": [40.0, 20.0],
-                                        },
-                                        "line_3": {
-                                            "start": [40.0, 20.0],
-                                            "end": [0.0, 20.0],
-                                        },
-                                        "line_4": {
-                                            "start": [0.0, 20.0],
-                                            "end": [0.0, 0.0],
-                                        },
-                                    },
-                                },
-                            },
-                            {
-                                "primitive_tool": "execute_extrude",
-                                "args": {
-                                    "sketch_name": "RectProfile",
-                                    "towards": 10.0,
-                                    "opposite": 0.0,
-                                    "feature_name": "BlockSolid",
-                                },
-                            },
-                        ],
-                    },
-                },
-            ],
-            "workflow_recipes": {
-                "block_with_through_hole": [
-                    "create_coordinate_system for the base sketch plane",
-                    "create_sketch_geometry for the rectangular block profile",
-                    "apply_sketch_constraints for rectangle closure and parametric length/width",
-                    "execute_extrude for the base solid with a height alias",
-                    "create_sketch_geometry for a circular hole tool profile",
-                    "apply_sketch_constraints using Diameter plus origin Distance HORIZONTAL/VERTICAL offsets",
-                    "execute_extrude for the hole tool body through the block",
-                    "execute_boolean with operation='Cut'",
-                ],
-                "boolean_intersect": [
-                    "create the base body",
-                    "create the intersecting tool as its own body",
-                    "call execute_boolean with operation='Intersect'",
-                ],
-                "histcad_arc_geometry": [
-                    "For arc_N sketch entities, use {'start': [x, y], 'middle': [x, y], 'end': [x, y]}",
-                    "The point described as 'via' in NLT maps to the canonical 'middle' field",
-                    "Do not use 'mid' in generated primitive args",
-                ],
-                "local_sketch_offsets": [
-                    "Use only 'origin' as the special point reference",
-                    "Use Distance with direction HORIZONTAL for local X",
-                    "Use Distance with direction VERTICAL for local Y",
-                    "Do not emit x_axis, y_axis, or z_axis refs",
-                ],
-            },
-            "guidance": {
-                "no_artifact_bridge_tools": True,
-                "ordinary_json_args": True,
-                "special_refs": {
-                    "allowed_special_point_refs": ["origin"],
-                    "disallowed_axis_tokens": ["x_axis", "y_axis", "z_axis"],
-                    "local_offset_rule": (
-                        "Use Distance from origin to a sketch point with direction "
-                        "HORIZONTAL or VERTICAL for local X/Y offsets."
-                    ),
-                },
-                "boolean_intersect_rule": (
-                    "For Intersect, create the tool as its own NewBody feature, "
-                    "then call execute_boolean with base_object_name, "
-                    "tool_object_name, and operation='Intersect'."
-                ),
-                "sketch_geometry_rule": {
-                    "line_N": {"start": "[x, y]", "end": "[x, y]"},
-                    "circle_N": {"center": "[x, y]", "radius": "number"},
-                    "arc_N": {
-                        "start": "[x, y]",
-                        "middle": "[x, y]",
-                        "end": "[x, y]",
-                        "note": "canonical field is middle; NLT 'via' point maps here",
-                    },
-                },
-                "batch_service_boundary": (
-                    "execute_operation_plan is a deterministic OperationPlan "
-                    "batch service for templates/converters, not the default "
-                    "agentic no-template route."
-                ),
-            },
-        }
 
     @mcp.tool()
     async def validate_primitive_plan(plan: dict[str, Any]) -> dict[str, Any]:
@@ -5632,3 +5729,19 @@ _result_ = {{
             "operation_count": len(op_plan.operations),
             "success": True,
         }
+
+    _sync_registered_tool_parameter_descriptions(
+        mcp,
+        {
+            "create_coordinate_system": create_coordinate_system,
+            "create_sketch_geometry": create_sketch_geometry,
+            "apply_sketch_constraints": apply_sketch_constraints,
+            "execute_extrude": execute_extrude,
+            "execute_boolean": execute_boolean,
+            "execute_revolve": execute_revolve,
+            "execute_helix": execute_helix,
+            "feature_fillet": feature_fillet,
+            "feature_chamfer": feature_chamfer,
+            "get_body_snapshot": get_body_snapshot,
+        },
+    )

@@ -17,10 +17,12 @@ class TestFabricationTools:
         """Create a mock MCP server that captures tool registrations."""
         mcp = MagicMock()
         mcp._registered_tools = {}
+        mcp._registered_tool_meta = {}
 
-        def tool_decorator():
+        def tool_decorator(*, meta=None):
             def wrapper(func):
                 mcp._registered_tools[func.__name__] = func
+                mcp._registered_tool_meta[func.__name__] = meta or {}
                 return func
 
             return wrapper
@@ -84,37 +86,63 @@ class TestFabricationTools:
             "list_tunable_params",
             "set_tunable_param",
             "get_body_snapshot",
-            "describe_primitive_plan_schema",
             "validate_primitive_plan",
             "validate_operation_plan",
             "execute_operation_plan",
         }
         assert set(register_tools.keys()) == expected
+        assert "describe_primitive_plan_schema" not in register_tools
 
-    @pytest.mark.asyncio
-    async def test_describe_primitive_plan_schema_uses_tool_signatures(
-        self, register_tools: dict
+    def test_no_template_primitives_expose_complete_mcp_metadata(
+        self, register_tools: dict, mock_mcp: MagicMock
     ) -> None:
-        """Primitive schema discovery is derived from registered tool signatures."""
-        result = await register_tools["describe_primitive_plan_schema"]()
+        """No-template primitive contracts are exposed through MCP tool metadata."""
+        from freecad_mcp.tools.fabrication import _tool_args_schema
 
-        assert result["schema_name"] == "PrimitivePlan"
-        tools = result["primitive_tools"]
-        assert "create_coordinate_system" in tools
-        assert "execute_extrude" in tools
-        assert tools["create_sketch_geometry"]["argument_examples"]
-        assert tools["apply_sketch_constraints"]["argument_examples"]
-        policy = result["planning_policy"]
-        assert policy["skip_apply_sketch_constraints_by_default"] is True
+        no_template_primitives = [
+            "create_coordinate_system",
+            "create_sketch_geometry",
+            "apply_sketch_constraints",
+            "execute_extrude",
+            "execute_boolean",
+            "execute_revolve",
+            "execute_helix",
+            "feature_fillet",
+            "feature_chamfer",
+            "get_body_snapshot",
+        ]
+
+        for tool_name in no_template_primitives:
+            assert tool_name in register_tools
+            meta = mock_mcp._registered_tool_meta[tool_name]
+            schema = _tool_args_schema(register_tools[tool_name])
+            properties = schema.get("properties", {})
+            for arg_name, arg_schema in properties.items():
+                assert arg_schema.get("description"), (tool_name, arg_name)
+            examples = meta["argument_examples"]
+            assert examples, tool_name
+            for example in examples:
+                example_args = example.get("args", {})
+                assert set(example_args).issubset(properties), tool_name
+                assert set(schema.get("required", [])).issubset(example_args), (
+                    tool_name,
+                    example.get("name"),
+                )
+            assert meta["output_exports"], tool_name
+
+        tools = mock_mcp._registered_tool_meta
+        policy = tools["apply_sketch_constraints"]["planning_policy"]
+        assert policy["constraint_selection_policy"] == "prompt_driven"
+        assert "skip_apply_sketch_constraints_by_default" not in policy
         assert (
-            "create_coordinate_system -> create_sketch_geometry -> execute_extrude"
-            in policy["ordinary_no_template_default"]
+            "Do not add or omit apply_sketch_constraints without prompt evidence"
+            in policy["tool_selection"]
         )
         assert any(
-            "parametric" in condition
-            for condition in policy["use_apply_sketch_constraints_when"]
+            "diameters" in condition
+            for condition in policy["include_apply_sketch_constraints_when"]
         )
-        assert "not a default workflow mandate" in policy["examples_note"]
+        assert "not a reason to ignore explicit constraints" in policy["examples_note"]
         constraint_tool = tools["apply_sketch_constraints"]
         assert "constraint_reference" in constraint_tool
         assert (
@@ -124,14 +152,86 @@ class TestFabricationTools:
             example["name"] == "concentric_hole_pattern_constraints"
             for example in constraint_tool["argument_examples"]
         )
-        assert "block_with_through_hole" in result["workflow_recipes"]
-        cs_schema = tools["create_coordinate_system"]["args_schema"]
+        recipes = tools["feature_fillet"]["workflow_recipes"]
+        assert "snapshot_then_fillet_edges" in recipes
+        assert (
+            "snapshot_then_chamfer_edges"
+            in tools["feature_chamfer"]["workflow_recipes"]
+        )
+        assert (
+            "extrude_then_boolean_cut" in tools["execute_boolean"]["workflow_recipes"]
+        )
+        assert "revolve_profile" in tools["execute_revolve"]["workflow_recipes"]
+        assert "helix_sweep" in tools["execute_helix"]["workflow_recipes"]
+        assert "edge_samples" in tools["get_body_snapshot"]["output_exports"]
+        assert "hole_features" in tools["get_body_snapshot"]["output_exports"]
+        assert (
+            "edge_samples" in tools["feature_fillet"]["argument_examples"][0]["notes"]
+        )
+        assert "near_points" in tools["feature_fillet"]["argument_examples"][0]["notes"]
+        assert (
+            "edge_samples" in tools["feature_chamfer"]["argument_examples"][0]["notes"]
+        )
+        assert (
+            "near_points" in tools["feature_chamfer"]["argument_examples"][0]["notes"]
+        )
+        sketch_meta = tools["create_sketch_geometry"]
+        assert "histcad_sketch_entity_reference" in sketch_meta
+        entity_reference = sketch_meta["histcad_sketch_entity_reference"]["entities"]
+        for entity_type in (
+            "line",
+            "circle",
+            "ellipse",
+            "arc",
+            "elliptical_arc",
+            "nurbs",
+        ):
+            assert entity_type in entity_reference
+            assert entity_reference[entity_type]["schema"]
+            assert entity_reference[entity_type]["example"]
+        assert "sketch" in sketch_meta["argument_descriptions"]
+        assert "large semantic slot" in sketch_meta["slot_guidance"]["sketch"]
+        cs_schema = _tool_args_schema(register_tools["create_coordinate_system"])
         assert cs_schema["source"] == "python_function_signature"
         assert cs_schema["required"] == ["euler_angles", "translation"]
         assert cs_schema["properties"]["name"]["nullable"] is True
-        extrude_schema = tools["execute_extrude"]["args_schema"]
+        extrude_schema = _tool_args_schema(register_tools["execute_extrude"])
         assert "sketch_name" in extrude_schema["required"]
         assert "towards" in extrude_schema["properties"]
+
+    @pytest.mark.asyncio
+    async def test_protocol_list_tools_exposes_primitive_metadata_and_arg_descriptions(
+        self,
+    ) -> None:
+        """Protocol-level tools/list exposes the contract consumed by MCP clients."""
+        from mcp.server.fastmcp import FastMCP
+
+        from freecad_mcp.tools.fabrication import register_fabrication_tools
+
+        async def get_bridge():
+            raise AssertionError("list_tools must not require a FreeCAD bridge")
+
+        mcp = FastMCP(name="metadata-test")
+        register_fabrication_tools(mcp, get_bridge)
+
+        tools = await mcp.list_tools()
+        by_name = {tool.name: tool for tool in tools}
+        sketch_tool = by_name["create_sketch_geometry"]
+        sketch_schema = sketch_tool.inputSchema["properties"]["sketch"]
+        extrude_schema = by_name["execute_extrude"].inputSchema
+        protocol_meta = sketch_tool.meta
+
+        assert sketch_schema["description"]
+        assert "HistCAD entity dict" in sketch_schema["description"]
+        assert protocol_meta is not None
+        assert protocol_meta["argument_examples"]
+        assert "histcad_sketch_entity_reference" in protocol_meta
+        assert (
+            "large_arc"
+            not in protocol_meta["histcad_sketch_entity_reference"]["entities"][
+                "elliptical_arc"
+            ]["schema"]
+        )
         assert (
             "positive sketch normal"
             in extrude_schema["properties"]["towards"]["description"]
@@ -140,9 +240,6 @@ class TestFabricationTools:
             "auto",
             "parametric_sketch",
             "robust_face",
-        ]
-        assert result["guidance"]["special_refs"]["allowed_special_point_refs"] == [
-            "origin"
         ]
 
     @pytest.mark.asyncio
@@ -1466,12 +1563,58 @@ class TestFabricationSourceConventions:
             encoding="utf-8"
         )
         snapshot_block = source.split("async def get_body_snapshot", 1)[1].split(
-            "async def describe_primitive_plan_schema", 1
+            "async def validate_primitive_plan", 1
         )[0]
 
         assert "hole_features = []" in snapshot_block
         assert '"hole_features": hole_features' in snapshot_block
         assert '"approx_depth"' in snapshot_block
+
+    def test_geometry_volumes_use_scientific_precision_not_four_digit_rounding(
+        self,
+    ) -> None:
+        """Small tool solids should not be summarized as 0.0 by rounding."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+
+        assert "float(_value):.12e" in source
+        assert '"volume_mm3_display"' in source
+        assert '"volume_display"' in source
+        assert '"volume_mm3":          round(volume, 4)' not in source
+        assert '"volume_mm3":    round(tool_shape.Volume, 4)' not in source
+
+    def test_finishing_tools_support_partdesign_and_shape_objects(self) -> None:
+        """Fillet/chamfer contracts support both Body and generic shape outputs."""
+        from pathlib import Path
+
+        source = Path("src/freecad_mcp/tools/fabrication.py").read_text(
+            encoding="utf-8"
+        )
+        fillet_block = source.split("async def feature_fillet", 1)[1].split(
+            "async def feature_chamfer", 1
+        )[0]
+        chamfer_block = source.split("async def feature_chamfer", 1)[1].split(
+            "# ------------------------------------------------------------------\n"
+            "    # Group F",
+            1,
+        )[0]
+
+        assert 'body.TypeId == "PartDesign::Body"' in fillet_block
+        assert 'doc.addObject("Part::Fillet", "Fillet")' in fillet_block
+        assert 'getattr(body, "Tip", None) or body' in fillet_block
+        assert "Fillet failed validation" in fillet_block
+        assert "Fillet produced an empty shape" in fillet_block
+        assert '"object_name":        fillet.Name' in fillet_block
+
+        assert 'body.TypeId == "PartDesign::Body"' in chamfer_block
+        assert 'doc.addObject("Part::Chamfer", "Chamfer")' in chamfer_block
+        assert 'getattr(body, "Tip", None) or body' in chamfer_block
+        assert "Chamfer failed validation" in chamfer_block
+        assert "Chamfer produced an empty shape" in chamfer_block
+        assert '"object_name":        chamfer.Name' in chamfer_block
 
     def test_redundant_constraints_purged_after_apply(self) -> None:
         """Tangent junction Coincident rows are purged so extrusion stays parametric."""

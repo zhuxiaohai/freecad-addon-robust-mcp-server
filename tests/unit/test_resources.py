@@ -123,6 +123,29 @@ class TestFreecadResources:
         assert data["error"] == "Connection refused"
 
     @pytest.mark.asyncio
+    async def test_resource_fabrication_primitive_reference(
+        self, register_resources: dict[str, Callable[..., Any]]
+    ) -> None:
+        """fabrication primitive reference exposes shared schema guidance."""
+        resource = register_resources["freecad://fabrication/primitive-reference"]
+        result = await resource()
+        data = json.loads(result)
+
+        entities = data["histcad_sketch_entity_reference"]["entities"]
+        assert "line" in entities
+        assert "circle" in entities
+        assert "nurbs" in entities
+        assert entities["arc"]["schema"]["middle"] == ["x2", "y2"]
+
+        constraints = data["histcad_constraint_reference"]
+        assert "Concentric" in constraints["supported_types"]
+        assert "Distance" in constraints["entry_shapes"]
+        assert constraints["reference_syntax"]["special_point_refs"] == ["origin"]
+
+        assert data["planning_policy"]["constraint_selection_policy"] == "prompt_driven"
+        assert "block_with_through_hole" in data["workflow_recipes"]
+
+    @pytest.mark.asyncio
     async def test_resource_documents_empty(
         self, register_resources: dict[str, Callable[..., Any]], mock_bridge: AsyncMock
     ) -> None:

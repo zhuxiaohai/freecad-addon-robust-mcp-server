@@ -17,12 +17,10 @@ class TestFabricationTools:
         """Create a mock MCP server that captures tool registrations."""
         mcp = MagicMock()
         mcp._registered_tools = {}
-        mcp._registered_tool_meta = {}
 
-        def tool_decorator(*, meta=None):
+        def tool_decorator():
             def wrapper(func):
                 mcp._registered_tools[func.__name__] = func
-                mcp._registered_tool_meta[func.__name__] = meta or {}
                 return func
 
             return wrapper
@@ -93,10 +91,10 @@ class TestFabricationTools:
         assert set(register_tools.keys()) == expected
         assert "describe_primitive_plan_schema" not in register_tools
 
-    def test_no_template_primitives_expose_complete_mcp_metadata(
-        self, register_tools: dict, mock_mcp: MagicMock
+    def test_no_template_primitives_use_native_signature_contract(
+        self, register_tools: dict
     ) -> None:
-        """No-template primitive contracts are exposed through MCP tool metadata."""
+        """No-template primitive contracts are derived from function signatures."""
         from freecad_mcp.tools.fabrication import _tool_args_schema
 
         no_template_primitives = [
@@ -114,83 +112,11 @@ class TestFabricationTools:
 
         for tool_name in no_template_primitives:
             assert tool_name in register_tools
-            meta = mock_mcp._registered_tool_meta[tool_name]
             schema = _tool_args_schema(register_tools[tool_name])
             properties = schema.get("properties", {})
-            for arg_name, arg_schema in properties.items():
-                assert arg_schema.get("description"), (tool_name, arg_name)
-            examples = meta["argument_examples"]
-            assert examples, tool_name
-            for example in examples:
-                example_args = example.get("args", {})
-                assert set(example_args).issubset(properties), tool_name
-                assert set(schema.get("required", [])).issubset(example_args), (
-                    tool_name,
-                    example.get("name"),
-                )
-            assert meta["output_exports"], tool_name
-
-        tools = mock_mcp._registered_tool_meta
-        policy = tools["apply_sketch_constraints"]["planning_policy"]
-        assert policy["constraint_selection_policy"] == "prompt_driven"
-        assert "skip_apply_sketch_constraints_by_default" not in policy
-        assert (
-            "Do not add or omit apply_sketch_constraints without prompt evidence"
-            in policy["tool_selection"]
-        )
-        assert any(
-            "diameters" in condition
-            for condition in policy["include_apply_sketch_constraints_when"]
-        )
-        assert "not a reason to ignore explicit constraints" in policy["examples_note"]
-        constraint_tool = tools["apply_sketch_constraints"]
-        assert "constraint_reference" in constraint_tool
-        assert (
-            "Concentric" in constraint_tool["constraint_reference"]["supported_types"]
-        )
-        assert any(
-            example["name"] == "concentric_hole_pattern_constraints"
-            for example in constraint_tool["argument_examples"]
-        )
-        recipes = tools["feature_fillet"]["workflow_recipes"]
-        assert "snapshot_then_fillet_edges" in recipes
-        assert (
-            "snapshot_then_chamfer_edges"
-            in tools["feature_chamfer"]["workflow_recipes"]
-        )
-        assert (
-            "extrude_then_boolean_cut" in tools["execute_boolean"]["workflow_recipes"]
-        )
-        assert "revolve_profile" in tools["execute_revolve"]["workflow_recipes"]
-        assert "helix_sweep" in tools["execute_helix"]["workflow_recipes"]
-        assert "edge_samples" in tools["get_body_snapshot"]["output_exports"]
-        assert "hole_features" in tools["get_body_snapshot"]["output_exports"]
-        assert (
-            "edge_samples" in tools["feature_fillet"]["argument_examples"][0]["notes"]
-        )
-        assert "near_points" in tools["feature_fillet"]["argument_examples"][0]["notes"]
-        assert (
-            "edge_samples" in tools["feature_chamfer"]["argument_examples"][0]["notes"]
-        )
-        assert (
-            "near_points" in tools["feature_chamfer"]["argument_examples"][0]["notes"]
-        )
-        sketch_meta = tools["create_sketch_geometry"]
-        assert "histcad_sketch_entity_reference" in sketch_meta
-        entity_reference = sketch_meta["histcad_sketch_entity_reference"]["entities"]
-        for entity_type in (
-            "line",
-            "circle",
-            "ellipse",
-            "arc",
-            "elliptical_arc",
-            "nurbs",
-        ):
-            assert entity_type in entity_reference
-            assert entity_reference[entity_type]["schema"]
-            assert entity_reference[entity_type]["example"]
-        assert "sketch" in sketch_meta["argument_descriptions"]
-        assert "large semantic slot" in sketch_meta["slot_guidance"]["sketch"]
+            assert properties, tool_name
+            for arg_schema in properties.values():
+                assert "description" not in arg_schema
         cs_schema = _tool_args_schema(register_tools["create_coordinate_system"])
         assert cs_schema["source"] == "python_function_signature"
         assert cs_schema["required"] == ["euler_angles", "translation"]
@@ -200,10 +126,10 @@ class TestFabricationTools:
         assert "towards" in extrude_schema["properties"]
 
     @pytest.mark.asyncio
-    async def test_protocol_list_tools_exposes_primitive_metadata_and_arg_descriptions(
+    async def test_protocol_list_tools_uses_native_descriptions_and_input_schema(
         self,
     ) -> None:
-        """Protocol-level tools/list exposes the contract consumed by MCP clients."""
+        """Protocol-level tools/list exposes native descriptors for MCP clients."""
         from mcp.server.fastmcp import FastMCP
 
         from freecad_mcp.tools.fabrication import register_fabrication_tools
@@ -219,28 +145,17 @@ class TestFabricationTools:
         sketch_tool = by_name["create_sketch_geometry"]
         sketch_schema = sketch_tool.inputSchema["properties"]["sketch"]
         extrude_schema = by_name["execute_extrude"].inputSchema
-        protocol_meta = sketch_tool.meta
 
-        assert sketch_schema["description"]
-        assert "HistCAD entity dict" in sketch_schema["description"]
-        assert protocol_meta is not None
-        assert protocol_meta["argument_examples"]
-        assert "histcad_sketch_entity_reference" in protocol_meta
-        assert (
-            "large_arc"
-            not in protocol_meta["histcad_sketch_entity_reference"]["entities"][
-                "elliptical_arc"
-            ]["schema"]
+        assert sketch_tool.meta is None
+        assert "Create a 2-D sketch with HistCAD geometry entities" in (
+            sketch_tool.description or ""
         )
-        assert (
-            "positive sketch normal"
-            in extrude_schema["properties"]["towards"]["description"]
-        )
-        assert extrude_schema["properties"]["extrusion_mode"]["enum"] == [
-            "auto",
-            "parametric_sketch",
-            "robust_face",
-        ]
+        assert "Args:" in (sketch_tool.description or "")
+        assert "Returns:" in (sketch_tool.description or "")
+        assert "Example:" in (sketch_tool.description or "")
+        assert "description" not in sketch_schema
+        assert "description" not in extrude_schema["properties"]["towards"]
+        assert "extrusion_mode" in extrude_schema["properties"]
 
     @pytest.mark.asyncio
     async def test_validate_primitive_plan_checks_known_tools_and_complete_args(

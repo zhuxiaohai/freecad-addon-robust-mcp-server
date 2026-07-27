@@ -13,9 +13,10 @@ converters, and explicit full-plan callers.  ``execute_operation_plan``
 validates it, dispatches primitive tools in list order, and returns structured
 diagnostics.
 
-Agentic no-template callers consume the MCP ``tools/list`` metadata exposed by
-the primitive tools.  Tool descriptions, input schemas, examples, workflow
-recipes, and planning guidance are maintained on the tools themselves.
+Agentic no-template callers consume the native MCP ``tools/list`` descriptors
+for primitive tools: function docstrings provide usage guidance, and FastMCP's
+input schemas provide the machine-readable argument contract.  Shared sketch
+and constraint reference data is exposed as a separate MCP resource.
 
 Tool groups
 -----------
@@ -100,36 +101,6 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _SPREADSHEET_NAME = "FabricationParams"
-
-_PRIMITIVE_OUTPUT_EXPORTS: dict[str, list[str]] = {
-    "create_coordinate_system": ["cs_name", "cs_internal_name", "label", "placement"],
-    "create_sketch_geometry": [
-        "sketch_name",
-        "cs_name",
-        "geometry_count",
-        "profile",
-        "fully_constrained",
-    ],
-    "apply_sketch_constraints": [
-        "sketch_name",
-        "constraint_catalog",
-        "constraint_catalog_summary",
-        "bound_params",
-    ],
-    "execute_extrude": ["body_name", "feature_name", "object_name", "bound_params"],
-    "execute_boolean": ["feature_name", "object_name"],
-    "execute_revolve": ["body_name", "feature_name", "object_name", "bound_params"],
-    "execute_helix": ["body_name", "feature_name", "object_name", "bound_params"],
-    "feature_fillet": ["feature_name", "object_name"],
-    "feature_chamfer": ["feature_name", "object_name"],
-    "get_body_snapshot": [
-        "bounding_box",
-        "volume",
-        "features",
-        "edge_samples",
-        "hole_features",
-    ],
-}
 
 _HISTCAD_SKETCH_ENTITY_REFERENCE: dict[str, Any] = {
     "source": "HistCAD sketch entity schema",
@@ -234,326 +205,6 @@ _HISTCAD_SKETCH_ENTITY_REFERENCE: dict[str, Any] = {
         "Closed profiles should have coincident endpoint coordinates across adjacent line/arc entities.",
         "For extrusion into a solid, create a closed loop; open loops are reported in the profile result.",
         "Do not put constraints inside sketch; use apply_sketch_constraints when prompt semantics require constraints.",
-    ],
-}
-
-_PRIMITIVE_ARGUMENT_DESCRIPTIONS: dict[str, dict[str, str]] = {
-    "create_sketch_geometry": {
-        "sketch": (
-            "HistCAD 2-D entity dict. Keys are line_N, circle_N, ellipse_N, "
-            "arc_N, elliptical_arc_N, or nurbs_N. Values follow "
-            "meta.histcad_sketch_entity_reference. This is the full sketch "
-            "geometry, not a FreeCAD object name."
-        ),
-        "coordinate_system_name": (
-            "Name of the datum coordinate system returned by create_coordinate_system."
-        ),
-        "body_name": (
-            "Optional PartDesign Body to add the sketch to; normally omit for "
-            "no-template primitive planning."
-        ),
-        "sketch_name": (
-            "Optional explicit FreeCAD sketch object name; use a stable name "
-            "when later steps refer to this sketch."
-        ),
-        "doc_name": "Optional target FreeCAD document; omit to use the active document.",
-    },
-}
-
-_PRIMITIVE_ARGUMENT_EXAMPLES: dict[str, list[dict[str, Any]]] = {
-    "create_coordinate_system": [
-        {
-            "name": "base_xy",
-            "args": {
-                "name": "BaseXY",
-                "euler_angles": [0.0, 0.0, 0.0],
-                "translation": [0.0, 0.0, 0.0],
-            },
-        }
-    ],
-    "create_sketch_geometry": [
-        {
-            "name": "rectangle_40_by_20",
-            "args": {
-                "sketch_name": "BlockProfile",
-                "coordinate_system_name": "BaseXY",
-                "sketch": {
-                    "line_1": {"start": [0.0, 0.0], "end": [40.0, 0.0]},
-                    "line_2": {"start": [40.0, 0.0], "end": [40.0, 20.0]},
-                    "line_3": {"start": [40.0, 20.0], "end": [0.0, 20.0]},
-                    "line_4": {"start": [0.0, 20.0], "end": [0.0, 0.0]},
-                },
-            },
-        },
-        {
-            "name": "arc_uses_middle_point",
-            "args": {
-                "sketch_name": "ArcProfile",
-                "coordinate_system_name": "BaseXY",
-                "sketch": {
-                    "arc_1": {
-                        "start": [0.0, 10.0],
-                        "middle": [7.0, 7.0],
-                        "end": [10.0, 0.0],
-                    }
-                },
-            },
-            "notes": (
-                "The canonical arc field is middle. Do not use mid in generated "
-                "primitive args."
-            ),
-        },
-        {
-            "name": "circle_near_origin",
-            "args": {
-                "sketch_name": "HoleProfile",
-                "coordinate_system_name": "BaseXY",
-                "sketch": {"circle_1": {"center": [8.0, 8.0], "radius": 2.5}},
-            },
-        },
-    ],
-    "apply_sketch_constraints": [
-        {
-            "name": "parametric_rectangle_constraints",
-            "args": {
-                "sketch_name": "BlockProfile",
-                "constraints": {
-                    "Coincident": [
-                        ["line_1.end", "line_2.start"],
-                        ["line_2.end", "line_3.start"],
-                        ["line_3.end", "line_4.start"],
-                        ["line_4.end", "line_1.start"],
-                    ],
-                    "Horizontal": ["line_1", "line_3"],
-                    "Vertical": ["line_2", "line_4"],
-                    "Fix": ["line_1.start"],
-                    "Length": [
-                        [
-                            "line_1",
-                            {
-                                "length": "40 mm",
-                                "alias": "block_length",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                        [
-                            "line_2",
-                            {
-                                "length": "20 mm",
-                                "alias": "block_width",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                    ],
-                },
-            },
-        },
-        {
-            "name": "hole_origin_offset_constraints",
-            "args": {
-                "sketch_name": "HoleProfile",
-                "constraints": {
-                    "Diameter": [
-                        [
-                            "circle_1",
-                            {
-                                "diameter": "5 mm",
-                                "alias": "hole_diameter",
-                                "role": "sketch_dimension",
-                            },
-                        ]
-                    ],
-                    "Distance": [
-                        [
-                            "origin",
-                            "circle_1.center",
-                            {
-                                "length": "8 mm",
-                                "direction": "HORIZONTAL",
-                                "alias": "hole_offset_x",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                        [
-                            "origin",
-                            "circle_1.center",
-                            {
-                                "length": "8 mm",
-                                "direction": "VERTICAL",
-                                "alias": "hole_offset_y",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                    ],
-                },
-            },
-        },
-        {
-            "name": "concentric_hole_pattern_constraints",
-            "args": {
-                "sketch_name": "HolePatternProfile",
-                "constraints": {
-                    "Fix": ["circle_1.center"],
-                    "Concentric": [["circle_1", "circle_2"]],
-                    "Diameter": [
-                        [
-                            "circle_1",
-                            {
-                                "diameter": "15 mm",
-                                "alias": "outer_dia",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                        [
-                            "circle_2",
-                            {
-                                "diameter": "8 mm",
-                                "alias": "center_dia",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                        [
-                            "circle_3",
-                            {
-                                "diameter": "3 mm",
-                                "alias": "hole_dia",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                    ],
-                    "Equal": [["circle_3", "circle_4"], ["circle_3", "circle_5"]],
-                    "Distance": [
-                        [
-                            "origin",
-                            "circle_3.center",
-                            {
-                                "length": "5.9 mm",
-                                "direction": "HORIZONTAL",
-                                "alias": "hole_offset_x",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                        [
-                            "origin",
-                            "circle_4.center",
-                            {
-                                "length": "5.9 mm",
-                                "direction": "VERTICAL",
-                                "alias": "hole_offset_y",
-                                "role": "sketch_dimension",
-                            },
-                        ],
-                    ],
-                },
-            },
-            "notes": (
-                "Use origin-to-center Distance entries for local sketch offsets. "
-                "The length is a magnitude; HORIZONTAL/VERTICAL polarity is "
-                "resolved from persisted create_sketch_geometry coordinates."
-            ),
-        },
-    ],
-    "execute_extrude": [
-        {
-            "name": "parametric_block_extrude",
-            "args": {
-                "sketch_name": "BlockProfile",
-                "towards": 10.0,
-                "opposite": 0.0,
-                "feature_name": "BlockSolid",
-                "param_aliases": {"towards": "block_height"},
-            },
-        },
-        {
-            "name": "through_hole_tool_extrude",
-            "args": {
-                "sketch_name": "HoleProfile",
-                "towards": 12.0,
-                "opposite": 1.0,
-                "feature_name": "HoleTool",
-            },
-        },
-    ],
-    "execute_boolean": [
-        {
-            "name": "cut_hole_tool_from_block",
-            "args": {
-                "base_object_name": "BlockSolid",
-                "tool_object_name": "HoleTool",
-                "operation": "Cut",
-                "result_name": "BlockWithHole",
-            },
-        }
-    ],
-    "execute_revolve": [
-        {
-            "name": "revolve_profile_around_z_axis",
-            "args": {
-                "sketch_name": "LatheProfile",
-                "axis": [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-                "start": 0.0,
-                "end": 360.0,
-                "operation": "NewBody",
-                "feature_name": "RevolvedSolid",
-                "param_aliases": {"end": "revolve_angle"},
-            },
-        }
-    ],
-    "execute_helix": [
-        {
-            "name": "sweep_profile_along_right_handed_helix",
-            "args": {
-                "sketch_name": "ThreadProfile",
-                "axis": [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-                "pitch": 2.0,
-                "turns": 8.0,
-                "handedness": "Right",
-                "operation": "NewBody",
-                "feature_name": "HelixSweep",
-                "param_aliases": {"pitch": "thread_pitch", "turns": "thread_turns"},
-            },
-        }
-    ],
-    "get_body_snapshot": [
-        {
-            "name": "snapshot_current_body_for_finishing",
-            "args": {"body_name": "BlockSolid"},
-            "notes": (
-                "Use edge_samples[*].near_point as candidate 3-D selector points "
-                "for feature_fillet.near_points or feature_chamfer.near_points."
-            ),
-        }
-    ],
-    "feature_fillet": [
-        {
-            "name": "fillet_edges_from_snapshot",
-            "args": {
-                "body_name": "BlockSolid",
-                "near_points": [[20.0, 0.0, 10.0], [20.0, 20.0, 10.0]],
-                "radius": 2.0,
-            },
-            "notes": (
-                "Recommended flow: call get_body_snapshot first, choose "
-                "edge_samples near the requested rounded edges, then pass those "
-                "edge_samples[*].near_point values as near_points."
-            ),
-        }
-    ],
-    "feature_chamfer": [
-        {
-            "name": "chamfer_edges_from_snapshot",
-            "args": {
-                "body_name": "BlockSolid",
-                "near_points": [[20.0, 0.0, 10.0], [20.0, 20.0, 10.0]],
-                "dist": 1.0,
-                "angle": 45.0,
-            },
-            "notes": (
-                "Recommended flow: call get_body_snapshot first, choose "
-                "edge_samples near the requested chamfered edges, then pass "
-                "those edge_samples[*].near_point values as near_points."
-            ),
-        }
     ],
 }
 
@@ -712,31 +363,6 @@ _PRIMITIVE_WORKFLOW_RECIPES: dict[str, list[str]] = {
 }
 
 
-def _primitive_tool_meta(name: str) -> dict[str, Any]:
-    meta: dict[str, Any] = {
-        "agent_facing": True,
-        "planning_policy": _PRIMITIVE_PLANNING_POLICY,
-        "workflow_recipes": _PRIMITIVE_WORKFLOW_RECIPES,
-        "output_exports": _PRIMITIVE_OUTPUT_EXPORTS.get(name, []),
-        "argument_examples": _PRIMITIVE_ARGUMENT_EXAMPLES.get(name, []),
-    }
-    if name in _PRIMITIVE_ARGUMENT_DESCRIPTIONS:
-        meta["argument_descriptions"] = _PRIMITIVE_ARGUMENT_DESCRIPTIONS[name]
-    if name == "create_sketch_geometry":
-        meta["histcad_sketch_entity_reference"] = _HISTCAD_SKETCH_ENTITY_REFERENCE
-        meta["slot_guidance"] = {
-            "sketch": (
-                "Planner-preferred large semantic slot. Fill from the prompt's "
-                "overall profile description whenever possible; use resolver "
-                "only when a structured upstream source provides the missing "
-                "entities."
-            )
-        }
-    if name == "apply_sketch_constraints":
-        meta["constraint_reference"] = _HISTCAD_CONSTRAINT_REFERENCE
-    return meta
-
-
 def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
     if annotation is inspect.Signature.empty or annotation is Any:
         return {"type": "any"}
@@ -780,7 +406,6 @@ def _annotation_to_schema(annotation: Any) -> dict[str, Any]:
 def _tool_args_schema(func: Any) -> dict[str, Any]:
     signature = inspect.signature(func)
     type_hints = get_type_hints(func)
-    descriptions = _doc_arg_descriptions(func)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, parameter in signature.parameters.items():
@@ -789,8 +414,6 @@ def _tool_args_schema(func: Any) -> dict[str, Any]:
         properties[name] = _annotation_to_schema(
             type_hints.get(name, parameter.annotation)
         )
-        if name in descriptions:
-            properties[name]["description"] = descriptions[name]
         if parameter.default is inspect.Signature.empty:
             required.append(name)
         else:
@@ -815,39 +438,6 @@ def _tool_args_schema(func: Any) -> dict[str, Any]:
     return schema
 
 
-def _doc_arg_descriptions(func: Any) -> dict[str, str]:
-    doc = inspect.getdoc(func) or ""
-    descriptions: dict[str, str] = {}
-    in_args = False
-    current_name: str | None = None
-    current_lines: list[str] = []
-    for raw_line in doc.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-        if stripped == "Args:":
-            in_args = True
-            continue
-        if in_args and stripped in {"Returns:", "Raises:", "Examples:"}:
-            break
-        if not in_args or not stripped:
-            continue
-        if not raw_line.startswith(" ") and not raw_line.startswith("\t"):
-            break
-        if ":" in stripped:
-            maybe_name, body = stripped.split(":", 1)
-            if maybe_name.isidentifier():
-                if current_name is not None:
-                    descriptions[current_name] = " ".join(current_lines).strip()
-                current_name = maybe_name
-                current_lines = [body.strip()]
-                continue
-        if current_name is not None:
-            current_lines.append(stripped)
-    if current_name is not None:
-        descriptions[current_name] = " ".join(current_lines).strip()
-    return descriptions
-
-
 def _first_doc_line(func: Any) -> str:
     doc = inspect.getdoc(func)
     if not doc:
@@ -861,55 +451,10 @@ def _primitive_tool_catalog(tool_functions: dict[str, Any]) -> dict[str, Any]:
         tool = {
             "tool_name": name,
             "args_schema": _tool_args_schema(func),
-            "output_exports": _PRIMITIVE_OUTPUT_EXPORTS.get(name, []),
-            "argument_examples": _PRIMITIVE_ARGUMENT_EXAMPLES.get(name, []),
             "doc": _first_doc_line(func),
         }
-        if name == "apply_sketch_constraints":
-            tool["constraint_reference"] = _HISTCAD_CONSTRAINT_REFERENCE
         catalog[name] = tool
     return catalog
-
-
-def _sync_registered_tool_parameter_descriptions(
-    mcp: Any, tool_functions: dict[str, Any]
-) -> None:
-    """Copy docstring-derived arg descriptions into protocol inputSchema."""
-    tool_manager = getattr(mcp, "_tool_manager", None)
-    if tool_manager is None or not hasattr(tool_manager, "get_tool"):
-        return
-    for name, func in tool_functions.items():
-        registered = tool_manager.get_tool(name)
-        if registered is None:
-            continue
-        schema = _tool_args_schema(func)
-        source_properties = schema.get("properties", {})
-        target_properties = registered.parameters.get("properties", {})
-        if not isinstance(source_properties, dict) or not isinstance(
-            target_properties, dict
-        ):
-            continue
-        for arg_name, source_schema in source_properties.items():
-            description = (
-                source_schema.get("description")
-                if isinstance(source_schema, dict)
-                else None
-            )
-            if not description:
-                continue
-            target_schema = target_properties.get(arg_name)
-            if isinstance(target_schema, dict):
-                target_schema.setdefault("description", description)
-        if name == "execute_extrude":
-            extrusion_mode = target_properties.get("extrusion_mode")
-            if isinstance(extrusion_mode, dict):
-                extrusion_mode.setdefault(
-                    "enum", ["auto", "parametric_sketch", "robust_face"]
-                )
-        if name == "execute_boolean":
-            operation = target_properties.get("operation")
-            if isinstance(operation, dict):
-                operation.setdefault("enum", ["Join", "Cut", "Intersect"])
 
 
 def _validate_primitive_plan_payload(
@@ -1052,7 +597,8 @@ def _validate_primitive_constraint_shape(
                     "message": (
                         f"unknown HistCAD constraint type {constraint_name!r}; "
                         "use one of apply_sketch_constraints meta."
-                        "constraint_reference.supported_types from MCP tools/list"
+                        "constraint reference supported_types from "
+                        "freecad://fabrication/primitive-reference"
                     ),
                 }
             )
@@ -2274,7 +1820,7 @@ def register_fabrication_tools(
     # Group A — Coordinate System
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta=_primitive_tool_meta("create_coordinate_system"))
+    @mcp.tool()
     async def create_coordinate_system(
         euler_angles: list[float],
         translation: list[float],
@@ -2498,7 +2044,7 @@ except Exception as _e:
     # Group B — Sketch Geometry
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta=_primitive_tool_meta("create_sketch_geometry"))
+    @mcp.tool()
     async def create_sketch_geometry(
         sketch: dict[str, Any],
         coordinate_system_name: str,
@@ -3035,7 +2581,7 @@ _result_ = {{
             return result.result
         raise ValueError(result.error_traceback or "Failed to check constraints")
 
-    @mcp.tool(meta=_primitive_tool_meta("apply_sketch_constraints"))
+    @mcp.tool()
     async def apply_sketch_constraints(
         sketch_name: str,
         constraints: dict[str, Any],
@@ -3573,7 +3119,7 @@ except Exception as _e:
     # Group D — Feature Execution
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta=_primitive_tool_meta("execute_extrude"))
+    @mcp.tool()
     async def execute_extrude(
         sketch_name: str,
         towards: float,
@@ -4040,7 +3586,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute extrude")
 
-    @mcp.tool(meta=_primitive_tool_meta("execute_boolean"))
+    @mcp.tool()
     async def execute_boolean(
         base_object_name: str,
         tool_object_name: str,
@@ -4104,6 +3650,17 @@ except Exception as _e:
         Raises:
             ValueError: If either object is missing or the operation is
                 invalid.
+
+        Example:
+            Cut a hole tool body from a block::
+
+                result = await execute_boolean(
+                    base_object_name="BlockSolid",
+                    tool_object_name="HoleTool",
+                    operation="Cut",
+                    result_name="BlockWithHole",
+                )
+                # result["feature_name"] is the new boolean result object.
         """
         bridge = await get_bridge()
         code = f"""
@@ -4446,7 +4003,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute boolean")
 
-    @mcp.tool(meta=_primitive_tool_meta("execute_revolve"))
+    @mcp.tool()
     async def execute_revolve(
         sketch_name: str,
         axis: list[list[float]],
@@ -4562,7 +4119,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to execute revolve")
 
-    @mcp.tool(meta=_primitive_tool_meta("execute_helix"))
+    @mcp.tool()
     async def execute_helix(
         sketch_name: str,
         axis: list[list[float]],
@@ -4694,7 +4251,7 @@ except Exception as _e:
     # Group E — Finishing Features
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta=_primitive_tool_meta("feature_fillet"))
+    @mcp.tool()
     async def feature_fillet(
         near_points: list[list[float]],
         radius: float | list[float],
@@ -4847,7 +4404,7 @@ except Exception as _e:
             return result.result
         raise ValueError(result.error_traceback or "Failed to create fillet")
 
-    @mcp.tool(meta=_primitive_tool_meta("feature_chamfer"))
+    @mcp.tool()
     async def feature_chamfer(
         near_points: list[list[float]],
         dist: float,
@@ -4880,6 +4437,17 @@ except Exception as _e:
 
         Raises:
             ValueError: If the body is not found or the chamfer fails.
+
+        Example:
+            Chamfer edges selected from a body snapshot::
+
+                snapshot = await get_body_snapshot(body_name="BlockSolid")
+                result = await feature_chamfer(
+                    body_name="BlockSolid",
+                    near_points=[snapshot["edge_samples"][0]["near_point"]],
+                    dist=1.0,
+                    angle=45.0,
+                )
         """
         bridge = await get_bridge()
         code = f"""
@@ -5282,7 +4850,7 @@ except Exception as _e:
     # Group G — Observation
     # ------------------------------------------------------------------
 
-    @mcp.tool(meta=_primitive_tool_meta("get_body_snapshot"))
+    @mcp.tool()
     async def get_body_snapshot(
         body_name: str | None = None,
         doc_name: str | None = None,
@@ -5729,19 +5297,3 @@ _result_ = {{
             "operation_count": len(op_plan.operations),
             "success": True,
         }
-
-    _sync_registered_tool_parameter_descriptions(
-        mcp,
-        {
-            "create_coordinate_system": create_coordinate_system,
-            "create_sketch_geometry": create_sketch_geometry,
-            "apply_sketch_constraints": apply_sketch_constraints,
-            "execute_extrude": execute_extrude,
-            "execute_boolean": execute_boolean,
-            "execute_revolve": execute_revolve,
-            "execute_helix": execute_helix,
-            "feature_fillet": feature_fillet,
-            "feature_chamfer": feature_chamfer,
-            "get_body_snapshot": get_body_snapshot,
-        },
-    )

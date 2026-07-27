@@ -6,6 +6,7 @@ access to understand the current FreeCAD environment.
 
 Resource URIs:
     - freecad://capabilities - Complete list of all available tools/resources
+    - freecad://fabrication/primitive-reference - Shared primitive planning reference
     - freecad://version - FreeCAD version information
     - freecad://status - Connection and runtime status
     - freecad://documents - List of open documents
@@ -567,6 +568,39 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
             },
         }
         return json.dumps(best_practices, indent=2)
+
+    @mcp.resource("freecad://fabrication/primitive-reference")
+    async def resource_fabrication_primitive_reference() -> str:
+        """Get shared reference data for fabrication primitive tools.
+
+        Returns:
+            JSON string containing:
+                - histcad_sketch_entity_reference: Complete supported sketch
+                  entity schemas and examples for create_sketch_geometry.
+                - histcad_constraint_reference: Complete supported constraint
+                  schemas and examples for apply_sketch_constraints.
+                - planning_policy: Shared no-template primitive planning policy.
+                - workflow_recipes: Common primitive workflow recipes.
+        """
+        from freecad_mcp.tools.fabrication import (
+            _HISTCAD_CONSTRAINT_REFERENCE,
+            _HISTCAD_SKETCH_ENTITY_REFERENCE,
+            _PRIMITIVE_PLANNING_POLICY,
+            _PRIMITIVE_WORKFLOW_RECIPES,
+        )
+
+        reference = {
+            "description": (
+                "Shared reference for fabrication primitive tools. Tool-specific "
+                "usage remains in each tool description; this resource holds long "
+                "schema enumerations and shared planning guidance."
+            ),
+            "histcad_sketch_entity_reference": _HISTCAD_SKETCH_ENTITY_REFERENCE,
+            "histcad_constraint_reference": _HISTCAD_CONSTRAINT_REFERENCE,
+            "planning_policy": _PRIMITIVE_PLANNING_POLICY,
+            "workflow_recipes": _PRIMITIVE_WORKFLOW_RECIPES,
+        }
+        return json.dumps(reference, indent=2)
 
     @mcp.resource("freecad://capabilities")
     async def resource_capabilities() -> str:
@@ -1920,6 +1954,10 @@ Check with: sketch.solve() returns DoF count (0 = fully constrained)""",
                 {
                     "uri": "freecad://best-practices",
                     "description": "★ RECOMMENDED: Read first - AI guidance, best practices, version compatibility, common pitfalls",
+                },
+                {
+                    "uri": "freecad://fabrication/primitive-reference",
+                    "description": "Shared fabrication primitive sketch schema, constraint schema, and planning guidance",
                 },
                 {
                     "uri": "freecad://version",
